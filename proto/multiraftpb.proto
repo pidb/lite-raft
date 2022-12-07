@@ -1,0 +1,28 @@
+syntax = "proto3";
+package pirate;
+
+import "eraftpb.proto";
+
+message ReplicaMetadata {
+    uint64 node_id = 1;
+    uint64 replica_id = 2;
+    uint64 store_id = 3;
+}
+
+message RaftMessage {
+    uint64 group_id = 1;
+    uint64 from_node = 2;
+    uint64 to_node = 3;
+    Message msg = 4;
+}
+
+enum GroupManagerMessageType {
+    MsgBootstrapGroup = 0;
+    MsgRemoveGoup = 1;
+}
+
+message GroupManagerMessage {
+    GroupManagerMessageType msg_type = 1;
+    uint64 group_id = 2;
+    uint64 replica_id = 3;
+}
