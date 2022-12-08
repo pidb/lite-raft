@@ -19,8 +19,8 @@ use super::config::GroupConfig;
 use super::error::Error;
 use super::error::RaftGroupError;
 
-use crate::proto::GroupManagerMessage;
-use crate::proto::GroupManagerMessageType;
+use crate::proto::RaftGroupManagementMessage;
+use crate::proto::RaftGroupManagementMessageType;
 use crate::proto::Message;
 use crate::proto::MessageType;
 use crate::proto::RaftMessage;
@@ -71,12 +71,12 @@ impl<S: RaftStorage, MS: MultiRaftStorage<S>> MultiRaft<S, MS> {
     }
 
     /// Bootstrap a new raft consensus group.
-    pub async fn bootstrap_raft_group(&self, group_id: u64) -> Result<(), Error> {
+    pub async fn bootstrap_raft_group(&self, group_id: u64, replica_id: u64) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let mut msg = GroupManagerMessage::default();
+        let mut msg = RaftGroupManagementMessage::default();
         msg.group_id = group_id;
-        msg.replica_id = 0;
-        msg.set_msg_type(GroupManagerMessageType::MsgBootstrapGroup);
+        msg.replica_id = replica_id;
+        msg.set_msg_type(RaftGroupManagementMessageType::MsgBootstrapGroup);
 
         if let Err(_error) = self.actor_address.manager_group_tx.send((msg, tx)).await {
             panic!("manager group receiver dropped")
@@ -92,7 +92,7 @@ impl<S: RaftStorage, MS: MultiRaftStorage<S>> MultiRaft<S, MS> {
 /// MultiRaftAddress is used to communicate with MultiRaftActor
 pub struct MultiRaftActorAddress {
     raft_message_tx: Sender<RaftMessage>,
-    manager_group_tx: Sender<(GroupManagerMessage, oneshot::Sender<Result<(), Error>>)>,
+    manager_group_tx: Sender<(RaftGroupManagementMessage, oneshot::Sender<Result<(), Error>>)>,
 }
 
 pub struct MultiRaftActor<S: RaftStorage, MS: MultiRaftStorage<S>> {
@@ -104,7 +104,7 @@ pub struct MultiRaftActor<S: RaftStorage, MS: MultiRaftStorage<S>> {
     election_tick: usize,
     heartbeat_tick: usize,
     raft_message_rx: Receiver<RaftMessage>,
-    manager_group_rx: Receiver<(GroupManagerMessage, oneshot::Sender<Result<(), Error>>)>,
+    manager_group_rx: Receiver<(RaftGroupManagementMessage, oneshot::Sender<Result<(), Error>>)>,
     storage: MS,
     _m1: PhantomData<S>,
 }
@@ -202,25 +202,31 @@ impl<S: RaftStorage, MS: MultiRaftStorage<S>> MultiRaftActor<S, MS> {
     #[tracing::instrument(name = "MultiRaftActor::handle_manager_group_message", skip(self))]
     async fn handle_manager_group_message(
         &mut self,
-        msg: GroupManagerMessage,
+        msg: RaftGroupManagementMessage,
         tx: oneshot::Sender<Result<(), Error>>,
     ) {
         let res = match msg.msg_type() {
-            GroupManagerMessageType::MsgBootstrapGroup => self.bootstrap_group(msg.group_id).await,
-            GroupManagerMessageType::MsgRemoveGoup => todo!(),
+            RaftGroupManagementMessageType::MsgInitialGroup => self.initial_group(msg).await,
+            RaftGroupManagementMessageType::MsgBootstrapGroup => self.bootstrap_group_replica(msg.group_id, msg.replica_id).await,
+            RaftGroupManagementMessageType::MsgRemoveGoup => todo!(),
         };
 
         if let Err(_error) = tx.send(res) {}
     }
 
-    /// Boot a raft consensus group.
+    /// Initial the raft consensus group and start a replica in current node.
+    async fn initial_group(&mut self, msg: RaftGroupManagementMessage) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    /// Bootstrap a replica of the raft consensus group.
     #[tracing::instrument(name = "MultiRaftActor::bootstrap_group", skip(self))]
-    async fn bootstrap_group(&mut self, group_id: u64) -> Result<(), Error> {
+    async fn bootstrap_group_replica(&mut self, group_id: u64, mut replica_id: u64) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroupAlreayExists(group_id));
         }
 
-        let mut replica_id = 0;
+        // let mut replica_id = 0;
         let group_storage = self
             .storage
             .group_storage(group_id, replica_id)
@@ -239,6 +245,8 @@ impl<S: RaftStorage, MS: MultiRaftStorage<S>> MultiRaftActor<S, MS> {
             if self.store_id == replica_metadata.store_id {
                 if replica_id == 0 {
                     replica_id = *voter_id;
+                } else if replica_id < *voter_id {
+
                 }
                 break;
             }
@@ -306,53 +314,6 @@ impl<S: RaftStorage, MS: MultiRaftStorage<S>> MultiRaftActor<S, MS> {
         assert_ne!(group_id, 0);
         node.group_map.insert(group_id, ());
     }
-
-    // async fn create_group(&mut self, group_id: u64, replica_id: u64) -> Result<(), Error> {
-    //     if self.groups.contains_key(&group_id) {
-    //         return Err(Error::RaftGroupAlreayExists(group_id));
-    //     }
-
-    //     let mut replica_id = replica_id;
-    //     let group_storage = self
-    //         .storage
-    //         .group_storage(group_id, replica_id)
-    //         .await
-    //         .unwrap();
-    //     let initial_raft_state = group_storage.initial_state().unwrap();
-
-    //     let voters = initial_raft_state.conf_state.voters;
-    //     for voter_id in voters.iter() {
-    //         let replica_metadata = self
-    //             .storage
-    //             .replica_metadata(group_id, *voter_id)
-    //             .await
-    //             .unwrap();
-    //         if self.replica_in_group(&replica_metadata) {
-    //             // 如果 replica_id 等于 0, 说明这是一个初始化 group 的请求,
-    //             // 应该选择 initial_state 中的 id.
-    //             //
-    //             // 如果 replica_id 不等于0 并且小于 voter_id, 则说明这是收到其他远程 node 发来的消息
-    //             // 并创建 group, 但是 replica_id 发生了不一致.
-    //             if replica_id == 0 {
-    //                 replica_id = *voter_id;
-    //             } else if replica_id < *voter_id {
-    //                 return Err(Error::InconsistentReplicaId(
-    //                     replica_id,
-    //                     *voter_id,
-    //                     self.store_id,
-    //                 ));
-    //             }
-    //         }
-    //     }
-
-    //     if replica_id == 0 {
-    //         return Err(Error::ReplicaNotFound(group_id, self.store_id));
-    //     }
-
-    //     Ok(())
-    // }
-
-    
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -375,7 +336,7 @@ async fn test_bootstrap_group() {
         .await;
 
     let multi_raft = MultiRaft::new(group_cfg, node_id, store_id, storage);
-    multi_raft.bootstrap_raft_group(1).await.unwrap();
+    multi_raft.bootstrap_raft_group(1, 1).await.unwrap();
 
     // tokio::time::sleep(Duration::from_secs(1000)).await;
 }

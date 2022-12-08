@@ -1,11 +1,10 @@
-
 use std::mem::transmute;
 
 use crate::proto::ConfState;
 use crate::proto::Entry;
 use crate::proto::HardState;
-use crate::proto::Snapshot;
 use crate::proto::ReplicaMetadata;
+use crate::proto::Snapshot;
 
 use futures::Future;
 
@@ -68,24 +67,19 @@ pub fn transmute_raft_state(rs: RaftState) -> raft::RaftState {
 }
 
 /// Reinterprets the `&Vec<RaftEntry>` to `&Vec<RaftEntry>`.
-/// 
+///
 /// N.B. The reason why this unsafe method provided is because entries need to be persisted,
 /// but the storeage interface we provide about persisting entires requires type `&Vec<RaftEntry>`,
 /// because that is a reference and providing into requires clone whole `&Vec<Entry>` which is expensive.
 #[inline]
 pub fn transmute_entries_ref<'a>(entries: &'a Vec<Entry>) -> &'a Vec<raft::prelude::Entry> {
-    unsafe {
-        std::mem::transmute(entries)
-    }
+    unsafe { std::mem::transmute(entries) }
 }
 
 #[inline]
 pub fn transmute_raft_entries_ref<'a>(entries: &'a Vec<raft::prelude::Entry>) -> &'a Vec<Entry> {
-    unsafe {
-        std::mem::transmute(entries)
-    }
+    unsafe { std::mem::transmute(entries) }
 }
-
 
 #[inline]
 pub fn transmute_entries(entries: Vec<Entry>) -> Vec<raft::prelude::Entry> {
@@ -137,7 +131,6 @@ pub trait RaftSnapshotBuilder: Clone + Send + Sync + 'static {
 //----------------------------------------------------------------------
 // MultiRaft storage trait
 //----------------------------------------------------------------------
-
 
 /// RaftStorage per replica
 pub trait RaftStorage: RaftSnapshotBuilder + Clone + Send + Sync + 'static {
@@ -198,8 +191,8 @@ pub trait RaftStorage: RaftSnapshotBuilder + Clone + Send + Sync + 'static {
     /// A snapshot's index must not less than the `request_index`.
     fn snapshot(&self, request_index: u64) -> Result<Snapshot>;
 
-     /// install snapshot
-     fn apply_snapshot(&self, snapshot: Snapshot) -> Result<()>;
+    /// install snapshot
+    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<()>;
 }
 
 #[derive(Clone)]
@@ -209,9 +202,7 @@ pub struct RaftStorageImpl<S: RaftStorage> {
 
 impl<S: RaftStorage> RaftStorageImpl<S> {
     pub fn new(storage_impl: S) -> Self {
-        Self {
-            storage_impl
-        }
+        Self { storage_impl }
     }
 }
 
@@ -240,7 +231,6 @@ impl<S: RaftStorage> RaftStorage for RaftStorageImpl<S> {
     fn initial_state(&self) -> Result<RaftState> {
         self.storage_impl.initial_state()
     }
-
 
     #[inline]
     fn last_index(&self) -> Result<u64> {
@@ -325,23 +315,48 @@ impl<S: RaftStorage> raft::storage::Storage for RaftStorageImpl<S> {
     }
 }
 
-
-
 //----------------------------------------------------------------------
 // MultiRaft storage trait
 //----------------------------------------------------------------------
 
 /// MultiRaftStorage per group
-pub trait  MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
+pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     // GAT trait for group_storage
-    type GroupStorageFuture<'life0>: Send + Future<Output =  Result<RaftStorageImpl<S>>>
+    type GroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0;
-    
+
     // GAT trait for replica_metadata
-    type ReplicaMetadataFuture<'life0>: Send + Future<Output =  Result<ReplicaMetadata>>
+    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<ReplicaMetadata>>
     where
         Self: 'life0;
+
+    type CreateGroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
+    where
+        Self: 'life0;
+
+    type CreateGroupStorageWithConfStateFuture<'life0, T>: Send
+        + Future<Output = Result<RaftStorageImpl<S>>>
+    where
+        Self: 'life0,
+        ConfState: From<T>,
+        T: Send;
+
+    fn create_group_storage(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Self::CreateGroupStorageFuture<'_>;
+
+    fn create_group_storage_with_conf_state<T>(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        conf_state: T,
+    ) -> Self::CreateGroupStorageWithConfStateFuture<'_, T>
+    where
+        ConfState: From<T>,
+        T: Send;
 
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
 

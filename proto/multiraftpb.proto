@@ -16,13 +16,15 @@ message RaftMessage {
     Message msg = 4;
 }
 
-enum GroupManagerMessageType {
-    MsgBootstrapGroup = 0;
-    MsgRemoveGoup = 1;
+enum RaftGroupManagementMessageType {
+    MsgInitialGroup = 0;
+    MsgBootstrapGroup = 1;
+    MsgRemoveGoup = 2;
 }
 
-message GroupManagerMessage {
-    GroupManagerMessageType msg_type = 1;
+message RaftGroupManagementMessage {
+    RaftGroupManagementMessageType msg_type = 1;
     uint64 group_id = 2;
     uint64 replica_id = 3;
+    repeated uint64 initial_voters = 5;
 }

@@ -1,5 +1,6 @@
 mod memory;
 mod storage;
+mod rocksdb;
 
 pub use self::storage::transmute_entries;
 pub use self::storage::transmute_entry;

@@ -24,7 +24,6 @@ use crate::storage::RaftStorageImpl;
 use crate::storage::Result;
 use crate::storage::StorageError;
 
-
 /// The Memory Storage Core instance holds the actual state of the storage struct. To access this
 /// value, use the `rl` and `wl` functions on the main MemStorage implementation.
 #[allow(unused)]
@@ -304,7 +303,7 @@ impl RaftStorage for MemStorage {
     /// Implements the Storage trait.
     fn entries(&self, low: u64, high: u64, max_size: impl Into<Option<u64>>) -> Result<Vec<Entry>> {
         let max_size = max_size.into();
-        let mut core = self.wl();
+        let core = self.wl();
         if low < core.first_index() {
             return Err(StorageError::Compacted);
         }
@@ -450,14 +449,59 @@ impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
     type ReplicaMetadataFuture<'life0> = impl Future<Output =  super::storage::Result<crate::proto::ReplicaMetadata>>
         where
             Self: 'life0;
+
+    type CreateGroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+        where
+            Self: 'life0;
+
+    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+        where
+            Self: 'life0,
+            ConfState: From<T>,
+            T: Send;
+
+    #[allow(unused)]
+    fn create_group_storage(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Self::CreateGroupStorageFuture<'_> {
+        async move {
+            let mut wl = self.groups.write().await;
+            assert_ne!(wl.contains_key(&group_id), true);
+            let storage = MemStorage::new();
+            wl.insert(group_id, storage.clone());
+            Ok(RaftStorageImpl::new(storage))
+        }
+    }
+
+    #[allow(unused)]
+    fn create_group_storage_with_conf_state<T>(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        conf_state: T,
+    ) -> Self::CreateGroupStorageWithConfStateFuture<'_, T>
+    where
+        ConfState: From<T>,
+        T: Send,
+    {
+        async move {
+            let mut wl = self.groups.write().await;
+            assert_ne!(wl.contains_key(&group_id), true);
+            let storage = MemStorage::new_with_conf_state(conf_state);
+            wl.insert(group_id, storage.clone());
+            Ok(RaftStorageImpl::new(storage))
+        }
+    }
+
+    #[allow(unused)]
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_> {
         async move {
             let mut wl = self.groups.write().await;
             match wl.get_mut(&group_id) {
                 None => {
-                    let store = MemStorage::new();
-                    wl.insert(group_id, store.clone());
-                    Ok(RaftStorageImpl::new(store))
+                    panic!("the group ({}) does'nt storage", group_id)
                 }
                 Some(store) => Ok(RaftStorageImpl::new(store.clone())),
             }

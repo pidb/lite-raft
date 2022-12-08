@@ -29,6 +29,10 @@ console-subscriber = {version = "0.1"}
 bytes = { version = "1" }
 prost = { version = "0.11" }
 
+[dependencies.rocksdb]
+git = "https://github.com/tikv/rust-rocksdb.git"
+package = "rocksdb"
+features = ["encryption"]
 
 
 [build-dependencies]
