@@ -381,8 +381,17 @@ impl RaftStorage for MemStorage {
         Ok(self.rl().hard_state().clone())
     }
 
-    fn set_hardstate(&self, hs: HardState) {
-        self.wl().set_hardstate(hs)
+    fn set_hardstate(&self, hs: HardState) -> Result<()> {
+        Ok(self.wl().set_hardstate(hs))
+    }
+
+    fn set_confstate(&self, cs: ConfState) -> Result<()> {
+        Ok(self.wl().set_conf_state(cs))
+    }
+
+    fn get_confstate(&self) -> Result<ConfState> {
+        let rl = self.rl();
+        Ok(rl.raft_state.conf_state.clone())
     }
 
     fn set_commit(&self, commit: u64) {
@@ -405,6 +414,8 @@ pub struct MultiRaftGroupMemoryStorage {
     node_id: u64,
     store_id: u64,
     groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
+    // group_id map to multiple replica_metadata.
+    replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaMetadata>>>>,
 }
 
 impl MultiRaftGroupMemoryStorage {
@@ -413,6 +424,7 @@ impl MultiRaftGroupMemoryStorage {
             node_id,
             store_id,
             groups: Default::default(),
+            replicas: Default::default(),
         }
     }
 
@@ -442,7 +454,7 @@ impl MultiRaftGroupMemoryStorage {
 }
 
 impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
-    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<Option<super::RaftStorageImpl<MemStorage>>>>
         where
             Self: 'life0;
 
@@ -459,6 +471,10 @@ impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
             Self: 'life0,
             ConfState: From<T>,
             T: Send;
+
+    type ReplicaInStoreFuture<'life0> = impl Future<Output = super::storage::Result<Option<u64>>>
+        where
+            Self: 'life0;
 
     #[allow(unused)]
     fn create_group_storage(
@@ -500,21 +516,62 @@ impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
         async move {
             let mut wl = self.groups.write().await;
             match wl.get_mut(&group_id) {
-                None => {
-                    panic!("the group ({}) does'nt storage", group_id)
-                }
-                Some(store) => Ok(RaftStorageImpl::new(store.clone())),
+                None => Ok(None),
+                Some(store) => Ok(Some(RaftStorageImpl::new(store.clone()))),
             }
         }
     }
 
-    fn replica_metadata(&self, _group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_> {
+    fn replica_metadata(&self, group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_> {
         async move {
-            return Ok(ReplicaMetadata {
-                node_id: self.node_id,
-                replica_id,
-                store_id: self.store_id,
-            });
+            let mut wl = self.replicas.write().await;
+            return match wl.get_mut(&group_id) {
+                Some(replicas) => {
+                    match replicas
+                        .iter()
+                        .find(|replica_metadata| replica_metadata.replica_id == replica_id)
+                    {
+                        Some(replica) => Ok(replica.clone()),
+                        None => {
+                            let replica_metadata = ReplicaMetadata {
+                                node_id: self.node_id,
+                                store_id: self.store_id,
+                                replica_id,
+                            };
+                            replicas.push(replica_metadata.clone());
+                            Ok(replica_metadata.clone())
+                        }
+                    }
+                }
+                None => {
+                    let replica_metadata = ReplicaMetadata {
+                        node_id: self.node_id,
+                        store_id: self.store_id,
+                        replica_id,
+                    };
+                    let replicas = vec![replica_metadata.clone()];
+                    wl.insert(group_id, replicas);
+                    Ok(replica_metadata)
+                }
+            };
+        }
+    }
+
+    fn replica_in_store(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_> {
+        async move {
+            let rl = self.replicas.read().await;
+            if !rl.contains_key(&group_id) {
+                return Ok(None);
+            }
+
+            let replicas = rl.get(&group_id).unwrap();
+            for replica_metadata in replicas.iter() {
+                if store_id == replica_metadata.store_id {
+                    return Ok(Some(replica_metadata.replica_id));
+                }
+            }
+
+            Ok(None)
         }
     }
 }

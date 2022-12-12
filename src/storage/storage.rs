@@ -5,6 +5,7 @@ use crate::proto::Entry;
 use crate::proto::HardState;
 use crate::proto::ReplicaMetadata;
 use crate::proto::Snapshot;
+use crate::proto::Message;
 
 use futures::Future;
 
@@ -59,6 +60,11 @@ pub type Result<T> = std::result::Result<T, StorageError>;
 #[inline]
 pub fn transmute_error(error: StorageError) -> raft::StorageError {
     unsafe { transmute::<StorageError, raft::StorageError>(error) }
+}
+
+#[inline]
+pub fn transmute_message(msg: Message) -> raft::prelude::Message {
+    unsafe { transmute::<Message, raft::prelude::Message>(msg) }
 }
 
 #[inline]
@@ -163,7 +169,13 @@ pub trait RaftStorage: RaftSnapshotBuilder + Clone + Send + Sync + 'static {
     fn get_hard_state(&self) -> Result<HardState>;
 
     /// Saves the current HardState.
-    fn set_hardstate(&self, hs: HardState);
+    fn set_hardstate(&self, hs: HardState) -> Result<()>;
+
+     /// Get the current HardState.
+     fn get_confstate(&self) -> Result<ConfState>;
+
+     /// Saves the current HardState.
+     fn set_confstate(&self, cs: ConfState)-> Result<()>;
 
     /// Returns the term of entry idx, which must be in the range
     /// [first_index()-1, last_index()]. The term of the entry before
@@ -243,8 +255,18 @@ impl<S: RaftStorage> RaftStorage for RaftStorageImpl<S> {
     }
 
     #[inline]
-    fn set_hardstate(&self, hs: HardState) {
+    fn set_hardstate(&self, hs: HardState) -> Result<()> {
         self.storage_impl.set_hardstate(hs)
+    }
+
+    #[inline]
+    fn get_confstate(&self) -> Result<ConfState> {
+        self.storage_impl.get_confstate()
+    }
+
+    #[inline]
+    fn set_confstate(&self, cs: ConfState)-> Result<()> {
+        self.storage_impl.set_confstate(cs)
     }
 
     #[inline]
@@ -322,7 +344,7 @@ impl<S: RaftStorage> raft::storage::Storage for RaftStorageImpl<S> {
 /// MultiRaftStorage per group
 pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     // GAT trait for group_storage
-    type GroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
+    type GroupStorageFuture<'life0>: Send + Future<Output = Result<Option<RaftStorageImpl<S>>>>
     where
         Self: 'life0;
 
@@ -331,6 +353,10 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     where
         Self: 'life0;
 
+    type ReplicaInStoreFuture<'life0>: Send + Future<Output = Result<Option<u64>>>
+    where
+        Self: 'life0;
+    
     type CreateGroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0;
@@ -358,7 +384,11 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
         ConfState: From<T>,
         T: Send;
 
+
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
 
+    /// Get the metadata of `replica_id` and create if it does not exist.
     fn replica_metadata(&self, group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_>;
+
+    fn replica_in_store(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_>;
 }

@@ -1,13 +1,28 @@
+use crate::storage::StorageError;
+use super::transport::TransportError;
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    #[error("{0}")]
+    BadParameter(String),
+
+    /// Raft storage error occurred.
+    #[error("{0}")]
+    Store(#[from] StorageError),
+
+    /// Transport error occurred.
+    #[error("{0}")]
+    Transport(#[from] TransportError),
+
+    #[error("{0}")]
+    RaftGroup(#[from] ::raft::Error),
+
      /// A raft group error occurred.
      #[error("{0}")]
     RaftGroupError(#[from] RaftGroupError),
 
     #[error("raft group ({0}) already exists")]
     RaftGroupAlreayExists(u64),
-    
-    
 
     #[error("inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}")]
     InconsistentReplicaId(u64, u64, u64),

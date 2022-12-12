@@ -28,12 +28,11 @@ tracing-subscriber = "0.3"
 console-subscriber = {version = "0.1"}
 bytes = { version = "1" }
 prost = { version = "0.11" }
+smallvec = { version = "1" }
 
 [dependencies.rocksdb]
-git = "https://github.com/tikv/rust-rocksdb.git"
-package = "rocksdb"
-features = ["encryption"]
-
+default-features = false
+features = ["lz4"]
 
 [build-dependencies]
 prost-build = { version = "0.11" }

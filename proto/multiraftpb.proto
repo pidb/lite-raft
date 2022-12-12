@@ -9,12 +9,20 @@ message ReplicaMetadata {
     uint64 store_id = 3;
 }
 
+// RaftMessageRequest is the request used to send raft messages using our
+// protobuf-based RPC codec.
 message RaftMessage {
     uint64 group_id = 1;
-    uint64 from_node = 2;
-    uint64 to_node = 3;
+    ReplicaMetadata from_replica = 2;
+    ReplicaMetadata to_replica = 3;
     Message msg = 4;
 }
+
+// RaftMessageResponse is an empty message returned by raft RPCs. If a
+// response is needed it will be sent as a separate message.
+message RaftMessageResponse {
+}
+
 
 enum RaftGroupManagementMessageType {
     MsgInitialGroup = 0;
