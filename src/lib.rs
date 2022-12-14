@@ -3,7 +3,7 @@
 pub mod proto;
 
 pub mod util;
+pub mod rsm;
 mod storage;
 mod multiraft;
-
 

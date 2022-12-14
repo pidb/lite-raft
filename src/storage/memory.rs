@@ -557,7 +557,7 @@ impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
         }
     }
 
-    fn replica_in_store(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_> {
+    fn replica_in_node(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_> {
         async move {
             let rl = self.replicas.read().await;
             if !rl.contains_key(&group_id) {

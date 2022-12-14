@@ -1,40 +1,54 @@
 use std::collections::hash_map::HashMap;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::time::Duration;
 
-use prost::encoding::group;
+use prost::Message as ProstMessage;
 use raft::RawNode;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::interval;
-use tokio::sync::watch;
 
-use tracing::trace;
+use tracing::error;
 use tracing::info;
+use tracing::trace;
 
 use raft::Config;
 
 use super::config::GroupConfig;
 use super::error::Error;
+use super::error::ProposalError;
 use super::error::RaftGroupError;
+use super::proposal::Proposal;
+use super::proposal::ReadIndexProposal;
 use super::transport::MessageInterface;
 use super::transport::Transport;
+use super::write::GroupWriteRequest;
+use super::write::WriteAddress;
+use super::write::WriteTaskRequest;
+use super::write::WriterActor;
 
-use crate::proto::Message;
+use crate::proto::AppWriteRequest;
+use crate::proto::AppWriteResponse;
+use crate::proto::AppReadIndexRequest;
+use crate::proto::AppReadIndexResponse;
+use crate::proto::ReadIndexContext;
 use crate::proto::MessageType;
 use crate::proto::RaftGroupManagementMessage;
 use crate::proto::RaftGroupManagementMessageType;
 use crate::proto::RaftMessage;
 use crate::proto::ReplicaMetadata;
-use crate::storage::MultiRaftGroupMemoryStorage;
+use crate::proto::Message;
+use crate::storage::transmute_message;
+use crate::storage::transmute_raft_snapshot_metadata;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
 use crate::storage::RaftStorageImpl;
 use crate::storage::StorageError;
-use crate::storage::transmute_message;
 // use crate::proto::Error;
 
 const NO_GORUP: u64 = 0;
@@ -50,7 +64,7 @@ pub struct RaftGroup<RS: RaftStorage> {
     group_id: u64,
     replica_id: u64,
     raft_group: RawNode<RaftStorageImpl<RS>>,
-    // track the nodes which members of the raft consensus group
+    // track the nodes which members ofq the raft consensus group
     node_ids: Vec<u64>,
     leader: ReplicaMetadata,
 }
@@ -73,14 +87,20 @@ where
     _m4: PhantomData<MRS>,
 }
 
-impl<MI, T, RS, MRS> MultiRaft<MI, T, RS, MRS> 
+impl<MI, T, RS, MRS> MultiRaft<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
-    pub fn new(config: GroupConfig, node_id: u64, store_id: u64,transport: T, storage: MRS) -> Self {
+    pub fn new(
+        config: GroupConfig,
+        node_id: u64,
+        store_id: u64,
+        transport: T,
+        storage: MRS,
+    ) -> Self {
         let (actor_join_handle, actor_address) =
             MultiRaftActor::spawn(&config, node_id, store_id, transport, storage);
         Self {
@@ -93,6 +113,13 @@ where
             _m3: PhantomData,
             _m4: PhantomData,
         }
+    }
+
+    pub async fn write(&self, request: AppWriteRequest) -> Result<AppWriteResponse, Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_) = self.actor_address.write_propose_tx.send((request, tx)).await {}
+
+        rx.await.unwrap()
     }
 
     pub async fn initial_raft_group(&self, msg: RaftGroupManagementMessage) -> Result<(), Error> {
@@ -132,6 +159,10 @@ where
 
 /// MultiRaftAddress is used to communicate with MultiRaftActor
 pub struct MultiRaftActorAddress {
+    write_propose_tx: Sender<(
+        AppWriteRequest,
+        oneshot::Sender<Result<AppWriteResponse, Error>>,
+    )>,
     raft_message_tx: Sender<RaftMessage>,
     manager_group_tx: Sender<(
         RaftGroupManagementMessage,
@@ -153,18 +184,24 @@ where
     tick_interval: Duration,
     election_tick: usize,
     heartbeat_tick: usize,
+    write_propose_rx: Receiver<(
+        AppWriteRequest,
+        oneshot::Sender<Result<AppWriteResponse, Error>>,
+    )>,
     raft_message_rx: Receiver<RaftMessage>,
     manager_group_rx: Receiver<(
         RaftGroupManagementMessage,
         oneshot::Sender<Result<(), Error>>,
     )>,
+
+    write_actor_address: WriteAddress,
     storage: MRS,
     transport: T,
     _m1: PhantomData<RS>,
     _m2: PhantomData<MI>,
 }
 
-impl<MI, T, RS, MRS> MultiRaftActor<MI, T, RS, MRS> 
+impl<MI, T, RS, MRS> MultiRaftActor<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
@@ -178,9 +215,17 @@ where
         store_id: u64,
         transport: T,
         storage: MRS,
+        stop: watch::Receiver<bool>,
     ) -> (JoinHandle<()>, MultiRaftActorAddress) {
         let (raft_message_tx, raft_message_rx) = channel(1);
         let (manager_group_tx, manager_group_rx) = channel(1);
+        
+        let (write_actor_join, write_actor_address) = WriterActor::spawn(stop.clone());
+
+        // create write propose channel
+        let (write_propose_tx, write_propose_rx) = channel(1);
+
+
         let actor = MultiRaftActor {
             store_id,
             node_id,
@@ -189,21 +234,27 @@ where
             tick_interval: Duration::from_millis(cfg.tick_interval),
             election_tick: cfg.election_tick,
             heartbeat_tick: cfg.heartbeat_tick,
+            write_propose_rx,
             raft_message_rx,
             manager_group_rx,
             storage,
             transport,
+            write_actor_address,
             _m1: PhantomData,
             _m2: PhantomData,
         };
 
-        let join = tokio::spawn(async move {
-            actor.start().await;
-        });
+
+        let main_loop = async move {
+            actor.start(stop).await;
+        };
+
+        let join = tokio::spawn(main_loop);
 
         let address = MultiRaftActorAddress {
             raft_message_tx,
             manager_group_tx,
+            write_propose_tx,
         };
 
         (join, address)
@@ -221,7 +272,7 @@ where
             ticker.tick().await;
             tokio::select! {
                 // handle stop
-                _ = stop.changed() => { 
+                _ = stop.changed() => {
                     if *stop.borrow() {
                         break
                     }
@@ -242,9 +293,9 @@ where
                     activity_groups.extend(changed_groups.into_iter());
                 },
                 else => {
-                    self.handle_ready(&mut activity_groups).await;
+                    self.handle_ready(&activity_groups).await;
                     activity_groups.clear();
-                },   
+                },
             }
         }
     }
@@ -260,13 +311,22 @@ where
             raft_msg.set_msg_type(MessageType::MsgHeartbeat);
             let msg = RaftMessage {
                 group_id: NO_GORUP,
-                from_node: self.node_id,
-                to_node: *node_id,
+                from_replica: Some(ReplicaMetadata {
+                    node_id: self.node_id,
+                    store_id: 0,
+                    replica_id: 0,
+                }),
+                to_replica: Some(ReplicaMetadata{
+                    node_id: *node_id,
+                    store_id: 0,
+                    replica_id: 0,
+                }),
                 msg: Some(raft_msg),
             };
 
-            // TODO: send
-            self.transport.send(msg).await;
+            if let Err(_error) = self.transport.send(msg) {
+
+            }
         }
     }
 
@@ -289,56 +349,73 @@ where
             Some(to) => to,
         };
 
+        let send_response = || {
+            let response_msg = {
+                let mut msg = Message::default();
+                msg.from = self.node_id;
+                msg.to = from.node_id;
+                msg.set_msg_type(MessageType::MsgHeartbeatResponse);
+                RaftMessage {
+                    group_id: NO_GORUP,
+                    from_replica: Some(ReplicaMetadata {
+                        node_id: self.node_id,
+                        store_id: 0,
+                        replica_id: 0,
+                    }),
+                    to_replica: Some(ReplicaMetadata {
+                        node_id: from.node_id,
+                        store_id: 0,
+                        replica_id: 0,
+                    }),
+                    msg: Some(msg),
+                }
+            };
+    
+            self.transport.send(response_msg).unwrap();
+        };
 
         let node = match self.nodes.get(&from.node_id) {
-            None => return,
+            None =>  {
+                send_response();
+                return
+            },
             Some(node) => node,
         };
 
+        let mut fanouted_groups = 0;
+        let mut fanouted_followers = 0;
         for (group_id, _) in node.group_map.iter() {
             let group = match self.groups.get_mut(group_id) {
                 None => continue,
                 Some(group) => group,
             };
 
+            fanouted_groups += 1;
+
             if group.leader.node_id != from.node_id || from.node_id != self.node_id {
                 continue;
             }
 
             // gets the replica stored in this node.
-           let from_replica_id = self.storage.replica_in_store(*group_id, from.store_id).await.unwrap();
-           let to_replica_id = self.storage.replica_in_store(*group_id, to.store_id).await.unwrap();
-
+            let from_replica_id = self
+                .storage
+                .replica_in_node(*group_id, from.node_id)
+                .await
+                .unwrap().unwrap();
+            let to_replica_id = self
+                .storage
+                .replica_in_node(*group_id, to.node_id)
+                .await
+                .unwrap().unwrap();
+            fanouted_followers += 1;
             let mut msg = raft::prelude::Message::default();
             msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
             msg.from = from_replica_id;
             msg.to = to_replica_id;
             group.raft_group.step(msg).unwrap();
-
         }
 
-        let response_msg = {
-            let mut msg =  Message::default();
-            msg.set_msg_type(MessageType::MsgHeartbeatResponse);
-            RaftMessage{
-                group_id: NO_GORUP,
-                from_replica: Some(ReplicaMetadata{
-                    node_id: self.node_id,
-                    store_id: self.store_id,
-                    replica_id: 0,
-                }),
-                to_replica: Some(ReplicaMetadata{
-                    node_id: from.node_id,
-                    store_id: from.store_id,
-                    replica_id: 0
-                }),
-                msg: Some(msg),
-            }
-        };
-
-        self.transport.send(response_msg).await.unwrap();
-
-
+        send_response();
     }
 
     async fn fanout_heartbeat_response(&mut self, raft_msg: RaftMessage) {
@@ -358,7 +435,6 @@ where
         };
 
         for (group_id, _) in node.group_map.iter() {
-
             let group = match self.groups.get_mut(group_id) {
                 None => continue,
                 Some(group) => group,
@@ -368,9 +444,17 @@ where
                 continue;
             }
 
-                // gets the replica stored in this node.
-           let from_replica_id = self.storage.replica_in_store(*group_id, from.store_id).await.unwrap();
-           let to_replica_id = self.storage.replica_in_store(*group_id, to.store_id).await.unwrap();
+            // gets the replica stored in this node.
+            let from_replica_id = self
+                .storage
+                .replica_in_node(*group_id, from.node_id)
+                .await
+                .unwrap().unwrap();
+            let to_replica_id = self
+                .storage
+                .replica_in_node(*group_id, to.node_id)
+                .await
+                .unwrap().unwrap();
 
             let mut msg = raft::prelude::Message::default();
             msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
@@ -390,16 +474,17 @@ where
             None => {
                 let group_id = raft_msg.group_id;
                 let replica_id = to_replica.replica_id;
-                self.bootstrap_group_replica(group_id, replica_id).await.unwrap();
+                self.bootstrap_group_replica(group_id, replica_id)
+                    .await
+                    .unwrap();
                 self.groups.get_mut(&group_id).unwrap()
-            },
+            }
         };
 
         let msg = raft_msg.msg.take().unwrap();
-        group.raft_group.step(transmute_message(msg)).unwrap(); 
+        group.raft_group.step(transmute_message(msg)).unwrap();
     }
 
-   
     #[tracing::instrument(name = "MultiRaftActor::handle_manager_group_message", skip(self))]
     async fn handle_manager_group_message(
         &mut self,
@@ -411,8 +496,7 @@ where
             RaftGroupManagementMessageType::MsgInitialGroup => {
                 activity_groups.push(msg.group_id);
                 self.initial_group(msg).await
-
-            },
+            }
             RaftGroupManagementMessageType::MsgBootstrapGroup => {
                 activity_groups.push(msg.group_id);
                 self.bootstrap_group_replica(msg.group_id, msg.replica_id)
@@ -515,7 +599,7 @@ where
         // get the raft consensus group reated to storage, create if not exists.
         let group_storage = match self
             .storage
-            .group_storage(group_id, replica_id) 
+            .group_storage(group_id, replica_id)
             .await
             .map_err(|err| Error::Store(err))?
         {
@@ -615,8 +699,120 @@ where
         node.group_map.insert(group_id, ());
     }
 
-    async fn handle_ready(&mut self, mut activity_groups: &Vec<u64>) {
+    async fn handle_write_request(
+        &mut self,
+        request: AppWriteRequest,
+    ) -> Result<Proposal<AppWriteResponse>, Error> {
+        let group_id = request.group_id;
+        let group = self.groups.get_mut(&group_id).unwrap();
+        let term = group.raft_group.raft.term;
+        if request.term != 0 && term > request.term {
+            return Err(Error::Proposal(ProposalError::Stale(term)));
+        }
 
+        // propose to raft gorup
+        let expected_next_index = group.raft_group.raft.raft_log.last_index() + 1;
+        let _ = group
+            .raft_group
+            .propose(request.context, request.data)
+            .map_err(|err| Error::Proposal(ProposalError::Other(Box::new(err))))?;
+
+        let index = group.raft_group.raft.raft_log.last_index() + 1;
+        if expected_next_index != index {
+            return Err(Error::Proposal(ProposalError::Unexpected(index)));
+        }
+
+        Ok(Proposal::<AppWriteResponse> {
+            index,
+            term,
+            is_conf_change: false,
+            tx: None,
+        })
+    }
+
+    async fn handle_read_index_request(&mut self, request: AppReadIndexRequest) -> Result<ReadIndexProposal<AppReadIndexResponse>, Error>{
+        let group_id = request.group_id;
+        let uuid = uuid::Uuid::new_v4();
+
+        let group = self.groups.get_mut(&group_id).unwrap();
+        let term = group.raft_group.raft.term;
+        let read_context = match request.context {
+            None => vec![],
+            Some(ctx) => ctx.encode_length_delimited_to_vec(),
+        };
+
+        group.raft_group.read_index(read_context);
+
+        Ok(ReadIndexProposal::<AppReadIndexResponse> { uuid, read_index: None, context: None, tx: None })
+ 
+    }
+
+    async fn handle_ready(&mut self, activity_groups: &Vec<u64>) -> HashMap<u64, raft::Ready> {
+        let mut ready_groups = HashMap::new();
+        let mut write_task_request = WriteTaskRequest::default();
+        for group_id in activity_groups.iter() {
+            let group = match self.groups.get_mut(group_id) {
+                None => continue,
+                Some(group) => group,
+            };
+
+            if !group.raft_group.has_ready() {
+                continue;
+            }
+
+            let mut ready_group = group.raft_group.ready();
+            // we need to know which replica in raft group is ready.
+
+            let replica = match self
+                .storage
+                .replica_in_node(*group_id, self.store_id)
+                .await
+            {
+                Err(error) => {
+                    error!("storage error: {}", error);
+                    continue;
+                }
+                Ok(replica) => replica,
+            };
+
+            // if we can't look up the replica in storage, but the group is ready,
+            // we know that one of the replicas must be ready, so we can repair the
+            // storage to store this replica.
+            if replica.is_none() {
+                // group.raft_group.raft.id
+            }
+
+            // make write task if need to write disk.
+            // TODO: batch (yuanchang xu)
+            let mut write_task = GroupWriteRequest::default();
+            let mut has_write = false;
+            if !ready_group.snapshot().is_empty() {
+                write_task.snapshot = Some(ready_group.snapshot().clone());
+                has_write = true;
+            }
+            if let Some(hs) = ready_group.hs() {
+                write_task.hard_state = Some(hs.clone());
+                has_write = true;
+            }
+            if !ready_group.entries().is_empty() {
+                write_task.entries = Some(ready_group.take_entries());
+                has_write = true;
+            }
+            if has_write {
+                write_task_request.groups.insert(*group_id, write_task);
+            }
+
+            // make apply task if need to apply commit entries
+            if !ready_group.committed_entries().is_empty() {}
+
+            ready_groups.insert(*group_id, ready_group);
+        }
+
+        if !write_task_request.groups.is_empty() {
+            self.write_actor_address.tx.send(write_task_request).await;
+        }
+
+        return ready_groups;
     }
 }
 

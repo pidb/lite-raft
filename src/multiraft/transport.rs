@@ -18,7 +18,7 @@ use super::error::Error;
 use crate::proto::RaftMessage;
 use crate::proto::RaftMessageResponse;
 
-#[derive(thiserror::Error, Debug, Clone)]
+#[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum TransportError {
     #[error("the node {0} of server not found")]
     ServerNodeFound(u64),
@@ -27,15 +27,15 @@ pub enum TransportError {
     Server(String),
 }
 
-pub trait MessageInterface: Send + Sync {
-    type RaftMessageFuture<'life0>: Send + Sync + Future<Output = Result<RaftMessageResponse, Error>>
+pub trait MessageInterface: Send + Sync + 'static {
+    type RaftMessageFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
     where
-        Self: 'life0 ;
+        Self: 'life0;
 
     fn raft_message<'life0>(&'life0 self, msg: RaftMessage) -> Self::RaftMessageFuture<'life0>;
 }
 
-pub trait Transport<M>: Send + Sync
+pub trait Transport<M>: Send + Sync + 'static
 where
     M: MessageInterface,
 {
@@ -50,10 +50,7 @@ where
         msg_impl: M,
     ) -> Self::ListenFuture<'life0>;
 
-    type SendFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>>
-    where
-        Self: 'life0;
-    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0>;
+    fn send(&self, msg: RaftMessage) -> Result<(), Error>;
 
     // fn stop(store_id: u64);
 
@@ -81,7 +78,6 @@ impl<M: MessageInterface> LocalServer<M> {
         )>,
         mut stop: watch::Receiver<bool>,
     ) -> JoinHandle<()> {
-
         let main_loop = async move {
             loop {
                 tokio::select! {
@@ -170,21 +166,19 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
             Ok(())
         }
     }
-    type SendFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>>
-    where
-        Self: 'life0;
-    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0> {
-        async move {
-            // get from and to node id
-            let from_replica = match msg.from_replica.as_ref() {
-                None => return Err(Error::BadParameter(format!("to from replica is none"))),
-                Some(rm) => rm.node_id,
-            };
-            let to_replica = match msg.to_replica.as_ref() {
-                None => return Err(Error::BadParameter(format!("to to replica is none"))),
-                Some(rm) => rm.node_id,
-            };
+    
+    fn send(&self, msg: RaftMessage) -> Result<(), Error> {
+        // get from and to node id
+        let from_replica = match msg.from_replica.as_ref() {
+            None => return Err(Error::BadParameter(format!("to from replica is none"))),
+            Some(rm) => rm.node_id,
+        };
+        let to_replica = match msg.to_replica.as_ref() {
+            None => return Err(Error::BadParameter(format!("to to replica is none"))),
+            Some(rm) => rm.node_id,
+        };
 
+        let send_fn = async move {
             // get client
             let local_client = self.connect(from_replica, to_replica).await?;
 
@@ -201,6 +195,8 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
                     to_replica
                 ))))
             }
-        }
+        };
+        tokio::spawn(send_fn);
+        Ok(())
     }
 }

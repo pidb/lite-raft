@@ -8,6 +8,8 @@ pub use self::storage::transmute_entry;
 pub use self::storage::transmute_error;
 pub use self::storage::transmute_raft_state;
 pub use self::storage::transmute_snapshot;
+pub use self::storage::transmute_raft_snapshot_metadata;
+pub use self::storage::transmute_snapshot_metadata;
 pub use self::storage::RaftStorageImpl;
 pub use self::storage::MultiRaftStorage;
 pub use self::storage::RaftSnapshotBuilder;

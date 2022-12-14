@@ -8,6 +8,7 @@ fn main() {
 
     let proto_dir = Path::new(&manifest_dir).join("proto");
     let protos = [
+        &Path::new(&proto_dir).join(Path::new("apppb.proto")),
         &Path::new(&proto_dir).join(Path::new("errorpb.proto")),
         &Path::new(&proto_dir).join(Path::new("eraftpb.proto")),
         &Path::new(&proto_dir).join(Path::new("multiraftpb.proto")),

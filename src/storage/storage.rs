@@ -6,6 +6,7 @@ use crate::proto::HardState;
 use crate::proto::ReplicaMetadata;
 use crate::proto::Snapshot;
 use crate::proto::Message;
+use crate::proto::SnapshotMetadata;
 
 use futures::Future;
 
@@ -95,6 +96,17 @@ pub fn transmute_entries(entries: Vec<Entry>) -> Vec<raft::prelude::Entry> {
 #[inline]
 pub fn transmute_entry(entry: Entry) -> raft::prelude::Entry {
     unsafe { transmute(entry) }
+}
+
+#[inline]
+pub fn transmute_raft_snapshot_metadata(snapshot_metadata: raft::prelude::SnapshotMetadata) -> SnapshotMetadata {
+    unsafe { transmute(snapshot_metadata) }
+}
+
+
+#[inline]
+pub fn transmute_snapshot_metadata(snapshot_metadata: SnapshotMetadata) -> raft::prelude::SnapshotMetadata {
+    unsafe { transmute(snapshot_metadata) }
 }
 
 #[inline]
@@ -390,5 +402,5 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     /// Get the metadata of `replica_id` and create if it does not exist.
     fn replica_metadata(&self, group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_>;
 
-    fn replica_in_store(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_>;
+    fn replica_in_node(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_>;
 }
