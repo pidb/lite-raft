@@ -3,9 +3,9 @@ use std::mem::transmute;
 use crate::proto::ConfState;
 use crate::proto::Entry;
 use crate::proto::HardState;
+use crate::proto::Message;
 use crate::proto::ReplicaMetadata;
 use crate::proto::Snapshot;
-use crate::proto::Message;
 use crate::proto::SnapshotMetadata;
 
 use futures::Future;
@@ -84,11 +84,6 @@ pub fn transmute_entries_ref<'a>(entries: &'a Vec<Entry>) -> &'a Vec<raft::prelu
 }
 
 #[inline]
-pub fn transmute_raft_entries_ref<'a>(entries: &'a Vec<raft::prelude::Entry>) -> &'a Vec<Entry> {
-    unsafe { std::mem::transmute(entries) }
-}
-
-#[inline]
 pub fn transmute_entries(entries: Vec<Entry>) -> Vec<raft::prelude::Entry> {
     unsafe { transmute(entries) }
 }
@@ -99,14 +94,37 @@ pub fn transmute_entry(entry: Entry) -> raft::prelude::Entry {
 }
 
 #[inline]
-pub fn transmute_raft_snapshot_metadata(snapshot_metadata: raft::prelude::SnapshotMetadata) -> SnapshotMetadata {
+pub fn transmute_raft_snapshot_metadata(
+    snapshot_metadata: raft::prelude::SnapshotMetadata,
+) -> SnapshotMetadata {
     unsafe { transmute(snapshot_metadata) }
 }
 
+#[inline]
+pub fn transmute_snapshot_metadata(
+    snapshot_metadata: SnapshotMetadata,
+) -> raft::prelude::SnapshotMetadata {
+    unsafe { transmute(snapshot_metadata) }
+}
 
 #[inline]
-pub fn transmute_snapshot_metadata(snapshot_metadata: SnapshotMetadata) -> raft::prelude::SnapshotMetadata {
-    unsafe { transmute(snapshot_metadata) }
+pub fn transmute_raft_entries(entries: Vec<raft::prelude::Entry>) -> Vec<Entry> {
+    unsafe { transmute(entries) }
+}
+
+#[inline]
+pub fn transmute_raft_entries_ref<'a>(entries: &'a Vec<raft::prelude::Entry>) -> &'a Vec<Entry> {
+    unsafe { std::mem::transmute(entries) }
+}
+
+#[inline]
+pub fn transmute_raft_hard_state(hs: raft::prelude::HardState) -> HardState {
+    unsafe { transmute(hs) }
+}
+
+#[inline]
+pub fn transmute_raft_snapshot(snapshot: raft::prelude::Snapshot) -> Snapshot {
+    unsafe { transmute(snapshot) }
 }
 
 #[inline]
@@ -183,11 +201,11 @@ pub trait RaftStorage: RaftSnapshotBuilder + Clone + Send + Sync + 'static {
     /// Saves the current HardState.
     fn set_hardstate(&self, hs: HardState) -> Result<()>;
 
-     /// Get the current HardState.
-     fn get_confstate(&self) -> Result<ConfState>;
+    /// Get the current HardState.
+    fn get_confstate(&self) -> Result<ConfState>;
 
-     /// Saves the current HardState.
-     fn set_confstate(&self, cs: ConfState)-> Result<()>;
+    /// Saves the current HardState.
+    fn set_confstate(&self, cs: ConfState) -> Result<()>;
 
     /// Returns the term of entry idx, which must be in the range
     /// [first_index()-1, last_index()]. The term of the entry before
@@ -277,7 +295,7 @@ impl<S: RaftStorage> RaftStorage for RaftStorageImpl<S> {
     }
 
     #[inline]
-    fn set_confstate(&self, cs: ConfState)-> Result<()> {
+    fn set_confstate(&self, cs: ConfState) -> Result<()> {
         self.storage_impl.set_confstate(cs)
     }
 
@@ -368,7 +386,7 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     type ReplicaInStoreFuture<'life0>: Send + Future<Output = Result<Option<u64>>>
     where
         Self: 'life0;
-    
+
     type CreateGroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0;
@@ -395,7 +413,6 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     where
         ConfState: From<T>,
         T: Send;
-
 
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
 

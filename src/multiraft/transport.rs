@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::Weak;
 
 use futures::Future;
 use tokio::sync::mpsc::channel;
@@ -98,7 +96,7 @@ impl<M: MessageInterface> LocalServer<M> {
     }
 
     /// Connect self from client.
-    async fn connect(&self, _from: u64) -> Result<LocalClient, Error> {
+    fn connect(&self, _from: u64) -> Result<LocalClient, Error> {
         Ok(LocalClient {
             tx: self.tx.clone(),
         })
@@ -112,23 +110,21 @@ struct LocalClient {
     )>,
 }
 
-pub struct LocalTransport<M: MessageInterface> {
-    stop: watch::Sender<bool>,
-    servers: RwLock<HashMap<u64, LocalServer<M>>>,
-}
-
-impl<M: MessageInterface> LocalTransport<M> {
-    /// Connect server by givn id
-    async fn connect(&self, client_id: u64, node_id: u64) -> Result<LocalClient, Error> {
-        let rl = self.servers.read().await;
-        if !rl.contains_key(&node_id) {
-            return Err(Error::Transport(TransportError::ServerNodeFound(node_id)));
-        }
-
-        let local_server = rl.get(&node_id).unwrap();
-        local_server.connect(client_id).await
+impl LocalClient {
+    fn connect<M: MessageInterface>(
+        id: u64,
+        server: &LocalServer<M>,
+    ) -> Result<LocalClient, Error> {
+        server.connect(id)
     }
 }
+
+pub struct LocalTransport<M: MessageInterface> {
+    stop: watch::Sender<bool>,
+    servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
+}
+
+impl<M: MessageInterface> LocalTransport<M> {}
 
 impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
     type ListenFuture<'life0> = impl Future<Output = Result<(), Error>>
@@ -166,7 +162,7 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
             Ok(())
         }
     }
-    
+
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         // get from and to node id
         let from_replica = match msg.from_replica.as_ref() {
@@ -178,9 +174,21 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
             Some(rm) => rm.node_id,
         };
 
+        let servers = self.servers.clone();
+
+        // get client
         let send_fn = async move {
-            // get client
-            let local_client = self.connect(from_replica, to_replica).await?;
+            // get server by to
+            let rl = servers.read().await;
+            if !rl.contains_key(&to_replica) {
+                return Err(Error::Transport(TransportError::ServerNodeFound(
+                    to_replica,
+                )));
+            }
+            let local_server = rl.get(&to_replica).unwrap();
+
+            // create from client by server
+            let local_client = LocalClient::connect(from_replica, local_server)?;
 
             // send reqeust
             let (tx, rx) = oneshot::channel();
