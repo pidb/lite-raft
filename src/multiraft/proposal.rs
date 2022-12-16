@@ -21,7 +21,7 @@ pub struct ReadIndexProposal<R: Debug> {
 const SHRINK_CACHE_CAPACITY: usize = 64;
 
 #[derive(Debug)]
-pub struct Proposal<R: Debug> {
+pub struct Proposal<R> {
     // index when proposing to raft group
     pub index: u64,
     // current term when proposing to raft group.

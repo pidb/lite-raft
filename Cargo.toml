@@ -15,7 +15,7 @@ protobuf = { version = "3" }
 lazy_static = { version = "1" }
 bincode = { version = "1" }
 # crossbeam = { version = "0.8" }
-signal-hook-tokio = { version = "0.3" }
+# signal-hook-tokio = { version = "0.3" }
 serde_json = { version = "1" }
 slog-term = "2"
 slog-async = "2"
