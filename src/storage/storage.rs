@@ -63,6 +63,7 @@ pub fn transmute_error(error: StorageError) -> raft::StorageError {
     unsafe { transmute::<StorageError, raft::StorageError>(error) }
 }
 
+
 #[inline]
 pub fn transmute_message(msg: Message) -> raft::prelude::Message {
     unsafe { transmute::<Message, raft::prelude::Message>(msg) }
@@ -83,22 +84,12 @@ pub fn transmute_entries_ref<'a>(entries: &'a Vec<Entry>) -> &'a Vec<raft::prelu
     unsafe { std::mem::transmute(entries) }
 }
 
-#[inline]
-pub fn transmute_entries(entries: Vec<Entry>) -> Vec<raft::prelude::Entry> {
-    unsafe { transmute(entries) }
-}
 
 #[inline]
 pub fn transmute_entry(entry: Entry) -> raft::prelude::Entry {
     unsafe { transmute(entry) }
 }
 
-#[inline]
-pub fn transmute_raft_snapshot_metadata(
-    snapshot_metadata: raft::prelude::SnapshotMetadata,
-) -> SnapshotMetadata {
-    unsafe { transmute(snapshot_metadata) }
-}
 
 #[inline]
 pub fn transmute_snapshot_metadata(
@@ -112,20 +103,9 @@ pub fn transmute_raft_entries(entries: Vec<raft::prelude::Entry>) -> Vec<Entry> 
     unsafe { transmute(entries) }
 }
 
-#[inline]
-pub fn transmute_raft_entries_ref<'a>(entries: &'a Vec<raft::prelude::Entry>) -> &'a Vec<Entry> {
-    unsafe { std::mem::transmute(entries) }
-}
 
-#[inline]
-pub fn transmute_raft_hard_state(hs: raft::prelude::HardState) -> HardState {
-    unsafe { transmute(hs) }
-}
 
-#[inline]
-pub fn transmute_raft_snapshot(snapshot: raft::prelude::Snapshot) -> Snapshot {
-    unsafe { transmute(snapshot) }
-}
+
 
 #[inline]
 pub fn transmute_snapshot(snapshot: Snapshot) -> raft::prelude::Snapshot {
@@ -379,7 +359,7 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
         Self: 'life0;
 
     // GAT trait for replica_metadata
-    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<ReplicaMetadata>>
+    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<Option<ReplicaMetadata>>>
     where
         Self: 'life0;
 

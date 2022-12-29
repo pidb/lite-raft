@@ -10,18 +10,18 @@ use super::error::ProposalError;
 
 use crate::proto::ReadIndexContext;
 
-pub struct ReadIndexProposal<R: Debug> {
+pub struct ReadIndexProposal {
     pub uuid: Uuid,
     pub read_index: Option<u64>,
     pub context: Option<ReadIndexContext>,
     // if some, the R is sent to client via tx.
-    pub tx: Option<oneshot::Sender<Result<R, Error>>>,
+    pub tx: Option<oneshot::Sender<Result<(), Error>>>,
 }
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
 
 #[derive(Debug)]
-pub struct Proposal<R> {
+pub struct Proposal {
     // index when proposing to raft group
     pub index: u64,
     // current term when proposing to raft group.
@@ -29,16 +29,16 @@ pub struct Proposal<R> {
     // true if proposal is conf change type.
     pub is_conf_change: bool,
     // if some, the R is sent to client via tx.
-    pub tx: Option<oneshot::Sender<Result<R, Error>>>,
+    pub tx: Option<oneshot::Sender<Result<(), Error>>>,
 }
 
 #[derive(Debug)]
-pub struct GroupProposalQueue<R: Debug> {
+pub struct GroupProposalQueue {
     pub replica_id: u64,
-    pub queue: VecDeque<Proposal<R>>,
+    pub queue: VecDeque<Proposal>,
 }
 
-impl<R: Debug> GroupProposalQueue<R> {
+impl GroupProposalQueue {
     pub fn new(replica_id: u64) -> Self {
         GroupProposalQueue {
             replica_id,
@@ -46,7 +46,7 @@ impl<R: Debug> GroupProposalQueue<R> {
         }
     }
 
-    pub fn push(&mut self, proposal: Proposal<R>) -> Result<(), Error> {
+    pub fn push(&mut self, proposal: Proposal) -> Result<(), Error> {
         if let Some(last) = self.queue.back() {
             // The term must be increasing among all log entries and the index
             // must be increasing inside a given term
@@ -66,7 +66,7 @@ impl<R: Debug> GroupProposalQueue<R> {
     /// Find proposal from the queue front according to the term and index. 
     /// If the proposal (term, ndex) of the queue front is greater than the 
     /// (term, index) parameter, None is returned. 
-    fn pop(&mut self, term: u64, index: u64) -> Option<Proposal<R>> {
+    fn pop(&mut self, term: u64, index: u64) -> Option<Proposal> {
         self.queue.pop_front().and_then(|p| {
             // Comparing the term first then the index, because the term is
             // increasing among all log entries and the index is increasing
@@ -92,7 +92,7 @@ impl<R: Debug> GroupProposalQueue<R> {
         term: u64,
         index: u64,
         current_term: u64,
-    ) -> Result<Option<Proposal<R>>, Error> {
+    ) -> Result<Option<Proposal>, Error> {
         while let Some(proposal) = self.pop(term, index) {
             if proposal.term == term {
                 // term matched.
@@ -125,16 +125,16 @@ impl<R: Debug> GroupProposalQueue<R> {
 }
 
 #[derive(Default, Debug)]
-pub struct ProposalQueueManager<R: Debug> {
-    groups: HashMap<u64, GroupProposalQueue<R>>,
+pub struct ProposalQueueManager {
+    groups: HashMap<u64, GroupProposalQueue>,
 }
 
-impl<R: Debug> ProposalQueueManager<R> {
+impl ProposalQueueManager {
     pub fn create_group_proposal_queue<'a>(
         &'a mut self,
         group_id: u64,
         replica_id: u64,
-    ) -> &'a mut GroupProposalQueue<R> {
+    ) -> &'a mut GroupProposalQueue {
         match self
             .groups
             .insert(group_id, GroupProposalQueue::new(replica_id))
@@ -149,7 +149,7 @@ impl<R: Debug> ProposalQueueManager<R> {
     }
 
     #[inline]
-    pub fn group_proposal_queue<'a>(&'a self, group_id: &u64) -> Option<&'a GroupProposalQueue<R>> {
+    pub fn group_proposal_queue<'a>(&'a self, group_id: &u64) -> Option<&'a GroupProposalQueue> {
         self.groups.get(group_id)
     }
 
@@ -157,7 +157,7 @@ impl<R: Debug> ProposalQueueManager<R> {
     pub fn mut_group_proposal_queue<'a>(
         &'a mut self,
         group_id: &u64,
-    ) -> Option<&'a mut GroupProposalQueue<R>> {
+    ) -> Option<&'a mut GroupProposalQueue> {
         self.groups.get_mut(group_id)
     }
 
@@ -165,7 +165,7 @@ impl<R: Debug> ProposalQueueManager<R> {
     pub fn remove_group_proposal_queue<'a>(
         &'a mut self,
         group_id: &u64,
-    ) -> Option<GroupProposalQueue<R>> {
+    ) -> Option<GroupProposalQueue> {
         self.groups.remove(group_id)
     }
 }
@@ -201,7 +201,7 @@ fn test_proposal_queue() {
     // assert push
     for (index, term, is_conf_change, tx, result) in proposals.into_iter() {
         assert_eq!(
-            gq.push(Proposal::<()> {
+            gq.push(Proposal {
                 index,
                 term,
                 is_conf_change,
@@ -235,7 +235,7 @@ fn test_proposal_queue_find() {
     let mut mgr = ProposalQueueManager::default();
     let gq = mgr.create_group_proposal_queue(group_id, replica_id);
     for (index, term, is_conf_change, tx) in proposals.into_iter() {
-        gq.push(Proposal::<()> {
+        gq.push(Proposal {
             index,
             term,
             is_conf_change,

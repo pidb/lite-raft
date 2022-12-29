@@ -10,11 +10,19 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
+use tracing::info;
 
 use super::error::Error;
+use super::multiraft::Node;
+use super::multiraft::RaftGroup;
+use super::node::NodeManager;
 
+use crate::proto::Message;
+use crate::proto::MessageType;
 use crate::proto::RaftMessage;
 use crate::proto::RaftMessageResponse;
+use crate::storage::MultiRaftStorage;
+use crate::storage::RaftStorage;
 
 #[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum TransportError {
@@ -53,6 +61,70 @@ where
     // fn stop(store_id: u64);
 
     // fn close();
+}
+
+pub async fn send_messages<MI, TR, RS, MRS>(
+    from_node_id: u64,
+    storage: &MRS,
+    transport: &TR,
+    node_mgr: &mut NodeManager,
+    group_id: u64,
+    msgs: Vec<Message>,
+) where
+    MI: MessageInterface,
+    TR: Transport<MI>,
+    RS: RaftStorage,
+    MRS: MultiRaftStorage<RS>,
+{
+    for msg in msgs {
+        match msg.msg_type() {
+            MessageType::MsgHeartbeat => {
+                info!(
+                    "node {} drop indvidual heartbeat message to replica {}",
+                    from_node_id, msg.to
+                );
+            }
+            MessageType::MsgHeartbeatResponse => {
+                info!(
+                    "node {} drop indvidual heartbeat response message to replica {}",
+                    from_node_id, msg.to
+                );
+            }
+            _ => send_message(storage, transport, node_mgr, group_id, msg).await,
+        }
+    }
+}
+
+pub async fn send_message<MI, TR, RS, MRS>(
+    storage: &MRS,
+    transport: &TR,
+    node_mgr: &mut NodeManager,
+    group_id: u64,
+    msg: Message,
+) where
+    MI: MessageInterface,
+    TR: Transport<MI>,
+    RS: RaftStorage,
+    MRS: MultiRaftStorage<RS>,
+{
+
+    let to_replica = storage.replica_metadata(group_id, msg.to).await.unwrap().unwrap();
+    assert_ne!(to_replica.node_id, 0);
+
+    let from_replica = storage.replica_metadata(group_id, msg.from).await.unwrap().unwrap();
+    assert_ne!(from_replica.node_id, 0);
+
+    if !node_mgr.contains_node(&to_replica.node_id) {
+        node_mgr.add_node(to_replica.node_id, group_id);
+    }
+
+    let msg = RaftMessage {
+        group_id,
+        from_node: from_replica.node_id,
+        to_node: to_replica.node_id,
+        msg: Some(msg),
+    };
+    transport.send(msg).unwrap();
 }
 
 struct LocalServer<M: MessageInterface> {
@@ -165,14 +237,16 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
 
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         // get from and to node id
-        let from_replica = match msg.from_replica.as_ref() {
-            None => return Err(Error::BadParameter(format!("to from replica is none"))),
-            Some(rm) => rm.node_id,
-        };
-        let to_replica = match msg.to_replica.as_ref() {
-            None => return Err(Error::BadParameter(format!("to to replica is none"))),
-            Some(rm) => rm.node_id,
-        };
+        // let from_replica = match msg.from_replica.as_ref() {
+        //     None => return Err(Error::BadParameter(format!("to from replica is none"))),
+        //     Some(rm) => rm.node_id,
+        // };
+        // let to_replica = match msg.to_replica.as_ref() {
+        //     None => return Err(Error::BadParameter(format!("to to replica is none"))),
+        //     Some(rm) => rm.node_id,
+        // };
+
+        let (from_node, to_node) = (msg.from_node, msg.to_node);
 
         let servers = self.servers.clone();
 
@@ -180,15 +254,15 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
         let send_fn = async move {
             // get server by to
             let rl = servers.read().await;
-            if !rl.contains_key(&to_replica) {
+            if !rl.contains_key(&to_node) {
                 return Err(Error::Transport(TransportError::ServerNodeFound(
-                    to_replica,
+                    to_node,
                 )));
             }
-            let local_server = rl.get(&to_replica).unwrap();
+            let local_server = rl.get(&to_node).unwrap();
 
             // create from client by server
-            let local_client = LocalClient::connect(from_replica, local_server)?;
+            let local_client = LocalClient::connect(from_node, local_server)?;
 
             // send reqeust
             let (tx, rx) = oneshot::channel();
@@ -200,7 +274,7 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
             } else {
                 Err(Error::Transport(TransportError::Server(format!(
                     "server ({}) stopped",
-                    to_replica
+                    to_node
                 ))))
             }
         };

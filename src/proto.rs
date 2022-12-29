@@ -1,3 +1,5 @@
+use std::mem::transmute;
+
 include!(concat!(env!("OUT_DIR"), "/pirate.rs"));
 
 //----------------------------------------------------------------------
@@ -7,7 +9,6 @@ lazy_static::lazy_static! {
     static ref DEFAULT_RAFT_CONF_STATE_REF: ConfState = {
         ConfState::default()
     };
-
 
     static ref DEFAULT_RAFT_SNAPSHOT_REF: Snapshot = {
         Snapshot::default()
@@ -398,3 +399,44 @@ pub fn limit_entry_size(entries: &mut Vec<Entry>, max: Option<u64>) {
 
     entries.truncate(limit);
 }
+
+
+#[inline]
+pub fn transmute_raft_messages(msgs: Vec<raft::prelude::Message>) -> Vec<Message> {
+    unsafe { transmute(msgs) }
+}
+
+#[inline]
+pub fn transmute_raft_hard_state(hs: raft::prelude::HardState) -> HardState {
+    unsafe { transmute(hs) }
+}
+
+#[inline]
+pub fn transmute_raft_snapshot(snapshot: raft::prelude::Snapshot) -> Snapshot {
+    unsafe { transmute(snapshot) }
+}
+
+#[inline]
+pub fn transmute_entries(entries: Vec<Entry>) -> Vec<raft::prelude::Entry> {
+    unsafe { transmute(entries) }
+}
+
+
+#[inline]
+pub fn transmute_raft_entries(entries: Vec<raft::prelude::Entry>) -> Vec<Entry> {
+    unsafe { transmute(entries) }
+}
+
+
+#[inline]
+pub fn transmute_raft_entries_ref<'a>(entries: &'a Vec<raft::prelude::Entry>) -> &'a Vec<Entry> {
+    unsafe { std::mem::transmute(entries) }
+}
+
+#[inline]
+pub fn transmute_raft_snapshot_metadata(
+    snapshot_metadata: raft::prelude::SnapshotMetadata,
+) -> SnapshotMetadata {
+    unsafe { transmute(snapshot_metadata) }
+}
+

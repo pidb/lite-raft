@@ -23,7 +23,7 @@ pub enum Error {
 
     /// A raft group error occurred.
     #[error("{0}")]
-    RaftGroupError(#[from] RaftGroupError),
+    Raft(#[from] RaftError),
 
     #[error("raft group ({0}) already exists")]
     RaftGroupAlreayExists(u64),
@@ -39,7 +39,10 @@ pub enum Error {
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
-pub enum RaftGroupError {
+pub enum RaftError {
+    #[error("the proposal need leader role, the current leader at {0}")]
+    NotLeader(u64, u64, u64),
+
     #[error("bootstrap group ({0}) error, the voters of initial_state is empty in store ({1})")]
     BootstrapError(u64, u64),
 }

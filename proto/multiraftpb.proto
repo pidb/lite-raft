@@ -13,8 +13,10 @@ message ReplicaMetadata {
 // protobuf-based RPC codec.
 message RaftMessage {
     uint64 group_id = 1;
-    ReplicaMetadata from_replica = 2;
-    ReplicaMetadata to_replica = 3;
+    uint64 from_node = 2;
+    uint64 to_node = 3;
+    // ReplicaMetadata from_replica = 2;
+    // ReplicaMetadata to_replica = 3;
     Message msg = 4;
 }
 
