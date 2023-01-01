@@ -410,7 +410,7 @@ impl RaftSnapshotBuilder for MemStorage {
 }
 
 #[derive(Clone)]
-pub struct MultiRaftGroupMemoryStorage {
+pub struct MultiRaftMemoryStorage {
     node_id: u64,
     store_id: u64,
     groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
@@ -418,7 +418,7 @@ pub struct MultiRaftGroupMemoryStorage {
     replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaMetadata>>>>,
 }
 
-impl MultiRaftGroupMemoryStorage {
+impl MultiRaftMemoryStorage {
     pub fn new(node_id: u64, store_id: u64) -> Self {
         Self {
             node_id,
@@ -453,8 +453,8 @@ impl MultiRaftGroupMemoryStorage {
     }
 }
 
-impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
-    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<Option<super::RaftStorageImpl<MemStorage>>>>
+impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
+    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
         where
             Self: 'life0;
 
@@ -516,8 +516,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftGroupMemoryStorage {
         async move {
             let mut wl = self.groups.write().await;
             match wl.get_mut(&group_id) {
-                None => Ok(None),
-                Some(store) => Ok(Some(RaftStorageImpl::new(store.clone()))),
+                None => {
+                    let storage = MemStorage::new();
+                    wl.insert(group_id, storage.clone());
+                    Ok(RaftStorageImpl::new(storage))
+                },
+                Some(store) => Ok(RaftStorageImpl::new(store.clone())),
             }
         }
     }

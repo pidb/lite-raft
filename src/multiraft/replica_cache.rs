@@ -39,24 +39,15 @@ where
         &self,
         group_id: u64,
         replica_id: u64,
-    ) -> Result<Option<ReplicaMetadata>, Error> {
+    ) -> Result<ReplicaMetadata, Error> {
         {
             let rl = self.inner.read().await;
             if let Some(replica_metadata) = rl.get(&(group_id, replica_id)) {
-                return Ok(Some(replica_metadata.clone()));
+                return Ok(replica_metadata.clone());
             }
         }
 
-        match self.storage.replica_metadata(group_id, replica_id).await {
-            Err(err) => return Err(Error::Store(err)),
-            Ok(rm) => match rm {
-                Some(rm) => {
-                    self.cache(group_id, rm.clone()).await;
-                    Ok(Some(rm))
-                }
-                None => Ok(None),
-            },
-        }
+        self.storage.replica_metadata(group_id, replica_id).await.map_err(|err| Error::Store(err))
     }
 
     pub async fn cache(&self, group_id: u64, replica_metadata: ReplicaMetadata) {

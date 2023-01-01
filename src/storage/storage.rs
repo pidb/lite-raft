@@ -7,6 +7,7 @@ use crate::proto::Message;
 use crate::proto::ReplicaMetadata;
 use crate::proto::Snapshot;
 use crate::proto::SnapshotMetadata;
+use crate::proto::transmute_entries;
 
 use futures::Future;
 
@@ -354,12 +355,12 @@ impl<S: RaftStorage> raft::storage::Storage for RaftStorageImpl<S> {
 /// MultiRaftStorage per group
 pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     // GAT trait for group_storage
-    type GroupStorageFuture<'life0>: Send + Future<Output = Result<Option<RaftStorageImpl<S>>>>
+    type GroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0;
 
     // GAT trait for replica_metadata
-    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<Option<ReplicaMetadata>>>
+    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<ReplicaMetadata>>
     where
         Self: 'life0;
 

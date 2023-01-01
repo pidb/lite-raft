@@ -1,5 +1,16 @@
-use super::transport::TransportError;
 use crate::storage::StorageError;
+ 
+#[derive(thiserror::Error, Debug, Clone, PartialEq)]
+pub enum TransportError {
+    #[error("the node {0} of server not found")]
+    ServerNodeFound(u64),
+
+    #[error("the node {0} of server already exists")]
+    ServerAlreadyExists(u64),
+
+    #[error("server error: {0}")]
+    Server(String),
+}
 
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
@@ -80,3 +91,4 @@ impl PartialEq for ProposalError {
         }
     }
 }
+

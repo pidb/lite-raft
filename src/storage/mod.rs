@@ -2,7 +2,6 @@ mod memory;
 mod storage;
 // mod rocksdb;
 
-pub use self::storage::transmute_entries;
 pub use self::storage::transmute_message;
 pub use self::storage::transmute_entry;
 pub use self::storage::transmute_error;
@@ -19,4 +18,4 @@ pub use self::storage::Result;
 pub use self::storage::StorageError;
 pub use self::memory::MemStorage;
 pub use self::memory::MemStorageCore;
-pub use self::memory::MultiRaftGroupMemoryStorage;
+pub use self::memory::MultiRaftMemoryStorage;

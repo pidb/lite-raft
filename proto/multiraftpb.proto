@@ -28,7 +28,7 @@ message RaftMessageResponse {
 
 enum RaftGroupManagementMessageType {
     MsgInitialGroup = 0;
-    MsgBootstrapGroup = 1;
+    MsgCreateGroup = 1;
     MsgRemoveGoup = 2;
 }
 
@@ -36,5 +36,5 @@ message RaftGroupManagementMessage {
     RaftGroupManagementMessageType msg_type = 1;
     uint64 group_id = 2;
     uint64 replica_id = 3;
-    repeated uint64 initial_voters = 5;
+    repeated ReplicaMetadata replicas = 4;
 }
