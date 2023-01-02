@@ -79,7 +79,7 @@ impl<M: MessageInterface> LocalTransport<M> {
 }
 
 impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
-    type ListenFuture<'life0> = impl Future<Output = Result<(), Error>>
+    type ListenFuture<'life0> = impl Future<Output = Result<(), Error>> + 'life0
     where
         Self: 'life0;
 
@@ -153,7 +153,7 @@ impl<M: MessageInterface> Transport<M> for LocalTransport<M> {
         Ok(())
     }
 
-    type StopFuture<'life0> = impl Future<Output = Result<(), Error>>
+    type StopFuture<'life0> = impl Future<Output = Result<(), Error>> + 'life0
     where
         Self: 'life0;
     #[tracing::instrument(name = "LocalTransport::stop", skip(self))]

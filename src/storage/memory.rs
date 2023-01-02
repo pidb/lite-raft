@@ -454,25 +454,25 @@ impl MultiRaftMemoryStorage {
 }
 
 impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
-    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
         where
             Self: 'life0;
 
-    type ReplicaMetadataFuture<'life0> = impl Future<Output =  super::storage::Result<crate::proto::ReplicaMetadata>>
+    type ReplicaMetadataFuture<'life0> = impl Future<Output =  super::storage::Result<crate::proto::ReplicaMetadata>> + 'life0
         where
             Self: 'life0;
 
-    type CreateGroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+    type CreateGroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
         where
             Self: 'life0;
 
-    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>>
+    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
         where
             Self: 'life0,
             ConfState: From<T>,
-            T: Send;
+            T: Send + 'life0;
 
-    type ReplicaInStoreFuture<'life0> = impl Future<Output = super::storage::Result<Option<u64>>>
+    type ReplicaInStoreFuture<'life0> = impl Future<Output = super::storage::Result<Option<u64>>> + 'life0
         where
             Self: 'life0;
 
@@ -492,12 +492,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
     }
 
     #[allow(unused)]
-    fn create_group_storage_with_conf_state<T>(
-        &self,
+    fn create_group_storage_with_conf_state<'life0, T>(
+        &'life0 self,
         group_id: u64,
         replica_id: u64,
         conf_state: T,
-    ) -> Self::CreateGroupStorageWithConfStateFuture<'_, T>
+    ) -> Self::CreateGroupStorageWithConfStateFuture<'life0, T>
     where
         ConfState: From<T>,
         T: Send,

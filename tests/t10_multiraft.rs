@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 
+use smol_raft::multiraft::Event;
+use smol_raft::multiraft::LeaderElectionEvent;
 use smol_raft::proto::ConfState;
 use smol_raft::proto::HardState;
 use smol_raft::proto::RaftGroupManagementMessage;
@@ -14,6 +16,9 @@ use smol_raft::LocalTransport;
 use smol_raft::MultiRaft;
 use smol_raft::MultiRaftConfig;
 use smol_raft::MultiRaftMessageSender;
+
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
 type FixtureMultiRaft = MultiRaft<
@@ -26,6 +31,7 @@ type FixtureMultiRaft = MultiRaft<
 pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
     multirafts: Vec<FixtureMultiRaft>,
+    events: Vec<Receiver<Vec<Event>>>,
     groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
 }
 
@@ -33,28 +39,39 @@ impl FixtureCluster {
     pub fn make(num: u64, stop: watch::Receiver<bool>) -> FixtureCluster {
         let mut multirafts = vec![];
         let mut storages = vec![];
+        let mut events = vec![];
         for n in 0..num {
             let node_id = n + 1;
             let store_id = n + 1;
             let config = MultiRaftConfig {
                 election_tick: 2,
                 heartbeat_tick: 1,
-                tick_interval: 100,
+                tick_interval: 1000,
             };
 
+            let (event_tx, event_rx) = channel(1);
             let transport = LocalTransport::new();
             let storage = MultiRaftMemoryStorage::new(node_id, store_id);
             storages.push(storage.clone());
-            let multiraft = FixtureMultiRaft::new(config, node_id, store_id, transport, storage, stop.clone());
+            let multiraft = FixtureMultiRaft::new(
+                config,
+                node_id,
+                store_id,
+                transport,
+                storage,
+                stop.clone(),
+                event_tx,
+            );
             multirafts.push(multiraft);
+            events.push(event_rx);
         }
         Self {
+            events,
             storages,
             multirafts,
             groups: HashMap::new(),
         }
     }
-
 
     pub async fn make_group(&mut self, group_id: u64, first_node: u64, replica_num: usize) {
         let mut voters = vec![];
@@ -112,19 +129,35 @@ impl FixtureCluster {
         }
     }
 
-
-    pub async fn check_elect(&mut self, leader_id: u64, group_id: u64) {
+    pub async fn check_elect(&mut self, node_index: u64, group_id: u64) {
         // trigger an election for the replica in the group of the node where leader nodes.
-        self.trigger_elect(leader_id, group_id).await;
-        unimplemented!()
+        self.trigger_elect(node_index, group_id).await;
+
+        for node_id in self.groups.get(&group_id).unwrap().iter() {
+            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id).await.unwrap();
+            assert_ne!(election.leader_id, 0);
+            assert_eq!(election.group_id, group_id);
+            let storage = &self.storages[node_index as usize];
+            let replica_id = storage.replica_in_node(group_id, *node_id).await.unwrap();
+            assert_eq!(Some(election.leader_id), replica_id);
+        }
     }
 
-    async fn trigger_elect(&self, node_id: u64, group_id: u64) {
-        self.multirafts[node_id as usize].campagin(group_id).await
+    async fn trigger_elect(&self, node_index: u64, group_id: u64) {
+        self.multirafts[node_index as usize].campagin(group_id).await
     }
 
-    async fn wait_for_leader_elect(&self, node_id: u64) {
-
+    async fn wait_for_leader_elect(events: &mut Vec<Receiver<Vec<Event>>>, node_id: u64) -> Option<LeaderElectionEvent> {
+        let event = &mut events[node_id as usize];
+        loop {
+            let events = event.recv().await.unwrap();
+            for event in events {
+                match event {
+                    Event::LederElection(leader_elect) => return Some(leader_elect),
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -132,13 +165,13 @@ impl FixtureCluster {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_initial_leader_elect() {
-   for leader_id in 0..3 {
-    let (stop_tx, stop_rx) = watch::channel(false);
-    let mut cluster = FixtureCluster::make(3, stop_rx);
-    let group_id = 1;
-    cluster.make_group(group_id, 0, 3).await;
+    for leader_id in 0..3 {
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let mut cluster = FixtureCluster::make(3, stop_rx);
+        let group_id = 1;
+        cluster.make_group(group_id, 0, 3).await;
 
-    cluster.check_elect(leader_id, group_id);
-    stop_tx.send(true);
-   } 
+        cluster.check_elect(leader_id, group_id).await;
+        let _ = stop_tx.send(true);
+    }
 }

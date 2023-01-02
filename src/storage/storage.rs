@@ -377,7 +377,7 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     where
         Self: 'life0,
         ConfState: From<T>,
-        T: Send;
+        T: Send + 'life0;
 
     fn create_group_storage(
         &self,

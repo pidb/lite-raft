@@ -1,10 +1,11 @@
 use std::marker::PhantomData;
 
+use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
-use tokio::sync::mpsc::Sender;
 use tokio::task::JoinHandle;
 
+use super::apply::ApplyActor;
 use super::config::MultiRaftConfig;
 use super::error::Error;
 use super::event::Event;
@@ -34,7 +35,9 @@ where
 {
     store_id: u64,
     config: MultiRaftConfig,
+    node_id: u64,
     actor_address: MultiRaftActorAddress,
+    apply_join_handle: JoinHandle<()>,
     actor_join_handle: JoinHandle<()>,
     _m1: PhantomData<MI>,
     _m2: PhantomData<T>,
@@ -55,14 +58,28 @@ where
         store_id: u64,
         transport: T,
         storage: MRS,
-        stop: watch::Receiver<bool>,
+        stop_rx: watch::Receiver<bool>,
         event_tx: Sender<Vec<Event>>,
     ) -> Self {
-        let (actor_join_handle, actor_address) =
-            MultiRaftActor::spawn(&config, node_id, store_id, transport, event_tx.clone(), storage, stop);
+        let (apply_join_handle, apply_actor_address) =
+            ApplyActor::spawn(event_tx.clone(), stop_rx.clone());
+
+        let (actor_join_handle, actor_address) = MultiRaftActor::spawn(
+            &config,
+            node_id,
+            store_id,
+            transport,
+            apply_actor_address,
+            event_tx.clone(),
+            storage,
+            stop_rx.clone(),
+        );
+
         Self {
+            node_id,
             store_id,
             config,
+            apply_join_handle,
             actor_address,
             actor_join_handle,
             _m1: PhantomData,

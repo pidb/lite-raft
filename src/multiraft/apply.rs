@@ -15,9 +15,11 @@ use crate::proto::ConfChange;
 use crate::proto::ConfChangeType;
 use crate::proto::MembershipChangeRequest;
 
-use super::apply_command::ApplyCommand;
+// use super::apply_command::ApplyCommand;
 use super::error::Error;
 use super::error::ProposalError;
+use super::event::ApplyEvent;
+use super::event::Event;
 use super::proposal::Proposal;
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
@@ -99,7 +101,8 @@ pub struct ApplyActorAddress {
 pub struct ApplyActor {
     rx: Receiver<ApplyTaskRequest>,
     tx: Sender<ApplyTaskResponse>,
-    apply_to_tx: Sender<Vec<ApplyCommand>>,
+    event_tx: Sender<Vec<Event>>,
+    // apply_to_tx: Sender<Vec<ApplyCommand>>,
     group_pending_apply: HashMap<u64, Apply>,
 }
 
@@ -108,7 +111,7 @@ impl ApplyActor {
 }
 
 impl ApplyActor {
-    pub fn spawn(apply_to_tx: Sender<Vec<ApplyCommand>>, mut stop_rx: watch::Receiver<bool>) -> (JoinHandle<()>, ApplyActorAddress) {
+    pub fn spawn(event_tx: Sender<Vec<Event>>, stop_rx: watch::Receiver<bool>) -> (JoinHandle<()>, ApplyActorAddress) {
         let (request_tx, request_rx) = channel(1);
         let (response_tx, response_rx) = channel(1);
 
@@ -118,7 +121,7 @@ impl ApplyActor {
         };
 
         let actor = ApplyActor {
-            apply_to_tx,
+            event_tx,
             rx: request_rx,
             tx: response_tx,
             group_pending_apply: HashMap::new(),
@@ -139,15 +142,13 @@ impl ApplyActor {
                         break
                     }
                 },
-                Some(request) = self.rx.recv() => {
-
-                }
+                Some(request) = self.rx.recv() => self.handle_request(request).await,
             }
         }
     }
 
-    async fn handle_request(&mut self, task: ApplyTaskRequest) {
-        for (group_id, task) in task.groups.into_iter() {
+    async fn handle_request(&mut self, request: ApplyTaskRequest) {
+        for (group_id, task) in request.groups.into_iter() {
             match task {
                 ApplyTask::Apply(mut apply) => {
                     match self.group_pending_apply.get_mut(&group_id) {
@@ -169,19 +170,19 @@ impl ApplyActor {
     }
 
     async fn handle_apply(&mut self, apply: Apply) {
-        let mut proposals = VecDeque::new();
-        for proposal in apply.proposals {
-            proposals.push_back(proposal)
-        }
+        // let mut proposals = VecDeque::new();
+        // for proposal in apply.proposals {
+        //     proposals.push_back(proposal)
+        // }
 
         let mut delegate = ApplyDelegate {
             group_id: apply.group_id,
-            pending_proposals: proposals,
+            pending_proposals: apply.proposals,
             staging_applys: Vec::new(),
         };
 
         delegate.handle_committed_entries(apply.entries);
-        self.apply_to_tx.send(delegate.staging_applys).await;
+        self.event_tx.send(delegate.staging_applys).await;
         // delegate.apply_to(&self.apply_to_tx);
         // take entries
         // transervel entry
@@ -197,16 +198,10 @@ impl ApplyActor {
 pub struct ApplyDelegate {
     group_id: u64,
     pending_proposals: VecDeque<Proposal>,
-    staging_applys: Vec<ApplyCommand>,
+    staging_applys: Vec<Event>,
 }
 
 impl ApplyDelegate {
-    fn push_proposals(&mut self, proposals: IntoIter<Proposal>) {
-        for proposal in proposals {
-            self.pending_proposals.push_back(proposal);
-        }
-    }
-
     fn pop_normal(&mut self, index: u64, term: u64) -> Option<Proposal> {
         self.pending_proposals.pop_front().and_then(|cmd| {
             if (cmd.term, cmd.index) > (term, index) {
@@ -218,7 +213,7 @@ impl ApplyDelegate {
     }
 
     fn find_pending(&mut self, term: u64, index: u64) -> Option<Proposal> {
-        while let Some(mut p) = self.pop_normal(index, term) {
+        while let Some(p) = self.pop_normal(index, term) {
             if p.term == term {
                 if p.index == index {
                     return Some(p);
@@ -290,12 +285,12 @@ impl ApplyDelegate {
         }
         let tx = self.find_pending(entry.term, entry.index).map_or(None, |p| p.tx);
 
-        let apply_command = ApplyCommand {
+        let apply_command = Event::Apply(ApplyEvent{
             group_id: self.group_id,
             is_conf_change: false,
             entry,
             tx,
-        };
+        });
         self.staging_applys.push(apply_command);
     }
 
@@ -321,12 +316,12 @@ impl ApplyDelegate {
 
         let tx = if let Some(proposal) = proposal {proposal.tx} else { None};
 
-        let apply_command = ApplyCommand {
+        let apply_command = Event::Apply(ApplyEvent {
             group_id: self.group_id,
             is_conf_change: true,
             entry,
             tx
-        };
+        });
         self.staging_applys.push(apply_command);
         // self.staging_entries.push(entry);
 

@@ -7,9 +7,9 @@ use std::marker::PhantomData;
 use std::time::Duration;
 
 use prost::Message as ProstMessage;
+use raft::LightReady;
 use raft::RawNode;
 use raft::Ready;
-use raft::LightReady;
 use smallvec::SmallVec;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -27,12 +27,14 @@ use tracing::warn;
 
 use raft::Config;
 
+use super::apply::Apply;
 use super::apply::ApplyActor;
 use super::apply::ApplyActorAddress;
 use super::apply::ApplyResult;
+use super::apply::ApplyTask;
+use super::apply::ApplyTaskRequest;
 use super::apply::ApplyTaskResponse;
 use super::apply::MembershipChangeResult;
-use super::apply::Apply;
 use super::config::MultiRaftConfig;
 use super::error::Error;
 use super::error::ProposalError;
@@ -50,28 +52,26 @@ use super::replica_cache::ReplicaMetadataCache;
 use super::transport;
 use super::transport::MessageInterface;
 use super::transport::Transport;
-use super::apply::ApplyTask;
-use super::apply::ApplyTaskRequest;
 
+use crate::proto::transmute_entries;
+use crate::proto::transmute_raft_entries;
+use crate::proto::transmute_raft_entries_ref;
+use crate::proto::transmute_raft_hard_state;
+use crate::proto::transmute_raft_messages;
+use crate::proto::transmute_raft_snapshot;
 use crate::proto::AppReadIndexRequest;
 use crate::proto::AppReadIndexResponse;
 use crate::proto::AppWriteRequest;
 use crate::proto::AppWriteResponse;
 use crate::proto::ConfState;
+use crate::proto::Entry;
 use crate::proto::Message;
 use crate::proto::MessageType;
 use crate::proto::RaftGroupManagementMessage;
 use crate::proto::RaftGroupManagementMessageType;
 use crate::proto::RaftMessage;
 use crate::proto::ReplicaMetadata;
-use crate::proto::Entry;
 use crate::proto::Snapshot;
-use crate::proto::transmute_entries;
-use crate::proto::transmute_raft_entries;
-use crate::proto::transmute_raft_entries_ref;
-use crate::proto::transmute_raft_messages;
-use crate::proto::transmute_raft_hard_state;
-use crate::proto::transmute_raft_snapshot;
 use crate::storage::transmute_message;
 
 use crate::storage::MultiRaftStorage;
@@ -79,7 +79,6 @@ use crate::storage::RaftStorage;
 use crate::storage::RaftStorageImpl;
 use crate::storage::StorageError;
 // use crate::proto::Error;
-
 
 #[derive(Default, Debug)]
 pub struct GroupWriteRequest {
@@ -153,19 +152,17 @@ where
         node_id: u64,
         store_id: u64,
         transport: T,
+        apply_actor_address: ApplyActorAddress,
         event_tx: Sender<Vec<Event>>,
         storage: MRS,
         stop: watch::Receiver<bool>,
     ) -> (JoinHandle<()>, MultiRaftActorAddress) {
-        let (apply_to_tx, apply_to_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(1);
         let (campagin_tx, campagin_rx) = channel(1);
         let (manager_group_tx, manager_group_rx) = channel(1);
 
         // let (write_actor_join, write_actor_address) =
         //     WriterActor::spawn(storage.clone(), stop.clone());
-
-        let (apply_actor_join, apply_actor_address) = ApplyActor::spawn(apply_to_tx, stop.clone());
 
         // create write propose channel
         let (write_propose_tx, write_propose_rx) = channel(1);
@@ -223,9 +220,24 @@ where
         let mut ticker = interval(self.tick_interval);
         let mut activity_groups = HashSet::new();
         loop {
+            // handle events
             if !self.pending_events.is_empty() {
-                // TODO: update committed term if event is LeaderElection type
+                for pending_event in self.pending_events.iter_mut() {
+                    match pending_event {
+                        Event::LederElection(leader_elect) => {
+                            let group = self.groups.get(&leader_elect.group_id).unwrap();
+                            if leader_elect.committed_term != group.committed_term
+                                && group.committed_term != 0
+                            {
+                                leader_elect.committed_term = group.committed_term;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
                 let pending_events = std::mem::take(&mut self.pending_events);
+
                 self.event_tx.send(pending_events).await.unwrap();
             }
 
@@ -393,7 +405,7 @@ where
                 // };
                 // TODO: check leader is valid
 
-                if group.leader.node_id != msg.from_node || msg.from_node != self.node_id {
+                if group.leader.node_id != msg.from_node || msg.from_node == self.node_id {
                     continue;
                 }
 
@@ -471,7 +483,7 @@ where
                 // };
 
                 // TODO: check leader is valid
-                if group.leader.node_id != msg.from_node || msg.from_node != self.node_id {
+                if group.leader.node_id != msg.from_node || msg.from_node == self.node_id {
                     continue;
                 }
 
@@ -629,6 +641,10 @@ where
     /// Create a replica of the raft consensus group on this node.
     #[tracing::instrument(name = "MultiRaftActor::bootstrap_group", skip(self))]
     async fn create_raft_group(&mut self, group_id: u64, replica_id: u64) -> Result<(), Error> {
+         if self.groups.contains_key(&group_id) {
+            return Err(Error::RaftGroupAlreayExists(group_id));
+        }
+
         if group_id == 0 {
             return Err(Error::BadParameter(format!("bad group_id parameter (0)")));
         }
@@ -636,10 +652,7 @@ where
         if replica_id == 0 {
             return Err(Error::BadParameter(format!("bad replica_id parameter (0)")));
         }
-
-        if self.groups.contains_key(&group_id) {
-            return Err(Error::RaftGroupAlreayExists(group_id));
-        }
+       
 
         // let mut replica_id = 0;
         // get the raft consensus group reated to storage, create if not exists.
@@ -677,7 +690,7 @@ where
             node_ids: Vec::new(),
             proposals: GroupProposalQueue::new(replica_id),
             leader: ReplicaMetadata::default(), // TODO: init leader from storage
-            committed_term: 0, // TODO: init committed term from storage
+            committed_term: 0,                  // TODO: init committed term from storage
         };
 
         for voter_id in voters.iter() {
@@ -826,7 +839,7 @@ where
                 if !group.raft_group.has_ready() {
                     continue;
                 }
- 
+
                 let mut group_ready = group.raft_group.ready();
 
                 // we need to know which replica in raft group is ready.
@@ -851,16 +864,20 @@ where
                     },
                 };
 
-
                 if let Some(ss) = group_ready.ss() {
-                    if ss.leader_id != 0  && ss.leader_id != group.leader.replica_id {
-                        let replica_metadata = self.replica_metadata_cache.get(*group_id, ss.leader_id).await.unwrap();
+                    if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
+                        let replica_metadata = self
+                            .replica_metadata_cache
+                            .get(*group_id, ss.leader_id)
+                            .await
+                            .unwrap();
                         group.leader = replica_metadata;
-                        self.pending_events.push(Event::LederElection(LeaderElectionEvent{
-                            group_id: *group_id,
-                            leader_id: ss.leader_id,
-                            committed_term: group.committed_term,
-                        }))
+                        self.pending_events
+                            .push(Event::LederElection(LeaderElectionEvent {
+                                group_id: *group_id,
+                                leader_id: ss.leader_id,
+                                committed_term: group.committed_term,
+                            }))
                     }
                 }
 
@@ -879,13 +896,14 @@ where
 
                 // make apply task if need to apply commit entries
                 if !group_ready.committed_entries().is_empty() {
-                    let last_term = group_ready.committed_entries()[group_ready.committed_entries().len()-1].term;
+                    let last_term = group_ready.committed_entries()
+                        [group_ready.committed_entries().len() - 1]
+                        .term;
                     group.maybe_update_committed_term(last_term);
 
                     let entries = transmute_raft_entries(group_ready.take_committed_entries());
-                    let apply = MultiRaftActor::<MI, T, RS, MRS>::create_apply(
-                        replica_id, group, entries,
-                    );
+                    let apply =
+                        MultiRaftActor::<MI, T, RS, MRS>::create_apply(replica_id, group, entries);
 
                     apply_task_groups.insert(*group_id, ApplyTask::Apply(apply));
                 }
@@ -1003,15 +1021,14 @@ where
             }
 
             if !light_ready.committed_entries().is_empty() {
-                let group = self.groups.get_mut(&group_id).unwrap();
-
-                let last_term = light_ready.committed_entries()[light_ready.committed_entries().len()-1].term;
-                group.maybe_update_committed_term(last_term);
+                let last_term =
+                    light_ready.committed_entries()[light_ready.committed_entries().len() - 1].term;
+                mut_group.maybe_update_committed_term(last_term);
 
                 let entries = transmute_raft_entries(light_ready.take_committed_entries());
-                let apply = MultiRaftActor::< MI, T, RS, MRS>::create_apply(
+                let apply = MultiRaftActor::<MI, T, RS, MRS>::create_apply(
                     gwr.replica_id,
-                    group,
+                    mut_group,
                     entries,
                 );
 

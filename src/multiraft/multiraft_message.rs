@@ -1,10 +1,10 @@
 use futures::Future;
 use tokio::sync::oneshot;
 
-use crate::proto::RaftMessage;
-use crate::proto::RaftMessageResponse;
 use crate::proto::RaftGroupManagementMessage;
 use crate::proto::RaftGroupManagementMessageType;
+use crate::proto::RaftMessage;
+use crate::proto::RaftMessageResponse;
 
 use super::error::Error;
 use super::multiraft_actor::MultiRaftActorAddress;
@@ -13,7 +13,6 @@ use super::transport::MessageInterface;
 pub struct MultiRaftMessageSender {
     actor_address: MultiRaftActorAddress,
 }
-
 
 impl Clone for MultiRaftMessageSender {
     fn clone(&self) -> Self {
@@ -24,7 +23,7 @@ impl Clone for MultiRaftMessageSender {
 }
 
 impl MultiRaftMessageSender {
-      pub async fn initial_raft_group(&self, msg: RaftGroupManagementMessage) -> Result<(), Error> {
+    pub async fn initial_raft_group(&self, msg: RaftGroupManagementMessage) -> Result<(), Error> {
         assert_eq!(
             msg.msg_type(),
             RaftGroupManagementMessageType::MsgInitialGroup
@@ -42,7 +41,7 @@ impl MultiRaftMessageSender {
 }
 
 impl MessageInterface for MultiRaftMessageSender {
-    type RaftMessageFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send
+    type RaftMessageFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
     where
         Self: 'life0;
 

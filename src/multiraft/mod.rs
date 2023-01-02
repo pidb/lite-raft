@@ -8,12 +8,14 @@ mod proposal;
 mod transport;
 mod transport_local;
 // mod write;
-mod apply_command;
 mod event;
 mod node;
 mod raft_group;
 mod replica_cache;
 
+pub use event::Event;
+pub use event::ApplyEvent;
+pub use event::LeaderElectionEvent;
 pub use multiraft::MultiRaft;
 pub use multiraft_message::MultiRaftMessageSender;
 

@@ -5,10 +5,9 @@ pub mod proto;
 pub mod util;
 pub mod rsm;
 pub mod storage;
-mod multiraft;
+pub mod multiraft;
 
 pub use multiraft::MultiRaft;
 pub use multiraft::MultiRaftConfig;
 pub use multiraft::MultiRaftMessageSender;
-
 pub use multiraft::LocalTransport;
