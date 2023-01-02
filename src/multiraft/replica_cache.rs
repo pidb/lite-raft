@@ -66,3 +66,71 @@ where
         }
     }
 }
+
+
+/// ReplicaMetadataCache is a thread safe cache. it cache replica metadatas
+/// from read storage and messages and write the replica metadata the storage
+/// when cache miss.
+pub struct ReplicaCache<RS, MRS>
+where
+    RS: RaftStorage,
+    MRS: MultiRaftStorage<RS>,
+{
+    storage: MRS,
+    group_replicas: HashMap<u64, Vec<ReplicaMetadata>>,
+    _m: PhantomData<RS>,
+}
+
+impl<RS, MRS> ReplicaCache<RS, MRS>
+where
+    RS: RaftStorage,
+    MRS: MultiRaftStorage<RS>,
+{
+    pub fn new(storage: MRS) -> Self {
+        Self {
+            storage,
+            inner: Default::default(),
+            _m: PhantomData,
+        }
+    }
+
+    pub async fn get(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Result<ReplicaMetadata, Error> {
+        {
+            let rl = self.inner.read().await;
+            if let Some(replica_metadata) = rl.get(&(group_id, replica_id)) {
+                return Ok(replica_metadata.clone());
+            }
+        }
+
+        self.storage.replica_metadata(group_id, replica_id).await.map_err(|err| Error::Store(err))
+    }
+
+    pub async fn cache(&mut self, group_id: u64, replica_metadata: ReplicaMetadata) {
+        assert_ne!(replica_metadata.replica_id, 0);
+        if let Some(replicas) = self.group_replicas.get_mut(&group_id) {
+            if replicas.iter().find(|replica| **replica == replica_metadata).is_some() {
+                return
+            }
+
+            replicas.push(replica_metadata);
+            // TODO: update storage
+            return
+        }
+        
+        let key = (group_id, replica_metadata.replica_id);
+        match wl.get_mut(&key) {
+            None => {
+                wl.insert(key, replica_metadata);
+            }
+            Some(old) => {
+                if *old != replica_metadata {
+                    std::mem::replace(old, replica_metadata);
+                }
+            }
+        }
+    }
+}
