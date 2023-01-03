@@ -3,10 +3,16 @@ package pirate;
 
 import "eraftpb.proto";
 
-message ReplicaMetadata {
+message ReplicaDesc {
     uint64 node_id = 1;
     uint64 replica_id = 2;
-    uint64 store_id = 3;
+    // uint64 store_id = 3;
+}
+
+message RaftGroupDesc {
+    uint64 group_id = 1;
+    repeated uint64 nodes = 2;
+    repeated ReplicaDesc replicas = 3;
 }
 
 // RaftMessageRequest is the request used to send raft messages using our
@@ -36,5 +42,5 @@ message RaftGroupManagementMessage {
     RaftGroupManagementMessageType msg_type = 1;
     uint64 group_id = 2;
     uint64 replica_id = 3;
-    repeated ReplicaMetadata replicas = 4;
+    repeated ReplicaDesc replicas = 4;
 }

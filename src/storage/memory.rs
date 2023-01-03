@@ -12,7 +12,8 @@ use crate::proto::limit_entry_size;
 use crate::proto::ConfState;
 use crate::proto::Entry;
 use crate::proto::HardState;
-use crate::proto::ReplicaMetadata;
+use crate::proto::RaftGroupDesc;
+use crate::proto::ReplicaDesc;
 use crate::proto::Snapshot;
 use crate::proto::SnapshotMetadata;
 
@@ -20,9 +21,10 @@ use crate::storage::MultiRaftStorage;
 use crate::storage::RaftSnapshotBuilder;
 use crate::storage::RaftState;
 use crate::storage::RaftStorage;
-use crate::storage::RaftStorageImpl;
-use crate::storage::Result;
 use crate::storage::StorageError;
+
+use super::storage::Result;
+use super::RaftStorageImpl;
 
 /// The Memory Storage Core instance holds the actual state of the storage struct. To access this
 /// value, use the `rl` and `wl` functions on the main MemStorage implementation.
@@ -414,8 +416,7 @@ pub struct MultiRaftMemoryStorage {
     node_id: u64,
     store_id: u64,
     groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
-    // group_id map to multiple replica_metadata.
-    replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaMetadata>>>>,
+    group_desc_map: Arc<AsyncRwLock<HashMap<u64, RaftGroupDesc>>>,
 }
 
 impl MultiRaftMemoryStorage {
@@ -424,7 +425,7 @@ impl MultiRaftMemoryStorage {
             node_id,
             store_id,
             groups: Default::default(),
-            replicas: Default::default(),
+            group_desc_map: Default::default(),
         }
     }
 
@@ -454,43 +455,11 @@ impl MultiRaftMemoryStorage {
 }
 
 impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
-    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
-        where
-            Self: 'life0;
-
-    type ReplicaMetadataFuture<'life0> = impl Future<Output =  super::storage::Result<crate::proto::ReplicaMetadata>> + 'life0
-        where
-            Self: 'life0;
-
-    type CreateGroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
-        where
-            Self: 'life0;
-
     type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
         where
             Self: 'life0,
             ConfState: From<T>,
             T: Send + 'life0;
-
-    type ReplicaInStoreFuture<'life0> = impl Future<Output = super::storage::Result<Option<u64>>> + 'life0
-        where
-            Self: 'life0;
-
-    #[allow(unused)]
-    fn create_group_storage(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-    ) -> Self::CreateGroupStorageFuture<'_> {
-        async move {
-            let mut wl = self.groups.write().await;
-            assert_ne!(wl.contains_key(&group_id), true);
-            let storage = MemStorage::new();
-            wl.insert(group_id, storage.clone());
-            Ok(RaftStorageImpl::new(storage))
-        }
-    }
-
     #[allow(unused)]
     fn create_group_storage_with_conf_state<'life0, T>(
         &'life0 self,
@@ -511,6 +480,9 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         }
     }
 
+    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
+        where
+            Self: 'life0;
     #[allow(unused)]
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_> {
         async move {
@@ -520,62 +492,99 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
                     let storage = MemStorage::new();
                     wl.insert(group_id, storage.clone());
                     Ok(RaftStorageImpl::new(storage))
-                },
+                }
                 Some(store) => Ok(RaftStorageImpl::new(store.clone())),
             }
         }
     }
 
-    fn replica_metadata(&self, group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_> {
+    type GroupDescFuture<'life0> = impl Future<Output = Result<RaftGroupDesc>> + 'life0
+    where
+        Self: 'life0;
+    fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_> {
         async move {
-            let mut wl = self.replicas.write().await;
+            let mut wl = self.group_desc_map.write().await;
             return match wl.get_mut(&group_id) {
-                Some(replicas) => {
-                    match replicas
-                        .iter()
-                        .find(|replica_metadata| replica_metadata.replica_id == replica_id)
-                    {
-                        Some(replica) => Ok(replica.clone()),
-                        None => {
-                            let replica_metadata = ReplicaMetadata {
-                                node_id: self.node_id,
-                                store_id: self.store_id,
-                                replica_id,
-                            };
-                            replicas.push(replica_metadata.clone());
-                            Ok(replica_metadata.clone())
-                        }
-                    }
-                }
+                Some(desc) => Ok(desc.clone()),
                 None => {
-                    let replica_metadata = ReplicaMetadata {
-                        node_id: self.node_id,
-                        store_id: self.store_id,
-                        replica_id,
-                    };
-                    let replicas = vec![replica_metadata.clone()];
-                    wl.insert(group_id, replicas);
-                    Ok(replica_metadata)
+                    let mut desc = RaftGroupDesc::default();
+                    desc.group_id = group_id;
+                    wl.insert(group_id, desc.clone());
+                    Ok(desc)
                 }
             };
         }
     }
 
-    fn replica_in_node(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_> {
+    type SetReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+    where
+        Self: 'life0;
+    fn set_replica_desc(
+        &self,
+        group_id: u64,
+        replica_desc: ReplicaDesc,
+    ) -> Self::SetReplicaDescFuture<'_> {
         async move {
-            let rl = self.replicas.read().await;
-            if !rl.contains_key(&group_id) {
-                return Ok(None);
-            }
-
-            let replicas = rl.get(&group_id).unwrap();
-            for replica_metadata in replicas.iter() {
-                if store_id == replica_metadata.store_id {
-                    return Ok(Some(replica_metadata.replica_id));
+            let mut wl = self.group_desc_map.write().await;
+            return match wl.get_mut(&group_id) {
+                Some(desc) => {
+                    if desc.replicas.iter().find(|r| **r == replica_desc).is_some() {
+                        return Ok(());
+                    }
+                    // invariant: if replica_desc are not present in the raft group desc,
+                    // then replica_desc.node_id not present in the nodes
+                    desc.nodes.push(replica_desc.node_id);
+                    desc.replicas.push(replica_desc);
+                    Ok(())
                 }
-            }
+                None => {
+                    // if raft group desc is none, a new one is created in storage.
+                    let mut desc = RaftGroupDesc::default();
+                    desc.group_id = group_id;
+                    desc.nodes.push(replica_desc.node_id);
+                    desc.replicas.push(replica_desc);
+                    wl.insert(group_id, desc.clone());
+                    Ok(())
+                }
+            };
+        }
+    }
 
-            Ok(None)
+    type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
+    where
+        Self: 'life0;
+    fn replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
+        async move {
+            let mut wl = self.group_desc_map.write().await;
+            return match wl.get_mut(&group_id) {
+                Some(desc) => {
+                    if let Some(replica) = desc.replicas.iter().find(|r| r.replica_id == replica_id)
+                    {
+                        return Ok(Some(replica.clone()));
+                    }
+                    Ok(None)
+                }
+                None => Ok(None),
+            };
+        }
+    }
+
+    type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
+    where
+        Self: 'life0;
+
+    fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
+        async move {
+            let mut wl = self.group_desc_map.write().await;
+            return match wl.get_mut(&group_id) {
+                Some(desc) => {
+                    if let Some(replica) = desc.replicas.iter().find(|r| r.node_id == node_id) {
+                        return Ok(Some(replica.clone()));
+                    }
+                    Ok(None)
+                }
+                None => Ok(None),
+            };
         }
     }
 }

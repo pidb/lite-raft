@@ -1,13 +1,14 @@
 use std::mem::transmute;
 
+use crate::proto::transmute_entries;
 use crate::proto::ConfState;
 use crate::proto::Entry;
 use crate::proto::HardState;
 use crate::proto::Message;
-use crate::proto::ReplicaMetadata;
+use crate::proto::RaftGroupDesc;
+use crate::proto::ReplicaDesc;
 use crate::proto::Snapshot;
 use crate::proto::SnapshotMetadata;
-use crate::proto::transmute_entries;
 
 use futures::Future;
 
@@ -64,7 +65,6 @@ pub fn transmute_error(error: StorageError) -> raft::StorageError {
     unsafe { transmute::<StorageError, raft::StorageError>(error) }
 }
 
-
 #[inline]
 pub fn transmute_message(msg: Message) -> raft::prelude::Message {
     unsafe { transmute::<Message, raft::prelude::Message>(msg) }
@@ -85,12 +85,10 @@ pub fn transmute_entries_ref<'a>(entries: &'a Vec<Entry>) -> &'a Vec<raft::prelu
     unsafe { std::mem::transmute(entries) }
 }
 
-
 #[inline]
 pub fn transmute_entry(entry: Entry) -> raft::prelude::Entry {
     unsafe { transmute(entry) }
 }
-
 
 #[inline]
 pub fn transmute_snapshot_metadata(
@@ -103,10 +101,6 @@ pub fn transmute_snapshot_metadata(
 pub fn transmute_raft_entries(entries: Vec<raft::prelude::Entry>) -> Vec<Entry> {
     unsafe { transmute(entries) }
 }
-
-
-
-
 
 #[inline]
 pub fn transmute_snapshot(snapshot: Snapshot) -> raft::prelude::Snapshot {
@@ -348,43 +342,24 @@ impl<S: RaftStorage> raft::storage::Storage for RaftStorageImpl<S> {
     }
 }
 
-//----------------------------------------------------------------------
-// MultiRaft storage trait
-//----------------------------------------------------------------------
-
-/// MultiRaftStorage per group
+/// MultiRaftStorage per raft group.
 pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
-    // GAT trait for group_storage
+    /// GAT trait for `group_storage`.
     type GroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0;
+    /// Get the `RaftStorage` impl by `group_id` and `replica_id`. if not exists create a
+    /// new one.
+    fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
 
-    // GAT trait for replica_metadata
-    type ReplicaMetadataFuture<'life0>: Send + Future<Output = Result<ReplicaMetadata>>
-    where
-        Self: 'life0;
-
-    type ReplicaInStoreFuture<'life0>: Send + Future<Output = Result<Option<u64>>>
-    where
-        Self: 'life0;
-
-    type CreateGroupStorageFuture<'life0>: Send + Future<Output = Result<RaftStorageImpl<S>>>
-    where
-        Self: 'life0;
-
+    /// GAT trait for `create_group_storage_with_conf_state`.
     type CreateGroupStorageWithConfStateFuture<'life0, T>: Send
         + Future<Output = Result<RaftStorageImpl<S>>>
     where
         Self: 'life0,
         ConfState: From<T>,
         T: Send + 'life0;
-
-    fn create_group_storage(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-    ) -> Self::CreateGroupStorageFuture<'_>;
-
+    /// Create a new `RaftStorage` with `ConfState`.
     fn create_group_storage_with_conf_state<T>(
         &self,
         group_id: u64,
@@ -395,10 +370,35 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
         ConfState: From<T>,
         T: Send;
 
-    fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
+    /// GAT trait for `group_desc`.
+    type GroupDescFuture<'life0>: Send + Future<Output = Result<RaftGroupDesc>> + Send + 'life0
+    where
+        Self: 'life0;
+    /// Get `RaftGroupDesc` by `group_id`. if not exists create a new one.
+    fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_>;
 
-    /// Get the metadata of `replica_id` and create if it does not exist.
-    fn replica_metadata(&self, group_id: u64, replica_id: u64) -> Self::ReplicaMetadataFuture<'_>;
+    /// GAT trait for `replica_desc`.
+    type ReplicaDescFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>
+    where
+        Self: 'life0;
+    /// Get the replica description of `group_id` and `replica_id`.
+    fn replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_>;
 
-    fn replica_in_node(&self, group_id: u64, store_id: u64) -> Self::ReplicaInStoreFuture<'_>;
+    /// GAT trait for `set_replica_desc`.
+    type SetReplicaDescFuture<'life0>: Send + Future<Output = Result<()>> + Send + 'life0
+    where
+        Self: 'life0;
+    /// Set the `ReplicaDesc` by `group_id`.
+    fn set_replica_desc(
+        &self,
+        group_id: u64,
+        replica_desc: ReplicaDesc,
+    ) -> Self::SetReplicaDescFuture<'_>;
+
+    /// GAT trait for `replica_for_node`.
+    type ReplicaForNodeFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>
+    where
+        Self: 'life0;
+    // Get the `ReplicaDesc` by `group_id` and `node_id`.
+    fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_>;
 }
