@@ -48,7 +48,7 @@ use super::proposal::Proposal;
 use super::proposal::ProposalQueueManager;
 use super::proposal::ReadIndexProposal;
 use super::raft_group::RaftGroup;
-use super::replica_cache::ReplicaMetadataCache;
+use super::replica_cache::ReplicaCache;
 use super::transport;
 use super::transport::MessageInterface;
 use super::transport::Transport;
@@ -70,7 +70,7 @@ use crate::proto::MessageType;
 use crate::proto::RaftGroupManagementMessage;
 use crate::proto::RaftGroupManagementMessageType;
 use crate::proto::RaftMessage;
-use crate::proto::ReplicaMetadata;
+use crate::proto::ReplicaDesc;
 use crate::proto::Snapshot;
 use crate::storage::transmute_message;
 
@@ -134,7 +134,8 @@ where
     transport: T,
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
     // proposals: ProposalQueueManager,
-    replica_metadata_cache: ReplicaMetadataCache<RS, MRS>,
+    replica_cache: ReplicaCache<RS, MRS>,
+    sync_replica_cache: bool,
     _m1: PhantomData<RS>,
     _m2: PhantomData<MI>,
 }
@@ -187,7 +188,8 @@ where
             transport,
             // write_actor_address,
             apply_actor_address,
-            replica_metadata_cache: ReplicaMetadataCache::new(storage.clone()),
+            sync_replica_cache: true,
+            replica_cache: ReplicaCache::new(storage.clone()),
             pending_events: Vec::new(),
             // waiting_ready_groups: VecDeque::default(),
             _m1: PhantomData,
@@ -335,24 +337,25 @@ where
         // processing messages between replicas from other nodes to self node.
         let group_id = msg.group_id;
 
-        let from_replica = ReplicaMetadata {
+        let from_replica = ReplicaDesc {
             node_id: msg.from_node,
             replica_id: raft_msg.from,
-            store_id: 0,
         };
 
-        let to_replica = ReplicaMetadata {
+        let to_replica = ReplicaDesc {
             node_id: msg.to_node,
             replica_id: raft_msg.to,
-            store_id: 0,
         };
 
-        self.replica_metadata_cache
-            .cache(group_id, from_replica.clone())
-            .await;
-        self.replica_metadata_cache
-            .cache(group_id, to_replica.clone())
-            .await;
+        self.replica_cache
+            .cache_replica_desc(group_id, from_replica.clone(), self.sync_replica_cache)
+            .await
+            .unwrap();
+
+        self.replica_cache
+            .cache_replica_desc(group_id, to_replica.clone(), self.sync_replica_cache)
+            .await
+            .unwrap();
 
         if !self.node_manager.contains_node(&from_replica.node_id) {
             self.node_manager.add_node(from_replica.node_id, group_id);
@@ -399,26 +402,23 @@ where
                 fanouted_groups += 1;
                 activity_groups.insert(*group_id);
 
-                // let leader = match group.leader.as_ref() {
-                //     None => continue,
-                //     Some(leader) => leader,
-                // };
-                // TODO: check leader is valid
-
-                if group.leader.node_id != msg.from_node || msg.from_node == self.node_id {
+                if group.leader.node_id == 0
+                    || group.leader.node_id != msg.from_node
+                    || msg.from_node == self.node_id
+                {
                     continue;
                 }
 
                 // gets the replica stored in this node.
-                let from_replica_id = self
+                let from_replica = self
                     .storage
-                    .replica_in_node(*group_id, msg.from_node)
+                    .replica_for_node(*group_id, msg.from_node)
                     .await
                     .unwrap()
                     .unwrap();
-                let to_replica_id = self
+                let to_replica = self
                     .storage
-                    .replica_in_node(*group_id, msg.to_node)
+                    .replica_for_node(*group_id, msg.to_node)
                     .await
                     .unwrap()
                     .unwrap();
@@ -427,8 +427,8 @@ where
 
                 let mut msg = raft::prelude::Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                msg.from = from_replica_id;
-                msg.to = to_replica_id;
+                msg.from = from_replica.replica_id;
+                msg.to = to_replica.replica_id;
                 group.raft_group.step(msg).unwrap();
             }
         } else {
@@ -488,23 +488,24 @@ where
                 }
 
                 // gets the replica stored in this node.
-                let from_replica_id = self
+                let from_replica = self
                     .storage
-                    .replica_in_node(*group_id, msg.from_node)
+                    .replica_for_node(*group_id, msg.from_node)
                     .await
                     .unwrap()
                     .unwrap();
-                let to_replica_id = self
+
+                let to_replica = self
                     .storage
-                    .replica_in_node(*group_id, msg.to_node)
+                    .replica_for_node(*group_id, msg.to_node)
                     .await
                     .unwrap()
                     .unwrap();
 
                 let mut msg = raft::prelude::Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
-                msg.from = from_replica_id;
-                msg.to = to_replica_id;
+                msg.from = from_replica.replica_id;
+                msg.to = to_replica.replica_id;
                 group.raft_group.step(msg).unwrap();
             }
         } else {
@@ -575,9 +576,10 @@ where
             if replica_metadata.node_id != NO_NODE {
                 self.node_manager
                     .add_node(replica_metadata.node_id, msg.group_id);
-                self.replica_metadata_cache
-                    .cache(msg.group_id, replica_metadata)
-                    .await;
+                self.replica_cache
+                    .cache_replica_desc(msg.group_id, replica_metadata, self.sync_replica_cache)
+                    .await
+                    .unwrap();
             }
         }
 
@@ -631,7 +633,7 @@ where
             committed_term: 0, // TODO: init committed term
             node_ids: vec![self.node_id],
             proposals: GroupProposalQueue::new(msg.replica_id),
-            leader: ReplicaMetadata::default(),
+            leader: ReplicaDesc::default(),
         };
         self.groups.insert(msg.group_id, group);
 
@@ -641,7 +643,7 @@ where
     /// Create a replica of the raft consensus group on this node.
     #[tracing::instrument(name = "MultiRaftActor::bootstrap_group", skip(self))]
     async fn create_raft_group(&mut self, group_id: u64, replica_id: u64) -> Result<(), Error> {
-         if self.groups.contains_key(&group_id) {
+        if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroupAlreayExists(group_id));
         }
 
@@ -652,7 +654,6 @@ where
         if replica_id == 0 {
             return Err(Error::BadParameter(format!("bad replica_id parameter (0)")));
         }
-       
 
         // let mut replica_id = 0;
         // get the raft consensus group reated to storage, create if not exists.
@@ -689,16 +690,17 @@ where
             raft_group,
             node_ids: Vec::new(),
             proposals: GroupProposalQueue::new(replica_id),
-            leader: ReplicaMetadata::default(), // TODO: init leader from storage
-            committed_term: 0,                  // TODO: init committed term from storage
+            leader: ReplicaDesc::default(), // TODO: init leader from storage
+            committed_term: 0,              // TODO: init committed term from storage
         };
 
         for voter_id in voters.iter() {
-            let replica_metadata = self
+            let replica_desc = self
                 .storage
-                .replica_metadata(group_id, *voter_id)
+                .replica_desc(group_id, *voter_id)
                 .await
-                .map_err(|err| Error::Store(err))?;
+                .map_err(|err| Error::Store(err))?
+                .unwrap();
 
             // at this point, we don't know the infomation about
             // the node which replica.
@@ -706,14 +708,13 @@ where
             //     None => continue,
             //     Some(replica_metadata) => replica_metadata,
             // };
-            if replica_metadata.node_id == NO_NODE {
+            if replica_desc.node_id == NO_NODE {
                 continue;
             }
 
             // track the nodes which other members of the raft consensus group
-            group.node_ids.push(replica_metadata.node_id);
-            self.node_manager
-                .add_node(replica_metadata.node_id, group_id);
+            group.node_ids.push(replica_desc.node_id);
+            self.node_manager.add_node(replica_desc.node_id, group_id);
         }
         self.groups.insert(group_id, group);
 
@@ -776,9 +777,11 @@ where
                         MultiRaftActor::<MI, T, RS, MRS>::apply_membership_change(
                             group,
                             &mut self.node_manager,
-                            &mut self.replica_metadata_cache,
+                            &mut self.replica_cache,
+                            self.sync_replica_cache,
                             result,
                         )
+                        .await;
                     }
                 }
             }
@@ -787,22 +790,25 @@ where
         }
     }
 
-    fn apply_membership_change(
+    async fn apply_membership_change(
         group: &mut RaftGroup<RS>,
         node_mgr: &mut NodeManager,
-        replica_metadata_cache: &mut ReplicaMetadataCache<RS, MRS>,
+        replica_cache: &mut ReplicaCache<RS, MRS>,
+        sync_replica_cache: bool,
         result: MembershipChangeResult,
     ) {
         for change in result.changes.iter() {
             match change.change_type() {
                 crate::proto::ConfChangeType::AddNode => {
-                    let replica_metadata = ReplicaMetadata {
+                    let replica_metadata = ReplicaDesc {
                         node_id: change.node_id,
                         replica_id: change.replica_id,
-                        store_id: 0, // TODO: remove it
                     };
                     node_mgr.add_node(change.node_id, change.group_id);
-                    replica_metadata_cache.cache(change.group_id, replica_metadata);
+                    replica_cache
+                        .cache_replica_desc(change.group_id, replica_metadata, sync_replica_cache)
+                        .await
+                        .unwrap();
                 }
                 crate::proto::ConfChangeType::RemoveNode => unimplemented!(),
                 crate::proto::ConfChangeType::AddLearnerNode => unimplemented!(),
@@ -843,7 +849,8 @@ where
                 let mut group_ready = group.raft_group.ready();
 
                 // we need to know which replica in raft group is ready.
-                let replica_id = match self.storage.replica_in_node(*group_id, self.node_id).await {
+                let replica_id = match self.storage.replica_for_node(*group_id, self.node_id).await
+                {
                     Err(error) => {
                         error!(
                             "write is error, got {} group replica  of storage error {}",
@@ -851,8 +858,8 @@ where
                         );
                         continue;
                     }
-                    Ok(replica) => match replica {
-                        Some(replica_id) => replica_id,
+                    Ok(replica_desc) => match replica_desc {
+                        Some(replica_desc) => replica_desc.replica_id,
                         None => {
                             // if we can't look up the replica in storage, but the group is ready,
                             // we know that one of the replicas must be ready, so we can repair the
@@ -866,12 +873,13 @@ where
 
                 if let Some(ss) = group_ready.ss() {
                     if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
-                        let replica_metadata = self
-                            .replica_metadata_cache
-                            .get(*group_id, ss.leader_id)
+                        let replica_desc = self
+                            .replica_cache
+                            .replica_desc(*group_id, ss.leader_id)
                             .await
+                            .unwrap()
                             .unwrap();
-                        group.leader = replica_metadata;
+                        group.leader = replica_desc;
                         self.pending_events
                             .push(Event::LederElection(LeaderElectionEvent {
                                 group_id: *group_id,

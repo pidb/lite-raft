@@ -1,5 +1,3 @@
-
-
 use futures::Future;
 
 use tracing::info;
@@ -13,8 +11,6 @@ use crate::proto::RaftMessage;
 use crate::proto::RaftMessageResponse;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
-
-
 
 pub trait MessageInterface: Send + Sync + 'static {
     type RaftMessageFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
@@ -94,11 +90,18 @@ pub async fn send_message<MI, TR, RS, MRS>(
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
-
-    let to_replica = storage.replica_metadata(group_id, msg.to).await.unwrap();
+    let to_replica = storage
+        .replica_desc(group_id, msg.to)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(to_replica.node_id, 0);
 
-    let from_replica = storage.replica_metadata(group_id, msg.from).await.unwrap();
+    let from_replica = storage
+        .replica_desc(group_id, msg.from)
+        .await
+        .unwrap()
+        .unwrap();
     assert_ne!(from_replica.node_id, 0);
 
     if !node_mgr.contains_node(&to_replica.node_id) {
@@ -113,4 +116,3 @@ pub async fn send_message<MI, TR, RS, MRS>(
     };
     transport.send(msg).unwrap();
 }
-

@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 use crate::proto::AppWriteRequest;
 use crate::proto::AppReadIndexRequest;
-use crate::proto::ReplicaMetadata;
+use crate::proto::ReplicaDesc;
 use crate::storage::RaftStorage;
 use crate::storage::RaftStorageImpl;
 
@@ -24,7 +24,7 @@ pub struct RaftGroup<RS: RaftStorage> {
     // track the nodes which members ofq the raft consensus group
     pub node_ids: Vec<u64>,
     pub proposals: GroupProposalQueue,
-    pub leader: ReplicaMetadata,
+    pub leader: ReplicaDesc,
     pub committed_term: u64,
 }
 
