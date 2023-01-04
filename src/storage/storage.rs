@@ -377,6 +377,13 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     /// Get `RaftGroupDesc` by `group_id`. if not exists create a new one.
     fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_>;
 
+    /// GAT trait for `set_group_desc`.
+    type SetGroupDescFuture<'life0>: Send + Future<Output = Result<()>> + Send + 'life0
+    where
+        Self: 'life0;
+    /// Set `RaftGroupDesc` by `group_id`. 
+    fn set_group_desc(&self, group_id: u64, group_desc: RaftGroupDesc) -> Self::SetGroupDescFuture<'_>;
+
     /// GAT trait for `replica_desc`.
     type ReplicaDescFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>
     where

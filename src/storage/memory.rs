@@ -498,6 +498,21 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         }
     }
 
+    type SetGroupDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+    where
+        Self: 'life0;
+    fn set_group_desc(
+        &self,
+        group_id: u64,
+        group_desc: RaftGroupDesc,
+    ) -> Self::SetGroupDescFuture<'_> {
+        async move {
+            let mut wl = self.group_desc_map.write().await;
+            wl.insert(group_id, group_desc);
+            return Ok(());
+        }
+    }
+
     type GroupDescFuture<'life0> = impl Future<Output = Result<RaftGroupDesc>> + 'life0
     where
         Self: 'life0;

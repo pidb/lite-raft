@@ -1,8 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use prost::encoding::group;
-
 use crate::proto::RaftGroupDesc;
 use crate::proto::ReplicaDesc;
 use crate::storage::MultiRaftStorage;
@@ -67,31 +65,35 @@ where
         Ok(ReplicaCache::<RS, MRS>::find(group_desc, |replica| replica.node_id == node_id).await)
     }
 
+    /// Cache given replica and `sync` indicates whether syn to storage.
     pub async fn cache_replica_desc(
         &mut self,
         group_id: u64,
-        replica_desc: ReplicaDesc
-    ) {
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            if group.replicas.iter().find(|replica| **replica == replica_desc).is_some() {
-                return
+        replica_desc: ReplicaDesc,
+        sync: bool
+    ) -> Result<(), Error>{
+        if let Some(group_desc) = self.groups.get_mut(&group_id) {
+            if group_desc.replicas.iter().find(|replica| **replica == replica_desc).is_some() {
+                return Ok(())
             }
-
             // update cache
-            group.nodes.push(replica_desc.node_id);
-            group.replicas.push(replica_desc);
-
-            // TODO: write storage
-            // TODO: add sync option
-            // TODO: direact update storage
-            return
+            group_desc.nodes.push(replica_desc.node_id);
+            group_desc.replicas.push(replica_desc);
+            if sync {
+                let _ = self.storage.set_group_desc(group_id, group_desc.clone()).await?;
+            }
+            return Ok(())
         }
 
         let mut group_desc = RaftGroupDesc::default();
         group_desc.nodes.push(replica_desc.node_id);
         group_desc.replicas.push(replica_desc);
-        // TODO: direact create new group_desc in storage
-        return
+        if sync {
+            // set new group_desc in storage
+            let _ = self.storage.set_group_desc(group_id, group_desc.clone()).await?;
+        }
+        self.groups.insert(group_id, group_desc);
+        return Ok(())
     }
 
     #[inline]
