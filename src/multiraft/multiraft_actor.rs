@@ -70,6 +70,7 @@ use crate::proto::MessageType;
 use crate::proto::RaftGroupManagementMessage;
 use crate::proto::RaftGroupManagementMessageType;
 use crate::proto::RaftMessage;
+use crate::proto::RaftMessageResponse;
 use crate::proto::ReplicaDesc;
 use crate::proto::Snapshot;
 use crate::storage::transmute_message;
@@ -93,7 +94,10 @@ pub struct MultiRaftActorAddress {
     pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
     pub campagin_tx: Sender<u64>,
-    pub raft_message_tx: Sender<RaftMessage>,
+    pub raft_message_tx: Sender<(
+        RaftMessage,
+        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+    )>,
     pub manager_group_tx: Sender<(
         RaftGroupManagementMessage,
         oneshot::Sender<Result<(), Error>>,
@@ -117,7 +121,10 @@ where
     heartbeat_tick: usize,
     write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    raft_message_rx: Receiver<RaftMessage>,
+    raft_message_rx: Receiver<(
+        RaftMessage,
+        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+    )>,
 
     campagin_rx: Receiver<u64>,
 
@@ -266,7 +273,7 @@ where
                     }
                 },
 
-                Some(msg) = self.raft_message_rx.recv() => self.handle_raft_message(msg, &mut activity_groups).await,
+                Some((msg, tx)) = self.raft_message_rx.recv() => self.handle_raft_message(msg, tx, &mut activity_groups).await,
 
                 Some(group_id) = self.campagin_rx.recv() => self.campagin_raft(group_id).await,
 
@@ -319,6 +326,7 @@ where
     async fn handle_raft_message(
         &mut self,
         mut msg: RaftMessage,
+        tx: oneshot::Sender<Result<RaftMessageResponse, Error>>,
         activity_groups: &mut HashSet<u64>,
     ) {
         let raft_msg = msg.msg.take().expect("invalid message");
@@ -347,15 +355,23 @@ where
             replica_id: raft_msg.to,
         };
 
-        self.replica_cache
+        if let Err(err) = self
+            .replica_cache
             .cache_replica_desc(group_id, from_replica.clone(), self.sync_replica_cache)
             .await
-            .unwrap();
+        {
+            tx.send(Err(err)).unwrap();
+            return;
+        }
 
-        self.replica_cache
+        if let Err(err) = self
+            .replica_cache
             .cache_replica_desc(group_id, to_replica.clone(), self.sync_replica_cache)
             .await
-            .unwrap();
+        {
+            tx.send(Err(err)).unwrap();
+            return;
+        }
 
         if !self.node_manager.contains_node(&from_replica.node_id) {
             self.node_manager.add_node(from_replica.node_id, group_id);
@@ -410,18 +426,43 @@ where
                 }
 
                 // gets the replica stored in this node.
-                let from_replica = self
+                let from_replica = match self
                     .storage
                     .replica_for_node(*group_id, msg.from_node)
                     .await
-                    .unwrap()
-                    .unwrap();
-                let to_replica = self
-                    .storage
-                    .replica_for_node(*group_id, msg.to_node)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on from_node {} in current node {} error: {}",
+                            group_id, msg.from_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
+
+                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on to_node {} in current node {} error: {}",
+                            group_id, msg.to_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
 
                 fanouted_followers += 1;
 
@@ -488,19 +529,43 @@ where
                 }
 
                 // gets the replica stored in this node.
-                let from_replica = self
+                let from_replica = match self
                     .storage
                     .replica_for_node(*group_id, msg.from_node)
                     .await
-                    .unwrap()
-                    .unwrap();
+                {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on from_node {} in current node {} error: {}",
+                            group_id, msg.from_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
 
-                let to_replica = self
-                    .storage
-                    .replica_for_node(*group_id, msg.to_node)
-                    .await
-                    .unwrap()
-                    .unwrap();
+                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on to_node {} in current node {} error: {}",
+                            group_id, msg.to_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
 
                 let mut msg = raft::prelude::Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
@@ -800,6 +865,11 @@ where
         for change in result.changes.iter() {
             match change.change_type() {
                 crate::proto::ConfChangeType::AddNode => {
+                    // TODO: this call need transfer to user call, and if user call return errored,
+                    // the membership change should failed and user need to retry.
+                    // we need a channel to provider user notify actor it need call these code.
+                    // and we recv the notify can executing these code, if executed failed, we
+                    // response to user and membership change is failed.
                     let replica_metadata = ReplicaDesc {
                         node_id: change.node_id,
                         replica_id: change.replica_id,
