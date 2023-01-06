@@ -1,38 +1,13 @@
-[package]
-name = "smol-raft"
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+authors = [
+    "Yuanchang Xu <yuanchang.xu@outlook.com>"
+]
+license = "MIT/Apache-2.0"
 
-[dependencies]
-serde = { version = "1.0", features = ["derive"] }
-raft = { version = "0.6.0", default-features = false, features=["prost-codec", "default-logger"]}
-#tokio = { version = "1", features = ["full", "tracing"] }
-tokio = { version = "1", features = ["full"] }
-slog = { version = "2.2", features = ["max_level_info"] }
-# slog = { version = "2.2"}
-uuid = { version = "1", features = ["v4"] }
-protobuf = { version = "3" }
-lazy_static = { version = "1" }
-bincode = { version = "1" }
-# crossbeam = { version = "0.8" }
-# signal-hook-tokio = { version = "0.3" }
-serde_json = { version = "1" }
-slog-term = "2"
-slog-async = "2"
-# rocksdb = "0.19.0"
-thiserror = "1"
-# async-trait = "0.1"
-futures = "0.3"
-tracing = "0.1"
-tracing-subscriber = "0.3"
-console-subscriber = {version = "0.1"}
-bytes = { version = "1" }
-prost = { version = "0.11" }
-smallvec = { version = "1" }
-
-[dependencies.rocksdb]
-default-features = false
-features = ["lz4"]
-
-[build-dependencies]
-prost-build = { version = "0.11" }
+[workspace]
+members = [
+    "proto",
+    "raft-core",
+]
