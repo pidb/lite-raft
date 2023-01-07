@@ -1,34 +1,177 @@
+//! Represents the storage trait and example implementation.
+//!
+//! The storage trait is used to house and eventually serialize the state of the system.
+//! Custom implementations of this are normal and this is likely to be a key integration
+//! point for your distributed storage.
+
+// Copyright 2019 TiKV Project Authors. Licensed under Apache-2.0.
+
+// Copyright 2015 The etcd Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 use std::cmp;
-use std::collections::hash_map::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
-use std::sync::RwLockReadGuard;
-use std::sync::RwLockWriteGuard;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use futures::Future;
-use tokio::sync::RwLock as AsyncRwLock;
+use crate::eraftpb::*;
 
-use crate::proto::limit_entry_size;
-use crate::proto::ConfState;
-use crate::proto::Entry;
-use crate::proto::HardState;
-use crate::proto::RaftGroupDesc;
-use crate::proto::ReplicaDesc;
-use crate::proto::Snapshot;
-use crate::proto::SnapshotMetadata;
+use crate::errors::{Error, Result, StorageError};
+use crate::util::limit_size;
 
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftSnapshotBuilder;
-use crate::storage::RaftState;
-use crate::storage::RaftStorage;
-use crate::storage::StorageError;
+use getset::{Getters, Setters};
 
-use super::storage::Result;
-use super::RaftStorageImpl;
+/// Holds both the hard state (commit index, vote leader, term) and the configuration state
+/// (Current node IDs)
+#[derive(Debug, Clone, Default, Getters, Setters)]
+pub struct RaftState {
+    /// Contains the last meta information including commit index, the vote leader, and the vote term.
+    pub hard_state: HardState,
+
+    /// Records the current node IDs like `[1, 2, 3]` in the cluster. Every Raft node must have a
+    /// unique ID in the cluster;
+    pub conf_state: ConfState,
+}
+
+impl RaftState {
+    /// Create a new RaftState.
+    pub fn new(hard_state: HardState, conf_state: ConfState) -> RaftState {
+        RaftState {
+            hard_state,
+            conf_state,
+        }
+    }
+    /// Indicates the `RaftState` is initialized or not.
+    pub fn initialized(&self) -> bool {
+        self.conf_state != ConfState::default()
+    }
+}
+
+/// Records the context of the caller who calls entries() of Storage trait.
+#[derive(Debug)]
+pub struct GetEntriesContext(pub(crate) GetEntriesFor);
+
+impl GetEntriesContext {
+    /// Used for callers out of raft. Caller can customize if it supports async.
+    pub fn empty(can_async: bool) -> Self {
+        GetEntriesContext(GetEntriesFor::Empty(can_async))
+    }
+
+    /// Check if the caller's context support fetching entries asynchrouously.
+    pub fn can_async(&self) -> bool {
+        match self.0 {
+            GetEntriesFor::SendAppend { .. } => true,
+            GetEntriesFor::Empty(can_async) => can_async,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum GetEntriesFor {
+    // for sending entries to followers
+    SendAppend {
+        /// the peer id to which the entries are going to send
+        to: u64,
+        /// the term when the request is issued
+        term: u64,
+        /// whether to exhaust all the entries
+        aggressively: bool,
+    },
+    // for getting committed entries in a ready
+    GenReady,
+    // for getting entries to check pending conf when transferring leader
+    TransferLeader,
+    // for getting entries to check pending conf when forwarding commit index by vote messages
+    CommitByVote,
+    // It's not called by the raft itself
+    Empty(bool),
+}
+
+/// Storage saves all the information about the current Raft implementation, including Raft Log,
+/// commit index, the leader to vote for, etc.
+///
+/// If any Storage method returns an error, the raft instance will
+/// become inoperable and refuse to participate in elections; the
+/// application is responsible for cleanup and recovery in this case.
+pub trait Storage {
+    /// `initial_state` is called when Raft is initialized. This interface will return a `RaftState`
+    /// which contains `HardState` and `ConfState`.
+    ///
+    /// `RaftState` could be initialized or not. If it's initialized it means the `Storage` is
+    /// created with a configuration, and its last index and term should be greater than 0.
+    fn initial_state(&self) -> Result<RaftState>;
+
+    /// Returns a slice of log entries in the range `[low, high)`.
+    /// max_size limits the total size of the log entries returned if not `None`, however
+    /// the slice of entries returned will always have length at least 1 if entries are
+    /// found in the range.
+    ///
+    /// Entries are supported to be fetched asynchorously depending on the context. Async is optional.
+    /// Storage should check context.can_async() first and decide whether to fetch entries asynchorously
+    /// based on its own implementation. If the entries are fetched asynchorously, storage should return
+    /// LogTemporarilyUnavailable, and application needs to call `on_entries_fetched(context)` to trigger
+    /// re-fetch of the entries after the storage finishes fetching the entries.   
+    ///
+    /// # Panics
+    ///
+    /// Panics if `high` is higher than `Storage::last_index(&self) + 1`.
+    fn entries(
+        &self,
+        low: u64,
+        high: u64,
+        max_size: impl Into<Option<u64>>,
+        context: GetEntriesContext,
+    ) -> Result<Vec<Entry>>;
+
+    /// Returns the term of entry idx, which must be in the range
+    /// [first_index()-1, last_index()]. The term of the entry before
+    /// first_index is retained for matching purpose even though the
+    /// rest of that entry may not be available.
+    fn term(&self, idx: u64) -> Result<u64>;
+
+    /// Returns the index of the first log entry that is possible available via entries, which will
+    /// always equal to `truncated index` plus 1.
+    ///
+    /// New created (but not initialized) `Storage` can be considered as truncated at 0 so that 1
+    /// will be returned in this case.
+    fn first_index(&self) -> Result<u64>;
+
+    /// The index of the last entry replicated in the `Storage`.
+    fn last_index(&self) -> Result<u64>;
+
+    /// Returns the most recent snapshot.
+    ///
+    /// If snapshot is temporarily unavailable, it should return SnapshotTemporarilyUnavailable,
+    /// so raft state machine could know that Storage needs some time to prepare
+    /// snapshot and call snapshot later.
+    /// A snapshot's index must not less than the `request_index`.
+    /// `to` indicates which peer is requesting the snapshot.
+    fn snapshot(&self, request_index: u64, to: u64) -> Result<Snapshot>;
+
+    /// Append the new entries to storage.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ents` contains compacted entries, or there's a gap between `ents` and the last
+    /// received entry in the storage.
+    fn append_entries(&self, ents: &[Entry]) -> Result<()>;
+
+    /// Saves the current HardState.
+    fn set_hardstate(&self, hs: HardState) -> Result<()>;
+}
 
 /// The Memory Storage Core instance holds the actual state of the storage struct. To access this
 /// value, use the `rl` and `wl` functions on the main MemStorage implementation.
-#[allow(unused)]
 #[derive(Default)]
 pub struct MemStorageCore {
     raft_state: RaftState,
@@ -42,6 +185,7 @@ pub struct MemStorageCore {
     // Peers that are fetching entries asynchronously.
     trigger_log_unavailable: bool,
     // Stores get entries context.
+    get_entries_context: Option<GetEntriesContext>,
 }
 
 impl MemStorageCore {
@@ -112,7 +256,7 @@ impl MemStorageCore {
         let index = meta.index;
 
         if self.first_index() > index {
-            return Err(StorageError::SnapshotOutOfDate);
+            return Err(Error::Store(StorageError::SnapshotOutOfDate));
         }
 
         self.snapshot_metadata = meta.clone();
@@ -230,6 +374,11 @@ impl MemStorageCore {
     pub fn trigger_log_unavailable(&mut self, v: bool) {
         self.trigger_log_unavailable = v;
     }
+
+    /// Take get entries context.
+    pub fn take_get_entries_context(&mut self) -> Option<GetEntriesContext> {
+        self.get_entries_context.take()
+    }
 }
 
 /// `MemStorage` is a thread-safe but incomplete implementation of `Storage`, mainly for tests.
@@ -296,18 +445,24 @@ impl MemStorage {
     }
 }
 
-impl RaftStorage for MemStorage {
+impl Storage for MemStorage {
     /// Implements the Storage trait.
     fn initial_state(&self) -> Result<RaftState> {
         Ok(self.rl().raft_state.clone())
     }
 
     /// Implements the Storage trait.
-    fn entries(&self, low: u64, high: u64, max_size: impl Into<Option<u64>>) -> Result<Vec<Entry>> {
+    fn entries(
+        &self,
+        low: u64,
+        high: u64,
+        max_size: impl Into<Option<u64>>,
+        context: GetEntriesContext,
+    ) -> Result<Vec<Entry>> {
         let max_size = max_size.into();
-        let core = self.wl();
+        let mut core = self.wl();
         if low < core.first_index() {
-            return Err(StorageError::Compacted);
+            return Err(Error::Store(StorageError::Compacted));
         }
 
         if high > core.last_index() + 1 {
@@ -318,16 +473,16 @@ impl RaftStorage for MemStorage {
             );
         }
 
-        // if core.trigger_log_unavailable && context.can_async() {
-        //     core.get_entries_context = Some(context);
-        //     return Err(StorageError::LogTemporarilyUnavailable);
-        // }
+        if core.trigger_log_unavailable && context.can_async() {
+            core.get_entries_context = Some(context);
+            return Err(Error::Store(StorageError::LogTemporarilyUnavailable));
+        }
 
         let offset = core.entries[0].index;
         let lo = (low - offset) as usize;
         let hi = (high - offset) as usize;
         let mut ents = core.entries[lo..hi].to_vec();
-        limit_entry_size(&mut ents, max_size);
+        limit_size(&mut ents, max_size);
         Ok(ents)
     }
 
@@ -340,11 +495,11 @@ impl RaftStorage for MemStorage {
 
         let offset = core.first_index();
         if idx < offset {
-            return Err(StorageError::Compacted);
+            return Err(Error::Store(StorageError::Compacted));
         }
 
         if idx > core.last_index() {
-            return Err(StorageError::Unavailable);
+            return Err(Error::Store(StorageError::Unavailable));
         }
         Ok(core.entries[(idx - offset) as usize].term)
     }
@@ -360,11 +515,11 @@ impl RaftStorage for MemStorage {
     }
 
     /// Implements the Storage trait.
-    fn snapshot(&self, request_index: u64) -> Result<Snapshot> {
+    fn snapshot(&self, request_index: u64, _to: u64) -> Result<Snapshot> {
         let mut core = self.wl();
         if core.trigger_snap_unavailable {
             core.trigger_snap_unavailable = false;
-            Err(StorageError::SnapshotTemporarilyUnavailable)
+            Err(Error::Store(StorageError::SnapshotTemporarilyUnavailable))
         } else {
             let mut snap = core.snapshot();
             if snap.get_metadata().index < request_index {
@@ -374,246 +529,30 @@ impl RaftStorage for MemStorage {
         }
     }
 
-    fn append_entries(&self, entries: &Vec<Entry>) -> Result<()> {
-        let mut wl = self.wl();
-        wl.append(&entries)
+    /// Implements the Storage trait
+    fn append_entries(&self, ents: &[Entry]) -> Result<()> {
+        let mut core = self.wl();
+        core.append(ents)
     }
 
-    fn get_hard_state(&self) -> Result<HardState> {
-        Ok(self.rl().hard_state().clone())
-    }
-
+    /// Implements the Storage trait
     fn set_hardstate(&self, hs: HardState) -> Result<()> {
-        Ok(self.wl().set_hardstate(hs))
-    }
-
-    fn set_confstate(&self, cs: ConfState) -> Result<()> {
-        Ok(self.wl().set_conf_state(cs))
-    }
-
-    fn get_confstate(&self) -> Result<ConfState> {
-        let rl = self.rl();
-        Ok(rl.raft_state.conf_state.clone())
-    }
-
-    fn set_commit(&self, commit: u64) {
-        self.wl().mut_hard_state().commit = commit
-    }
-
-    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<()> {
-        self.wl().apply_snapshot(snapshot)
-    }
-}
-
-impl RaftSnapshotBuilder for MemStorage {
-    fn build_snapshot(&self, applied: u64) -> Result<Snapshot> {
-        unimplemented!()
-    }
-}
-
-#[derive(Clone)]
-pub struct MultiRaftMemoryStorage {
-    node_id: u64,
-    store_id: u64,
-    groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
-    group_desc_map: Arc<AsyncRwLock<HashMap<u64, RaftGroupDesc>>>,
-}
-
-impl MultiRaftMemoryStorage {
-    pub fn new(node_id: u64, store_id: u64) -> Self {
-        Self {
-            node_id,
-            store_id,
-            groups: Default::default(),
-            group_desc_map: Default::default(),
-        }
-    }
-
-    pub async fn insert_memory_storage(&self, group_id: u64) {
-        let mut wl = self.groups.write().await;
-        if wl.contains_key(&group_id) {
-            panic!("raft group ({}) already exists", group_id)
-        }
-        wl.insert(group_id, MemStorage::new());
-    }
-
-    pub async fn insert_replica_memory_storage_with_conf_state<T>(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        conf_state: T,
-    ) where
-        ConfState: From<T>,
-    {
-        let mut wl = self.groups.write().await;
-        if wl.contains_key(&group_id) {
-            panic!("raft group ({}) already exists", group_id)
-        }
-
-        wl.insert(group_id, MemStorage::new_with_conf_state(conf_state));
-    }
-}
-
-impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
-    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
-        where
-            Self: 'life0,
-            ConfState: From<T>,
-            T: Send + 'life0;
-    #[allow(unused)]
-    fn create_group_storage_with_conf_state<'life0, T>(
-        &'life0 self,
-        group_id: u64,
-        replica_id: u64,
-        conf_state: T,
-    ) -> Self::CreateGroupStorageWithConfStateFuture<'life0, T>
-    where
-        ConfState: From<T>,
-        T: Send,
-    {
-        async move {
-            let mut wl = self.groups.write().await;
-            assert_ne!(wl.contains_key(&group_id), true);
-            let storage = MemStorage::new_with_conf_state(conf_state);
-            wl.insert(group_id, storage.clone());
-            Ok(RaftStorageImpl::new(storage))
-        }
-    }
-
-    type GroupStorageFuture<'life0> = impl Future<Output = super::storage::Result<super::RaftStorageImpl<MemStorage>>> + 'life0
-        where
-            Self: 'life0;
-    #[allow(unused)]
-    fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_> {
-        async move {
-            let mut wl = self.groups.write().await;
-            match wl.get_mut(&group_id) {
-                None => {
-                    let storage = MemStorage::new();
-                    wl.insert(group_id, storage.clone());
-                    Ok(RaftStorageImpl::new(storage))
-                }
-                Some(store) => Ok(RaftStorageImpl::new(store.clone())),
-            }
-        }
-    }
-
-    type SetGroupDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
-    where
-        Self: 'life0;
-    fn set_group_desc(
-        &self,
-        group_id: u64,
-        group_desc: RaftGroupDesc,
-    ) -> Self::SetGroupDescFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            wl.insert(group_id, group_desc);
-            return Ok(());
-        }
-    }
-
-    type GroupDescFuture<'life0> = impl Future<Output = Result<RaftGroupDesc>> + 'life0
-    where
-        Self: 'life0;
-    fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => Ok(desc.clone()),
-                None => {
-                    let mut desc = RaftGroupDesc::default();
-                    desc.group_id = group_id;
-                    wl.insert(group_id, desc.clone());
-                    Ok(desc)
-                }
-            };
-        }
-    }
-
-    type SetReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
-    where
-        Self: 'life0;
-    fn set_replica_desc(
-        &self,
-        group_id: u64,
-        replica_desc: ReplicaDesc,
-    ) -> Self::SetReplicaDescFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if desc.replicas.iter().find(|r| **r == replica_desc).is_some() {
-                        return Ok(());
-                    }
-                    // invariant: if replica_desc are not present in the raft group desc,
-                    // then replica_desc.node_id not present in the nodes
-                    desc.nodes.push(replica_desc.node_id);
-                    desc.replicas.push(replica_desc);
-                    Ok(())
-                }
-                None => {
-                    // if raft group desc is none, a new one is created in storage.
-                    let mut desc = RaftGroupDesc::default();
-                    desc.group_id = group_id;
-                    desc.nodes.push(replica_desc.node_id);
-                    desc.replicas.push(replica_desc);
-                    wl.insert(group_id, desc.clone());
-                    Ok(())
-                }
-            };
-        }
-    }
-
-    type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
-    where
-        Self: 'life0;
-    fn replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if let Some(replica) = desc.replicas.iter().find(|r| r.replica_id == replica_id)
-                    {
-                        return Ok(Some(replica.clone()));
-                    }
-                    Ok(None)
-                }
-                None => Ok(None),
-            };
-        }
-    }
-
-    type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
-    where
-        Self: 'life0;
-
-    fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if let Some(replica) = desc.replicas.iter().find(|r| r.node_id == node_id) {
-                        return Ok(Some(replica.clone()));
-                    }
-                    Ok(None)
-                }
-                None => Ok(None),
-            };
-        }
+        let mut core = self.wl();
+        core.set_hardstate(hs);
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod test {
-    use crate::proto::ConfState;
-    use crate::proto::Entry;
-    use crate::proto::Snapshot;
     use std::panic::{self, AssertUnwindSafe};
 
-    use super::MemStorage;
-    use super::RaftStorage;
-    use super::StorageError;
+    use protobuf::Message as PbMessage;
+
+    use crate::eraftpb::{ConfState, Entry, Snapshot};
+    use crate::errors::{Error as RaftError, StorageError};
+
+    use super::{GetEntriesContext, MemStorage, Storage};
 
     fn new_entry(index: u64, term: u64) -> Entry {
         let mut e = Entry::default();
@@ -622,7 +561,7 @@ mod test {
         e
     }
 
-    fn size_of(m: &Entry) -> u32 {
+    fn size_of<T: PbMessage>(m: &T) -> u32 {
         m.compute_size() as u32
     }
 
@@ -638,11 +577,11 @@ mod test {
     fn test_storage_term() {
         let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
         let mut tests = vec![
-            (2, Err(StorageError::Compacted)),
+            (2, Err(RaftError::Store(StorageError::Compacted))),
             (3, Ok(3)),
             (4, Ok(4)),
             (5, Ok(5)),
-            (6, Err(StorageError::Unavailable)),
+            (6, Err(RaftError::Store(StorageError::Unavailable))),
         ];
 
         for (i, (idx, wterm)) in tests.drain(..).enumerate() {
@@ -666,7 +605,12 @@ mod test {
         ];
         let max_u64 = u64::max_value();
         let mut tests = vec![
-            (2, 6, max_u64, Err(StorageError::Compacted)),
+            (
+                2,
+                6,
+                max_u64,
+                Err(RaftError::Store(StorageError::Compacted)),
+            ),
             (3, 4, max_u64, Ok(vec![new_entry(3, 3)])),
             (4, 5, max_u64, Ok(vec![new_entry(4, 4)])),
             (4, 6, max_u64, Ok(vec![new_entry(4, 4), new_entry(5, 5)])),
@@ -708,7 +652,7 @@ mod test {
         for (i, (lo, hi, maxsize, wentries)) in tests.drain(..).enumerate() {
             let storage = MemStorage::new();
             storage.wl().entries = ents.clone();
-            let e = storage.entries(lo, hi, maxsize);
+            let e = storage.entries(lo, hi, maxsize, GetEntriesContext::empty(false));
             if e != wentries {
                 panic!("#{}: expect entries {:?}, got {:?}", i, wentries, e);
             }
@@ -759,7 +703,9 @@ mod test {
             if index != windex {
                 panic!("#{}: want {}, index {}", i, windex, index);
             }
-            let term = if let Ok(v) = storage.entries(index, index + 1, 1) {
+            let term = if let Ok(v) =
+                storage.entries(index, index + 1, 1, GetEntriesContext::empty(false))
+            {
                 v.first().map_or(0, |e| e.term)
             } else {
                 0
@@ -768,7 +714,10 @@ mod test {
                 panic!("#{}: want {}, term {}", i, wterm, term);
             }
             let last = storage.last_index().unwrap();
-            let len = storage.entries(index, last + 1, 100).unwrap().len();
+            let len = storage
+                .entries(index, last + 1, 100, GetEntriesContext::empty(false))
+                .unwrap()
+                .len();
             if len != wlen {
                 panic!("#{}: want {}, term {}", i, wlen, len);
             }
@@ -782,7 +731,9 @@ mod test {
         let mut conf_state = ConfState::default();
         conf_state.voters = nodes.clone();
 
-        let unavailable = Err(StorageError::SnapshotTemporarilyUnavailable);
+        let unavailable = Err(RaftError::Store(
+            StorageError::SnapshotTemporarilyUnavailable,
+        ));
         let mut tests = vec![
             (4, Ok(new_snapshot(4, 4, nodes.clone())), 0),
             (5, Ok(new_snapshot(5, 5, nodes.clone())), 5),
@@ -800,7 +751,7 @@ mod test {
                 storage.wl().trigger_snap_unavailable();
             }
 
-            let result = storage.snapshot(windex);
+            let result = storage.snapshot(windex, 0);
             if result != wresult {
                 panic!("#{}: want {:?}, got {:?}", i, wresult, result);
             }

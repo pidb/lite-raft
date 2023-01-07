@@ -12,6 +12,7 @@ pub use crate::confchange::{
 };
 pub use crate::confstate::conf_state_eq;
 pub use crate::protos::eraftpb;
+pub use crate::protos::multiraft;
 
 #[allow(dead_code)]
 #[allow(unknown_lints)]
@@ -20,6 +21,7 @@ pub use crate::protos::eraftpb;
 #[allow(bare_trait_objects)]
 mod protos {
     include!(concat!(env!("OUT_DIR"), "/protos/mod.rs"));
+    include!(concat!(env!("OUT_DIR"), "/protos/multiraft.rs"));
 
     use self::eraftpb::Snapshot;
 
@@ -35,6 +37,12 @@ pub mod prelude {
     pub use crate::eraftpb::{
         ConfChange, ConfChangeSingle, ConfChangeTransition, ConfChangeType, ConfChangeV2,
         ConfState, Entry, EntryType, HardState, Message, MessageType, Snapshot, SnapshotMetadata,
+    };
+
+    pub use crate::multiraft::{
+        AppReadIndexRequest, AppReadIndexResponse, AppWriteRequest, AppWriteResponse,
+        RaftGroupDesc, RaftGroupManagementMessage, RaftGroupManagementMessageType, RaftMessage,
+        RaftMessageResponse, ReplicaDesc, MembershipChangeRequest, ReadIndexContext,
     };
 }
 

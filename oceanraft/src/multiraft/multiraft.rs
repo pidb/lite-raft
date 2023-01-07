@@ -5,6 +5,8 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use raft::Storage;
+
 use super::apply::ApplyActor;
 use super::config::MultiRaftConfig;
 use super::error::Error;
@@ -14,13 +16,12 @@ use super::multiraft_actor::MultiRaftActorAddress;
 use super::transport::MessageInterface;
 use super::transport::Transport;
 
-use crate::proto::AppReadIndexRequest;
-use crate::proto::AppWriteRequest;
-use crate::proto::RaftGroupManagementMessage;
-use crate::proto::RaftGroupManagementMessageType;
+use raft_proto::prelude::AppReadIndexRequest;
+use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::RaftGroupManagementMessage;
+use raft_proto::prelude::RaftGroupManagementMessageType;
 
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftStorage;
+use super::storage::MultiRaftStorage;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
@@ -30,7 +31,7 @@ pub struct MultiRaft<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage + Send + Sync + 'static,
     MRS: MultiRaftStorage<RS>,
 {
     store_id: u64,
@@ -49,7 +50,7 @@ impl<MI, T, RS, MRS> MultiRaft<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
 {
     pub fn new(

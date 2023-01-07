@@ -1,0 +1,31 @@
+[package]
+name = "oceanraft"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+raft-proto = { path = "../proto", default-features = false, features = ["prost-codec"] }
+raft = { path = "../core", version = "0.7.0", default-features = false, features=["default-logger"]}
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+slog = { version = "2.2", features = ["max_level_info"] }
+uuid = { version = "1", features = ["v4"] }
+protobuf = { version = "3" }
+lazy_static = { version = "1" }
+bincode = { version = "1" }
+# signal-hook-tokio = { version = "0.3" }
+serde_json = { version = "1" }
+slog-term = "2"
+slog-async = "2"
+thiserror = "1"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+console-subscriber = {version = "0.1"}
+bytes = { version = "1" }
+prost = { version = "0.11" }
+smallvec = { version = "1" }
+
+# [dependencies.rocksdb]
+# default-features = false
+# features = ["lz4"]

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use crate::proto::RaftGroupDesc;
-use crate::proto::ReplicaDesc;
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftStorage;
+use super::storage::MultiRaftStorage;
+use raft::Storage;
+use raft_proto::prelude::RaftGroupDesc;
+use raft_proto::prelude::ReplicaDesc;
 
 use super::error::Error;
 
@@ -13,7 +13,7 @@ use super::error::Error;
 /// when cache miss.
 pub struct ReplicaCache<RS, MRS>
 where
-    RS: RaftStorage,
+    RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
     storage: MRS,
@@ -23,7 +23,7 @@ where
 
 impl<RS, MRS> ReplicaCache<RS, MRS>
 where
-    RS: RaftStorage,
+    RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
     pub fn new(storage: MRS) -> Self {
@@ -34,9 +34,9 @@ where
         }
     }
 
-    /// Get replica description from this cache when replica_id equals, 
-    /// return `Error` if storage error occurs. if group is not in the 
-    /// cache, it is read from storage and if storage is not found too, 
+    /// Get replica description from this cache when replica_id equals,
+    /// return `Error` if storage error occurs. if group is not in the
+    /// cache, it is read from storage and if storage is not found too,
     /// `None` is returned.
     pub async fn replica_desc(
         &mut self,
@@ -51,9 +51,9 @@ where
         )
     }
 
-    /// Get replica description from this cache when node_id equals, 
-    /// return `Error` if storage error occurs. if group is not in the 
-    /// cache, it is read from storage and if storage is not found too, 
+    /// Get replica description from this cache when node_id equals,
+    /// return `Error` if storage error occurs. if group is not in the
+    /// cache, it is read from storage and if storage is not found too,
     /// `None` is returned.
     pub async fn replica_for_node(
         &mut self,
@@ -70,19 +70,27 @@ where
         &mut self,
         group_id: u64,
         replica_desc: ReplicaDesc,
-        sync: bool
-    ) -> Result<(), Error>{
+        sync: bool,
+    ) -> Result<(), Error> {
         if let Some(group_desc) = self.groups.get_mut(&group_id) {
-            if group_desc.replicas.iter().find(|replica| **replica == replica_desc).is_some() {
-                return Ok(())
+            if group_desc
+                .replicas
+                .iter()
+                .find(|replica| **replica == replica_desc)
+                .is_some()
+            {
+                return Ok(());
             }
             // update cache
             group_desc.nodes.push(replica_desc.node_id);
             group_desc.replicas.push(replica_desc);
             if sync {
-                let _ = self.storage.set_group_desc(group_id, group_desc.clone()).await?;
+                let _ = self
+                    .storage
+                    .set_group_desc(group_id, group_desc.clone())
+                    .await?;
             }
-            return Ok(())
+            return Ok(());
         }
 
         let mut group_desc = RaftGroupDesc::default();
@@ -90,10 +98,13 @@ where
         group_desc.replicas.push(replica_desc);
         if sync {
             // set new group_desc in storage
-            let _ = self.storage.set_group_desc(group_id, group_desc.clone()).await?;
+            let _ = self
+                .storage
+                .set_group_desc(group_id, group_desc.clone())
+                .await?;
         }
         self.groups.insert(group_id, group_desc);
-        return Ok(())
+        return Ok(());
     }
 
     #[inline]
@@ -102,8 +113,7 @@ where
             let group_desc = self
                 .storage
                 .group_desc(group_id)
-                .await
-                .map_err(|err| Error::Store(err))?;
+                .await?;
             self.groups.insert(group_id, group_desc);
         }
 

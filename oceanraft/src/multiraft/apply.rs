@@ -9,11 +9,11 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use prost::Message as ProstMessage;
 
-use crate::proto::Entry;
-use crate::proto::EntryType;
-use crate::proto::ConfChange;
-use crate::proto::ConfChangeType;
-use crate::proto::MembershipChangeRequest;
+use raft_proto::prelude::Entry;
+use raft_proto::prelude::EntryType;
+use raft_proto::prelude::ConfChange;
+use raft_proto::prelude::ConfChangeType;
+use raft_proto::prelude::MembershipChangeRequest;
 
 // use super::apply_command::ApplyCommand;
 use super::error::Error;

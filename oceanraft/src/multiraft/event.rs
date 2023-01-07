@@ -1,6 +1,6 @@
 use tokio::sync::oneshot;
 
-use crate::proto::Entry;
+use raft_proto::prelude::Entry;
 
 use super::error::Error;
 

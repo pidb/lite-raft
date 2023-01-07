@@ -1,5 +1,5 @@
-use crate::storage::StorageError;
- 
+pub type Result<T> = std::result::Result<T, Error>;
+
 #[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum TransportError {
     #[error("the node {0} of server not found")]
@@ -12,6 +12,31 @@ pub enum TransportError {
     Server(String),
 }
 
+/// An error with the storage.
+#[derive(Debug, thiserror::Error)]
+pub enum MultiRaftStorageError {
+    /// Some other error occurred.
+    #[error("unknown error {0}")]
+    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+}
+
+impl PartialEq for MultiRaftStorageError {
+    // #[cfg_attr(feature = "cargo-clippy", allow(clippy::match_same_arms))]
+    fn eq(&self, other: &MultiRaftStorageError) -> bool {
+        matches!(
+            (self, other),
+            (
+                MultiRaftStorageError::Other(_),
+                MultiRaftStorageError::Other(_)
+            ),
+            // (
+            //     MultiRaftStorageError::RaftStorage(..),
+            //     MultiRaftStorageError::RaftStorage(..)
+            // )
+        )
+    }
+}
+
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
     #[error("{0}")]
@@ -19,7 +44,7 @@ pub enum Error {
 
     /// Raft storage error occurred.
     #[error("{0}")]
-    Store(#[from] StorageError),
+    Store(#[from] MultiRaftStorageError),
 
     /// Transport error occurred.
     #[error("{0}")]
@@ -29,12 +54,11 @@ pub enum Error {
     #[error("{0}")]
     Proposal(#[from] ProposalError),
 
+    // #[error("{0}")]
+    // RaftGroup(#[from] ::raft::Error),
+    /// A raft error occurred.
     #[error("{0}")]
-    RaftGroup(#[from] ::raft::Error),
-
-    /// A raft group error occurred.
-    #[error("{0}")]
-    Raft(#[from] RaftError),
+    Raft(#[from] raft::Error),
 
     #[error("raft group ({0}) already exists")]
     RaftGroupAlreayExists(u64),
@@ -60,6 +84,9 @@ pub enum RaftError {
 
 #[derive(thiserror::Error, Debug)]
 pub enum ProposalError {
+    #[error("the proposal need leader role, the current leader at {0}")]
+    NotLeader(u64, u64, u64),
+
     #[error("unexpected at index = {0}")]
     Unexpected(u64),
 
@@ -72,23 +99,13 @@ pub enum ProposalError {
 
 impl PartialEq for ProposalError {
     fn eq(&self, other: &Self) -> bool {
-        match self {
-            ProposalError::Unexpected(v1) => match other {
-                ProposalError::Unexpected(v2) => v1 == v2,
-                ProposalError::Stale(_) => false,
-                ProposalError::Other(_) => false,
-            },
-            ProposalError::Stale(v1) => match other {
-                ProposalError::Unexpected(_) => false,
-                ProposalError::Stale(v2) => v1 == v2,
-                ProposalError::Other(_) => false,
-            },
-            ProposalError::Other(v1) => match other {
-                ProposalError::Unexpected(_) => false,
-                ProposalError::Stale(_) => false,
-                ProposalError::Other(v2) => matches!(v1, v2),
-            },
-        }
+        matches!(
+            (self, other),
+            (ProposalError::NotLeader(..), ProposalError::NotLeader(..))
+                | (ProposalError::Unexpected(..), ProposalError::Unexpected(..))
+                | (ProposalError::Stale(..), ProposalError::Stale(..))
+                | (ProposalError::Other(..), ProposalError::Other(..)),
+        )
+        
     }
 }
-

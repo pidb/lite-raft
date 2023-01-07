@@ -1,26 +1,25 @@
-use raft::StateRole;
-use raft::RawNode;
 use prost::Message;
+use raft::RawNode;
+use raft::StateRole;
+use raft::Storage;
 use tokio::sync::oneshot;
 
-use crate::proto::AppWriteRequest;
-use crate::proto::AppReadIndexRequest;
-use crate::proto::ReplicaDesc;
-use crate::storage::RaftStorage;
-use crate::storage::RaftStorageImpl;
+use raft_proto::prelude::AppReadIndexRequest;
+use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::error::ProposalError;
 use super::error::RaftError;
+use super::proposal::GroupProposalQueue;
 use super::proposal::Proposal;
 use super::proposal::ReadIndexProposal;
-use super::proposal::GroupProposalQueue;
 
 /// Represents a replica of a raft group.
-pub struct RaftGroup<RS: RaftStorage> {
+pub struct RaftGroup<RS: Storage> {
     pub group_id: u64,
     pub replica_id: u64,
-    pub raft_group: RawNode<RaftStorageImpl<RS>>,
+    pub raft_group: RawNode<RS>,
     // track the nodes which members ofq the raft consensus group
     pub node_ids: Vec<u64>,
     pub proposals: GroupProposalQueue,
@@ -28,10 +27,9 @@ pub struct RaftGroup<RS: RaftStorage> {
     pub committed_term: u64,
 }
 
-
 impl<RS> RaftGroup<RS>
 where
-    RS: RaftStorage,
+    RS: Storage,
 {
     #[inline]
     pub fn is_leader(&self) -> bool {
@@ -62,14 +60,14 @@ where
 
     fn write_pre_propose(&mut self, request: &AppWriteRequest) -> Result<(), Error>
     where
-        RS: RaftStorage,
+        RS: Storage,
     {
         if request.data.is_empty() {
             return Err(Error::BadParameter(format!("write request data is empty")));
         }
 
         if !self.is_leader() {
-            return Err(Error::Raft(RaftError::NotLeader(
+            return Err(Error::Proposal(ProposalError::NotLeader(
                 self.group_id,
                 self.replica_id,
                 self.raft_group.raft.leader_id,
@@ -120,9 +118,10 @@ where
         self.proposals.push(proposal).unwrap();
     }
 
-    pub fn read_index_propose(&mut self,
-            request: AppReadIndexRequest,
-        tx: oneshot::Sender<Result<(), Error>>
+    pub fn read_index_propose(
+        &mut self,
+        request: AppReadIndexRequest,
+        tx: oneshot::Sender<Result<(), Error>>,
     ) {
         let uuid = uuid::Uuid::new_v4();
         let term = self.term();

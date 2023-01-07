@@ -1,16 +1,16 @@
 use futures::Future;
 
+use raft::Storage;
 use tracing::info;
 
 use super::error::Error;
 use super::node::NodeManager;
 
-use crate::proto::Message;
-use crate::proto::MessageType;
-use crate::proto::RaftMessage;
-use crate::proto::RaftMessageResponse;
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftStorage;
+use raft_proto::prelude::Message;
+use raft_proto::prelude::MessageType;
+use raft_proto::prelude::RaftMessage;
+use raft_proto::prelude::RaftMessageResponse;
+use super::storage::MultiRaftStorage;
 
 pub trait MessageInterface: Send + Sync + 'static {
     type RaftMessageFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
@@ -56,7 +56,7 @@ pub async fn send_messages<MI, TR, RS, MRS>(
 ) where
     MI: MessageInterface,
     TR: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
     for msg in msgs {
@@ -87,7 +87,7 @@ pub async fn send_message<MI, TR, RS, MRS>(
 ) where
     MI: MessageInterface,
     TR: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
     let to_replica = storage

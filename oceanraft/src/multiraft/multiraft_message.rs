@@ -1,8 +1,8 @@
 use futures::Future;
 use tokio::sync::oneshot;
 
-use crate::proto::RaftMessage;
-use crate::proto::RaftMessageResponse;
+use raft_proto::prelude::RaftMessage;
+use raft_proto::prelude::RaftMessageResponse;
 
 use super::error::Error;
 use super::multiraft_actor::MultiRaftActorAddress;

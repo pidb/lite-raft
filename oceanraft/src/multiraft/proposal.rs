@@ -8,7 +8,7 @@ use uuid::Uuid;
 use super::error::Error;
 use super::error::ProposalError;
 
-use crate::proto::ReadIndexContext;
+use raft_proto::prelude::ReadIndexContext;
 
 pub struct ReadIndexProposal {
     pub uuid: Uuid,

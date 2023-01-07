@@ -10,6 +10,7 @@ use prost::Message as ProstMessage;
 use raft::LightReady;
 use raft::RawNode;
 use raft::Ready;
+use raft::Storage;
 use smallvec::SmallVec;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -52,34 +53,21 @@ use super::replica_cache::ReplicaCache;
 use super::transport;
 use super::transport::MessageInterface;
 use super::transport::Transport;
+use super::util;
 
-use crate::proto::transmute_entries;
-use crate::proto::transmute_raft_entries;
-use crate::proto::transmute_raft_entries_ref;
-use crate::proto::transmute_raft_hard_state;
-use crate::proto::transmute_raft_messages;
-use crate::proto::transmute_raft_snapshot;
-use crate::proto::AppReadIndexRequest;
-use crate::proto::AppReadIndexResponse;
-use crate::proto::AppWriteRequest;
-use crate::proto::AppWriteResponse;
-use crate::proto::ConfState;
-use crate::proto::Entry;
-use crate::proto::Message;
-use crate::proto::MessageType;
-use crate::proto::RaftGroupManagementMessage;
-use crate::proto::RaftGroupManagementMessageType;
-use crate::proto::RaftMessage;
-use crate::proto::RaftMessageResponse;
-use crate::proto::ReplicaDesc;
-use crate::proto::Snapshot;
-use crate::storage::transmute_message;
+use raft_proto::prelude::AppReadIndexRequest;
+use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::ConfChangeType;
+use raft_proto::prelude::Entry;
+use raft_proto::prelude::Message;
+use raft_proto::prelude::MessageType;
+use raft_proto::prelude::RaftGroupManagementMessage;
+use raft_proto::prelude::RaftGroupManagementMessageType;
+use raft_proto::prelude::RaftMessage;
+use raft_proto::prelude::RaftMessageResponse;
+use raft_proto::prelude::ReplicaDesc;
 
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftStorage;
-use crate::storage::RaftStorageImpl;
-use crate::storage::StorageError;
-// use crate::proto::Error;
+use super::storage::MultiRaftStorage;
 
 #[derive(Default, Debug)]
 pub struct GroupWriteRequest {
@@ -108,7 +96,7 @@ pub struct MultiRaftActor<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
     store_id: u64,
@@ -151,7 +139,7 @@ impl<MI, T, RS, MRS> MultiRaftActor<MI, T, RS, MRS>
 where
     MI: MessageInterface,
     T: Transport<MI>,
-    RS: RaftStorage,
+    RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
 {
     // #[tracing::instrument(name = "MultiRaftActor::spawn",  skip(storage))]
@@ -394,7 +382,7 @@ where
             }
         };
 
-        group.raft_group.step(transmute_message(raft_msg)).unwrap();
+        group.raft_group.step(raft_msg).unwrap();
         activity_groups.insert(group_id);
     }
 
@@ -634,8 +622,7 @@ where
         let gs = self
             .storage
             .group_storage(msg.group_id, msg.replica_id)
-            .await
-            .map_err(|err| Error::Store(err))?;
+            .await?;
 
         for replica_metadata in msg.replicas.into_iter() {
             if replica_metadata.node_id != NO_NODE {
@@ -685,7 +672,7 @@ where
 
         let raft_store = gs.clone();
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
-            .map_err(|err| Error::RaftGroup(err))?;
+            .map_err(|err| Error::Raft(err))?;
 
         // add group to node map
         self.node_manager.add_node(self.node_id, msg.group_id);
@@ -722,15 +709,11 @@ where
 
         // let mut replica_id = 0;
         // get the raft consensus group reated to storage, create if not exists.
-        let group_storage = self
-            .storage
-            .group_storage(group_id, replica_id)
-            .await
-            .map_err(|err| Error::Store(err))?;
+        let group_storage = self.storage.group_storage(group_id, replica_id).await?;
 
         let rs = group_storage
             .initial_state()
-            .map_err(|err| Error::Store(err))?;
+            .map_err(|err| Error::Raft(err))?;
 
         let voters = rs.conf_state.voters;
 
@@ -747,7 +730,7 @@ where
 
         let raft_store = group_storage.clone();
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
-            .map_err(|err| Error::RaftGroup(err))?;
+            .map_err(|err| Error::Raft(err))?;
 
         let mut group = RaftGroup {
             group_id,
@@ -763,8 +746,7 @@ where
             let replica_desc = self
                 .storage
                 .replica_desc(group_id, *voter_id)
-                .await
-                .map_err(|err| Error::Store(err))?
+                .await?
                 .unwrap();
 
             // at this point, we don't know the infomation about
@@ -864,7 +846,7 @@ where
     ) {
         for change in result.changes.iter() {
             match change.change_type() {
-                crate::proto::ConfChangeType::AddNode => {
+                ConfChangeType::AddNode => {
                     // TODO: this call need transfer to user call, and if user call return errored,
                     // the membership change should failed and user need to retry.
                     // we need a channel to provider user notify actor it need call these code.
@@ -880,8 +862,8 @@ where
                         .await
                         .unwrap();
                 }
-                crate::proto::ConfChangeType::RemoveNode => unimplemented!(),
-                crate::proto::ConfChangeType::AddLearnerNode => unimplemented!(),
+                ConfChangeType::RemoveNode => unimplemented!(),
+                ConfChangeType::AddLearnerNode => unimplemented!(),
             }
         }
 
@@ -967,7 +949,7 @@ where
                         &self.transport,
                         &mut self.node_manager,
                         *group_id,
-                        transmute_raft_messages(group_ready.take_messages()),
+                        group_ready.take_messages(),
                     )
                     .await;
                 }
@@ -979,7 +961,7 @@ where
                         .term;
                     group.maybe_update_committed_term(last_term);
 
-                    let entries = transmute_raft_entries(group_ready.take_committed_entries());
+                    let entries = group_ready.take_committed_entries();
                     let apply =
                         MultiRaftActor::<MI, T, RS, MRS>::create_apply(replica_id, group, entries);
 
@@ -1033,16 +1015,17 @@ where
             let mut ready = group_write_request.ready.take().unwrap();
             if *ready.snapshot() != raft::prelude::Snapshot::default() {
                 let snapshot = ready.snapshot().clone();
-                if let Err(_error) = gs.apply_snapshot(transmute_raft_snapshot(snapshot)) {}
+                // TODO:
+                // if let Err(_error) = gs.apply_snapshot(snapshot) {}
             }
 
             if !ready.entries().is_empty() {
                 let entries = ready.take_entries();
-                if let Err(_error) = gs.append_entries(transmute_raft_entries_ref(&entries)) {}
+                if let Err(_error) = gs.append_entries(&entries) {}
             }
 
             if let Some(hs) = ready.hs() {
-                let hs = transmute_raft_hard_state(hs.clone());
+                let hs = hs.clone();
                 if let Err(_error) = gs.set_hardstate(hs) {}
             }
 
@@ -1054,7 +1037,7 @@ where
                     &self.transport,
                     &mut self.node_manager,
                     *group_id,
-                    transmute_raft_messages(persistent_msgs),
+                    persistent_msgs,
                 )
                 .await;
             }
@@ -1082,7 +1065,7 @@ where
                 .unwrap();
 
             if let Some(commit) = light_ready.commit_index() {
-                group_storage.set_commit(commit);
+                // group_storage.set_commit(commit);
             }
 
             if !light_ready.messages().is_empty() {
@@ -1093,7 +1076,7 @@ where
                     &self.transport,
                     &mut self.node_manager,
                     group_id,
-                    transmute_raft_messages(messages),
+                    messages,
                 )
                 .await;
             }
@@ -1103,7 +1086,7 @@ where
                     light_ready.committed_entries()[light_ready.committed_entries().len() - 1].term;
                 mut_group.maybe_update_committed_term(last_term);
 
-                let entries = transmute_raft_entries(light_ready.take_committed_entries());
+                let entries = light_ready.take_committed_entries();
                 let apply = MultiRaftActor::<MI, T, RS, MRS>::create_apply(
                     gwr.replica_id,
                     mut_group,
@@ -1148,7 +1131,7 @@ where
 
         let entries_size = entries
             .iter()
-            .map(|ent| ent.compute_size() as usize)
+            .map(|ent| util::compute_entry_size(ent))
             .sum::<usize>();
         Apply {
             replica_id,
