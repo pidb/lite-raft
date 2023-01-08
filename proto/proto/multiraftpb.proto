@@ -32,15 +32,36 @@ message RaftMessageResponse {
 }
 
 
-enum RaftGroupManagementMessageType {
-    MsgInitialGroup = 0;
-    MsgCreateGroup = 1;
-    MsgRemoveGoup = 2;
+// enum RaftGroupManagementMessageType {
+//     MsgInitialGroup = 0;
+//     MsgCreateGroup = 1;
+//     MsgRemoveGoup = 2;
+// }
+
+// message RaftGroupManagementMessage {
+//     RaftGroupManagementMessageType msg_type = 1;
+//     uint64 group_id = 2;
+//     uint64 replica_id = 3;
+//     repeated ReplicaDesc replicas = 4;
+// }
+
+enum RaftGroupManagementType {
+    MsgCreateGroup = 0;
+    MsgRemoveGoup = 1;
 }
 
-message RaftGroupManagementMessage {
-    RaftGroupManagementMessageType msg_type = 1;
-    uint64 group_id = 2;
-    uint64 replica_id = 3;
-    repeated ReplicaDesc replicas = 4;
+message RaftGroupManagement {
+    uint64 group_id = 1;
+    uint64 replica_id = 2;
+    repeated ReplicaDesc replicas = 3;
+    RaftGroupManagementType msg_type = 4;
+}
+
+enum AdminMessageType {
+    RaftGroup = 0;
+}
+
+message AdminMessage {
+    RaftGroupManagement raft_group = 1;
+    AdminMessageType msg_type = 2;
 }

@@ -1,5 +1,7 @@
 use std::marker::PhantomData;
 
+use raft::prelude::AdminMessage;
+use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -18,8 +20,6 @@ use super::transport::Transport;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::RaftGroupManagementMessage;
-use raft_proto::prelude::RaftGroupManagementMessageType;
 
 use super::storage::MultiRaftStorage;
 
@@ -34,7 +34,6 @@ where
     RS: Storage + Send + Sync + 'static,
     MRS: MultiRaftStorage<RS>,
 {
-    store_id: u64,
     config: MultiRaftConfig,
     node_id: u64,
     actor_address: MultiRaftActorAddress,
@@ -53,32 +52,35 @@ where
     RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
 {
+    /// Create a new multiraft. spawn multiraft actor and apply actor.
     pub fn new(
         config: MultiRaftConfig,
-        node_id: u64,
-        store_id: u64,
         transport: T,
         storage: MRS,
         stop_rx: watch::Receiver<bool>,
         event_tx: Sender<Vec<Event>>,
     ) -> Self {
-        let (apply_join_handle, apply_actor_address) =
-            ApplyActor::spawn(event_tx.clone(), stop_rx.clone());
+        let (callback_event_tx, callback_event_rx) = channel(1);
+
+        let (apply_join_handle, apply_actor_address) = ApplyActor::spawn(
+            config.clone(),
+            event_tx.clone(),
+            callback_event_tx,
+            stop_rx.clone(),
+        );
 
         let (actor_join_handle, actor_address) = MultiRaftActor::spawn(
             &config,
-            node_id,
-            store_id,
             transport,
-            apply_actor_address,
-            event_tx.clone(),
             storage,
+            event_tx.clone(),
+            callback_event_rx,
+            apply_actor_address,
             stop_rx.clone(),
         );
 
         Self {
-            node_id,
-            store_id,
+            node_id: config.node_id,
             config,
             apply_join_handle,
             actor_address,
@@ -118,31 +120,9 @@ where
         self.actor_address.campagin_tx.send(group_id).await.unwrap()
     }
 
-    pub async fn initial_raft_group(&self, msg: RaftGroupManagementMessage) -> Result<(), Error> {
-        assert_eq!(
-            msg.msg_type(),
-            RaftGroupManagementMessageType::MsgInitialGroup
-        );
+    pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_error) = self.actor_address.manager_group_tx.send((msg, tx)).await {
-            panic!("manager group receiver dropped")
-        }
-
-        match rx.await {
-            Err(_error) => panic!("sender dopped"),
-            Ok(res) => res,
-        }
-    }
-
-    /// Bootstrap a new raft consensus group.
-    pub async fn bootstrap_raft_group(&self, group_id: u64, replica_id: u64) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        let mut msg = RaftGroupManagementMessage::default();
-        msg.group_id = group_id;
-        msg.replica_id = replica_id;
-        msg.set_msg_type(RaftGroupManagementMessageType::MsgCreateGroup);
-
-        if let Err(_error) = self.actor_address.manager_group_tx.send((msg, tx)).await {
+        if let Err(_error) = self.actor_address.admin_tx.send((msg, tx)).await {
             panic!("manager group receiver dropped")
         }
 

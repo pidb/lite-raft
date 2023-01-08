@@ -37,6 +37,22 @@ impl PartialEq for MultiRaftStorageError {
     }
 }
 
+
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum RaftGroupError {
+    // #[error("the proposal need leader role, the current leader at {0}")]
+    // NotLeader(u64, u64, u64),
+
+    // #[error("bootstrap group ({0}) error, the voters of initial_state is empty in store ({1})")]
+    // BootstrapError(u64, u64),
+
+    #[error("the raft group ({1}) not found in node ({0})")]
+    NotFound(u64, u64),
+
+    #[error("the raft group ({1}) already exists in node ({0}")]
+    Exists(u64, u64),
+}
+
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
     #[error("{0}")]
@@ -60,8 +76,8 @@ pub enum Error {
     #[error("{0}")]
     Raft(#[from] raft::Error),
 
-    #[error("raft group ({0}) already exists")]
-    RaftGroupAlreayExists(u64),
+    #[error("{0}")]
+    RaftGroup(#[from] RaftGroupError),
 
     #[error(
         "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
@@ -73,14 +89,7 @@ pub enum Error {
     ReplicaNotFound(u64, u64),
 }
 
-#[derive(thiserror::Error, Debug, PartialEq)]
-pub enum RaftError {
-    #[error("the proposal need leader role, the current leader at {0}")]
-    NotLeader(u64, u64, u64),
 
-    #[error("bootstrap group ({0}) error, the voters of initial_state is empty in store ({1})")]
-    BootstrapError(u64, u64),
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum ProposalError {

@@ -1,29 +1,48 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
+use std::pin::Pin;
 use std::vec::IntoIter;
 
+use tracing::info;
+
+use futures::Future;
+use raft::prelude::ConfChangeV2;
+use raft::Storage;
+use raft_proto::ConfChangeI;
+
+use prost::Message as ProstMessage;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use prost::Message as ProstMessage;
 
-use raft_proto::prelude::Entry;
-use raft_proto::prelude::EntryType;
 use raft_proto::prelude::ConfChange;
 use raft_proto::prelude::ConfChangeType;
+use raft_proto::prelude::Entry;
+use raft_proto::prelude::EntryType;
 use raft_proto::prelude::MembershipChangeRequest;
+use raft_proto::prelude::ReplicaDesc;
+use raft_proto::prelude::SingleMembershipChange;
+
+use crate::MultiRaftConfig;
 
 // use super::apply_command::ApplyCommand;
 use super::error::Error;
 use super::error::ProposalError;
-use super::event::ApplyEvent;
+use super::event::ApplyMembershipChangeEvent;
+use super::event::ApplyNormalEvent;
+use super::event::CallbackEvent;
 use super::event::Event;
+use super::event::MembershipChangeView;
+use super::event::MultiRaftAsyncCb;
+use super::multiraft_actor::MultiRaftActorContext;
 use super::proposal::Proposal;
+use super::storage::MultiRaftStorage;
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
-
 
 pub struct Apply {
     pub replica_id: u64,
@@ -69,28 +88,17 @@ pub enum ApplyTask {
     Apply(Apply),
 }
 
-/// Apply membership change results. 
-/// 
-/// If proposed change is ConfChange, the ConfChangeV2 is converted 
-/// from ConfChange. If ConfChangeV2 is used, changes contains multiple 
-/// requests, otherwise changes contains only one request.
-pub struct MembershipChangeResult {
-    pub index: u64,
-    pub conf_change: raft::prelude::ConfChangeV2,
-    pub changes: Vec<MembershipChangeRequest>,
-}
-
-pub enum ApplyResult {
-    MembershipChange(MembershipChangeResult),
-}
+#[derive(Debug)]
+pub struct ApplyResult {}
 
 #[derive(Default)]
 pub struct ApplyTaskRequest {
     pub groups: HashMap<u64, ApplyTask>,
 }
 
+#[derive(Debug)]
 pub struct ApplyTaskResponse {
-    pub groups: HashMap<u64, Vec<ApplyResult>>,
+    pub apply_results: HashMap<u64, ApplyResult>,
 }
 
 pub struct ApplyActorAddress {
@@ -99,19 +107,24 @@ pub struct ApplyActorAddress {
 }
 
 pub struct ApplyActor {
+    node_id: u64,
     rx: Receiver<ApplyTaskRequest>,
     tx: Sender<ApplyTaskResponse>,
     event_tx: Sender<Vec<Event>>,
+    callback_event_tx: Sender<CallbackEvent>,
     // apply_to_tx: Sender<Vec<ApplyCommand>>,
     group_pending_apply: HashMap<u64, Apply>,
 }
 
 impl ApplyActor {
-    fn handle_committed_entries(&mut self) {}
-}
-
-impl ApplyActor {
-    pub fn spawn(event_tx: Sender<Vec<Event>>, stop_rx: watch::Receiver<bool>) -> (JoinHandle<()>, ApplyActorAddress) {
+    /// the `event_tx` send apply event to application.
+    /// the `committed_tx` send committed event to multiraft actor.
+    pub fn spawn(
+        config: MultiRaftConfig,
+        event_tx: Sender<Vec<Event>>,
+        callback_event_tx: Sender<CallbackEvent>,
+        stop_rx: watch::Receiver<bool>,
+    ) -> (JoinHandle<()>, ApplyActorAddress) {
         let (request_tx, request_rx) = channel(1);
         let (response_tx, response_rx) = channel(1);
 
@@ -121,9 +134,11 @@ impl ApplyActor {
         };
 
         let actor = ApplyActor {
+            node_id: config.node_id,
             event_tx,
             rx: request_rx,
             tx: response_tx,
+            callback_event_tx,
             group_pending_apply: HashMap::new(),
         };
 
@@ -134,7 +149,9 @@ impl ApplyActor {
         (join_handle, address)
     }
 
+    #[tracing::instrument(name = "ApplyActor::start", skip(self, stop_rx))]
     async fn start(mut self, mut stop_rx: watch::Receiver<bool>) {
+        info!("node ({}) apply actor start", self.node_id);
         loop {
             tokio::select! {
                 _ = stop_rx.changed() => {
@@ -145,9 +162,11 @@ impl ApplyActor {
                 Some(request) = self.rx.recv() => self.handle_request(request).await,
             }
         }
+        info!("node ({}) apply actor stop", self.node_id);
     }
 
     async fn handle_request(&mut self, request: ApplyTaskRequest) {
+        let mut apply_results  = HashMap::new();
         for (group_id, task) in request.groups.into_iter() {
             match task {
                 ApplyTask::Apply(mut apply) => {
@@ -158,7 +177,8 @@ impl ApplyActor {
                             }
 
                             let take_batch = self.group_pending_apply.remove(&group_id).unwrap();
-                            self.handle_apply(take_batch).await;
+                            let res = self.handle_apply(take_batch).await.unwrap();
+                            apply_results.insert(group_id, res);
                         }
                         None => {
                             self.group_pending_apply.insert(group_id, apply);
@@ -167,22 +187,28 @@ impl ApplyActor {
                 }
             }
         }
+
+        let task_response = ApplyTaskResponse {
+            apply_results,
+        };
+
+        self.tx.send(task_response).await.unwrap();
     }
 
-    async fn handle_apply(&mut self, apply: Apply) {
-        // let mut proposals = VecDeque::new();
-        // for proposal in apply.proposals {
-        //     proposals.push_back(proposal)
-        // }
-
+    async fn handle_apply(&mut self, apply: Apply) -> Result<ApplyResult, Error> {
         let mut delegate = ApplyDelegate {
             group_id: apply.group_id,
             pending_proposals: apply.proposals,
-            staging_applys: Vec::new(),
+            staging_events: Vec::new(),
+            callback_event_tx: self.callback_event_tx.clone(),
         };
 
         delegate.handle_committed_entries(apply.entries);
-        self.event_tx.send(delegate.staging_applys).await;
+        self.event_tx.send(delegate.staging_events).await.unwrap();
+
+        let res = ApplyResult {};
+        Ok(res)
+
         // delegate.apply_to(&self.apply_to_tx);
         // take entries
         // transervel entry
@@ -197,8 +223,10 @@ impl ApplyActor {
 
 pub struct ApplyDelegate {
     group_id: u64,
+    // apply_multiraft_tx: Sender<(MembershipChangeResult, oneshot::Sender<Result<(), Error>>)>,
+    callback_event_tx: Sender<CallbackEvent>,
     pending_proposals: VecDeque<Proposal>,
-    staging_applys: Vec<Event>,
+    staging_events: Vec<Event>,
 }
 
 impl ApplyDelegate {
@@ -243,25 +271,6 @@ impl ApplyDelegate {
                 }
             }
         }
-
-        // async move {
-        //     while let Some(entry) = entries.next() {
-        //         // applied_index mustbe ensure strict increments.
-        //         // let next_applied_index = self.apply_state.applied_index + 1;
-        //         // if next_applied_index != entry.index {
-        //         //     panic!(
-        //         //         "expect applied {}, but got {}",
-        //         //         next_applied_index, entry.index
-        //         //     );
-        //         // }
-        //         match entry.get_entry_type() {
-        //             EntryType::EntryNormal => self.handle_committed_normal(entry).await,
-        //             EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-        //                 self.handle_committed_conf_change(entry).await
-        //             }
-        //         }
-        //     }
-        // }
     }
 
     fn handle_committed_normal(&mut self, entry: Entry) {
@@ -283,47 +292,74 @@ impl ApplyDelegate {
             self.response_stale_proposals(entry_index, entry_term);
             return;
         }
-        let tx = self.find_pending(entry.term, entry.index).map_or(None, |p| p.tx);
+        let tx = self
+            .find_pending(entry.term, entry.index)
+            .map_or(None, |p| p.tx);
 
-        let apply_command = Event::Apply(ApplyEvent{
+        let apply_command = Event::ApplyNormal(ApplyNormalEvent {
             group_id: self.group_id,
             is_conf_change: false,
             entry,
             tx,
         });
-        self.staging_applys.push(apply_command);
+        self.staging_events.push(apply_command);
     }
 
     fn handle_committed_conf_change(&mut self, entry: Entry) {
         // TODO: empty adta?
 
+        let tx = self
+            .find_pending(entry.term, entry.index)
+            .map_or(None, |p| p.tx);
         let proposal = self.find_pending(entry.term, entry.index);
-        match entry.entry_type() {
+        let event = match entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
             EntryType::EntryConfChange => {
                 let mut cc = ConfChange::default();
                 cc.merge(entry.data.as_ref()).unwrap();
-                match cc.change_type() {
-                    ConfChangeType::AddNode => {},
-                    ConfChangeType::RemoveNode => {},
-                    ConfChangeType::AddLearnerNode => {},
+
+                let mut change_request = MembershipChangeRequest::default();
+                change_request.merge(entry.context.as_ref()).unwrap();
+
+                let change_view = Some(MembershipChangeView {
+                    index: entry.index,
+                    conf_change: cc.clone().into_v2(),
+                    change_request,
+                });
+
+                ApplyMembershipChangeEvent {
+                    group_id: self.group_id,
+                    entry,
+                    tx,
+                    change_view,
+                    callback_event_tx: self.callback_event_tx.clone(),
                 }
             }
             EntryType::EntryConfChangeV2 => {
-                unimplemented!();
+                let mut cc_v2 = ConfChangeV2::default();
+                cc_v2.merge(entry.data.as_ref()).unwrap();
+
+                let mut change_request = MembershipChangeRequest::default();
+                change_request.merge(entry.context.as_ref()).unwrap();
+
+                let change_view = Some(MembershipChangeView {
+                    index: entry.index,
+                    conf_change: cc_v2,
+                    change_request,
+                });
+
+                ApplyMembershipChangeEvent {
+                    group_id: self.group_id,
+                    entry,
+                    tx,
+                    change_view,
+                    callback_event_tx: self.callback_event_tx.clone(),
+                }
             }
-        }
+        };
 
-        let tx = if let Some(proposal) = proposal {proposal.tx} else { None};
-
-        let apply_command = Event::Apply(ApplyEvent {
-            group_id: self.group_id,
-            is_conf_change: true,
-            entry,
-            tx
-        });
-        self.staging_applys.push(apply_command);
-        // self.staging_entries.push(entry);
+        let apply_command = Event::ApplyMembershipChange(event);
+        self.staging_events.push(apply_command);
 
         // self.apply_state.applied_index = entry.index;
         // self.apply_state.applied_term = entry.term;
@@ -335,3 +371,43 @@ impl ApplyDelegate {
         }
     }
 }
+
+// fn commit_membership_change_cb<'r, RS, MRS>(result: MembershipChangeRequest) -> MultiRaftAsyncCb<'r, RS, MRS>
+// where
+//     MRS: MultiRaftStorage<RS>,
+//     RS: Storage,
+// {
+//     let cb = move |ctx: &'r mut MultiRaftActorContext<RS, MRS>| -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'r >> {
+//         let local_fut = async move {
+//             for change in result.changes.iter() {
+//             match change.change_type() {
+//                 ConfChangeType::AddNode => {
+//                     // TODO: this call need transfer to user call, and if user call return errored,
+//                     // the membership change should failed and user need to retry.
+//                     // we need a channel to provider user notify actor it need call these code.
+//                     // and we recv the notify can executing these code, if executed failed, we
+//                     // response to user and membership change is failed.
+//                     let replica_metadata = ReplicaDesc {
+//                         node_id: change.node_id,
+//                         replica_id: change.replica_id,
+//                     };
+//                     ctx.node_manager.add_node(change.node_id, change.group_id);
+//                     ctx.replica_cache
+//                         .cache_replica_desc(change.group_id, replica_metadata, ctx.sync_replica_cache)
+//                         .await
+//                         .unwrap();
+//                 }
+//                 ConfChangeType::RemoveNode => unimplemented!(),
+//                 ConfChangeType::AddLearnerNode => unimplemented!(),
+//             }
+//         }
+
+//         Ok(())
+//         };
+//         Box::pin(local_fut)
+
+//         // pin!(local_fut)
+//     };
+
+//     Box::new(cb)
+// }

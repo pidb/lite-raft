@@ -1,6 +1,0 @@
-syntax = "proto3";
-package pirate;
-
-enum Error {
-    BadParameter = 0;
-}

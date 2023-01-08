@@ -10,7 +10,6 @@ use raft_proto::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::error::ProposalError;
-use super::error::RaftError;
 use super::proposal::GroupProposalQueue;
 use super::proposal::Proposal;
 use super::proposal::ReadIndexProposal;

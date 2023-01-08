@@ -14,7 +14,7 @@ mod node;
 mod raft_group;
 mod replica_cache;
 pub mod storage;
-pub use event::ApplyEvent;
+pub use event::ApplyNormalEvent;
 pub use event::Event;
 pub use event::LeaderElectionEvent;
 pub use multiraft::MultiRaft;

@@ -16,16 +16,14 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
     node_id: u64,
-    store_id: u64,
     groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
     group_desc_map: Arc<AsyncRwLock<HashMap<u64, RaftGroupDesc>>>,
 }
 
 impl MultiRaftMemoryStorage {
-    pub fn new(node_id: u64, store_id: u64) -> Self {
+    pub fn new(node_id: u64) -> Self {
         Self {
             node_id,
-            store_id,
             groups: Default::default(),
             group_desc_map: Default::default(),
         }

@@ -1,25 +1,28 @@
 use std::collections::HashMap;
 
-use smol_raft::multiraft::Event;
-use smol_raft::multiraft::LeaderElectionEvent;
-use smol_raft::proto::ConfState;
-use smol_raft::proto::HardState;
-use smol_raft::proto::RaftGroupManagementMessage;
-use smol_raft::proto::RaftGroupManagementMessageType;
-use smol_raft::proto::ReplicaMetadata;
-use smol_raft::proto::Snapshot;
-use smol_raft::storage::MemStorage;
-use smol_raft::storage::MultiRaftMemoryStorage;
-use smol_raft::storage::MultiRaftStorage;
-use smol_raft::storage::RaftStorage;
-use smol_raft::LocalTransport;
-use smol_raft::MultiRaft;
-use smol_raft::MultiRaftConfig;
-use smol_raft::MultiRaftMessageSender;
+use oceanraft::memstore::MultiRaftMemoryStorage;
+use oceanraft::multiraft::storage::MultiRaftStorage;
+use oceanraft::multiraft::Event;
+use oceanraft::multiraft::LeaderElectionEvent;
+use oceanraft::multiraft::LocalTransport;
+use oceanraft::MultiRaft;
+use oceanraft::MultiRaftConfig;
+use oceanraft::MultiRaftMessageSender;
+
+use raft_proto::prelude::ConfState;
+use raft_proto::prelude::HardState;
+use raft_proto::prelude::RaftGroupManagementMessage;
+use raft_proto::prelude::RaftGroupManagementMessageType;
+use raft_proto::prelude::ReplicaDesc;
+use raft_proto::prelude::Snapshot;
+
+use raft::storage::MemStorage;
+use raft::storage::Storage;
 
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
+use tracing::info;
 
 type FixtureMultiRaft = MultiRaft<
     MultiRaftMessageSender,
@@ -41,9 +44,8 @@ impl FixtureCluster {
         let mut storages = vec![];
         let mut events = vec![];
         for n in 0..num {
-            let node_id = n + 1;
-            let store_id = n + 1;
             let config = MultiRaftConfig {
+                node_id: n + 1,
                 election_tick: 2,
                 heartbeat_tick: 1,
                 tick_interval: 1000,
@@ -51,17 +53,15 @@ impl FixtureCluster {
 
             let (event_tx, event_rx) = channel(1);
             let transport = LocalTransport::new();
-            let storage = MultiRaftMemoryStorage::new(node_id, store_id);
+            let storage = MultiRaftMemoryStorage::new(config.node_id);
             storages.push(storage.clone());
-            let multiraft = FixtureMultiRaft::new(
-                config,
-                node_id,
-                store_id,
-                transport,
-                storage,
-                stop.clone(),
-                event_tx,
+
+            info!(
+                "start multiraft in node {}, config for {:?}",
+                config.node_id, config
             );
+            let multiraft =
+                FixtureMultiRaft::new(config, transport, storage, stop.clone(), event_tx);
             multirafts.push(multiraft);
             events.push(event_rx);
         }
@@ -80,10 +80,9 @@ impl FixtureCluster {
             let replica_id = (i + 1) as u64;
             let node_id = first_node + i as u64;
             voters.push(replica_id);
-            replicas.push(ReplicaMetadata {
+            replicas.push(ReplicaDesc {
                 node_id,
                 replica_id,
-                store_id: 0,
             });
         }
 
@@ -102,14 +101,14 @@ impl FixtureCluster {
             // init confstate
             let mut cs = ConfState::default();
             cs.voters = voters.clone();
-            gs.set_confstate(cs).unwrap();
+            gs.wl().set_conf_state(cs);
 
             // apply snapshot
             let mut ss = Snapshot::default();
             ss.mut_metadata().mut_conf_state().voters = voters.clone();
             ss.mut_metadata().index = 1;
             ss.mut_metadata().term = 1;
-            gs.apply_snapshot(ss).unwrap();
+            gs.wl().apply_snapshot(ss).unwrap();
 
             let multiraft = &self.multirafts[node_index];
             let mut msg = RaftGroupManagementMessage::default();
@@ -134,20 +133,31 @@ impl FixtureCluster {
         self.trigger_elect(node_index, group_id).await;
 
         for node_id in self.groups.get(&group_id).unwrap().iter() {
-            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id).await.unwrap();
+            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id)
+                .await
+                .unwrap();
             assert_ne!(election.leader_id, 0);
             assert_eq!(election.group_id, group_id);
             let storage = &self.storages[node_index as usize];
-            let replica_id = storage.replica_in_node(group_id, *node_id).await.unwrap();
-            assert_eq!(Some(election.leader_id), replica_id);
+            let replica_desc = storage
+                .replica_for_node(group_id, *node_id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(election.leader_id, replica_desc.replica_id);
         }
     }
 
     async fn trigger_elect(&self, node_index: u64, group_id: u64) {
-        self.multirafts[node_index as usize].campagin(group_id).await
+        self.multirafts[node_index as usize]
+            .campagin(group_id)
+            .await
     }
 
-    async fn wait_for_leader_elect(events: &mut Vec<Receiver<Vec<Event>>>, node_id: u64) -> Option<LeaderElectionEvent> {
+    async fn wait_for_leader_elect(
+        events: &mut Vec<Receiver<Vec<Event>>>,
+        node_id: u64,
+    ) -> Option<LeaderElectionEvent> {
         let event = &mut events[node_id as usize];
         loop {
             let events = event.recv().await.unwrap();
@@ -165,6 +175,9 @@ impl FixtureCluster {}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_initial_leader_elect() {
+    // install global collector configured based on RUST_LOG env var.
+    tracing_subscriber::fmt::init();
+
     for leader_id in 0..3 {
         let (stop_tx, stop_rx) = watch::channel(false);
         let mut cluster = FixtureCluster::make(3, stop_rx);

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use super::storage::MultiRaftStorage;
 use raft::Storage;
 use raft_proto::prelude::RaftGroupDesc;
 use raft_proto::prelude::ReplicaDesc;
 
+use super::storage::MultiRaftStorage;
 use super::error::Error;
 
 /// ReplicaCache cache replica metadatas
