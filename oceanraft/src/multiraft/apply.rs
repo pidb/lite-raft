@@ -27,7 +27,7 @@ use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
 
-use crate::MultiRaftConfig;
+use crate::multiraft::config::Config;
 
 // use super::apply_command::ApplyCommand;
 use super::error::Error;
@@ -120,7 +120,7 @@ impl ApplyActor {
     /// the `event_tx` send apply event to application.
     /// the `committed_tx` send committed event to multiraft actor.
     pub fn spawn(
-        config: MultiRaftConfig,
+        config: Config,
         event_tx: Sender<Vec<Event>>,
         callback_event_tx: Sender<CallbackEvent>,
         stop_rx: watch::Receiver<bool>,

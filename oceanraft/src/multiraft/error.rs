@@ -1,5 +1,8 @@
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// RaftCoreError is raft::Error re-exported.
+pub type RaftCoreError = raft::Error;
+
 #[derive(thiserror::Error, Debug, Clone, PartialEq)]
 pub enum TransportError {
     #[error("the node {0} of server not found")]
@@ -53,43 +56,6 @@ pub enum RaftGroupError {
     Exists(u64, u64),
 }
 
-#[derive(thiserror::Error, Debug, PartialEq)]
-pub enum Error {
-    #[error("{0}")]
-    BadParameter(String),
-
-    /// Raft storage error occurred.
-    #[error("{0}")]
-    Store(#[from] MultiRaftStorageError),
-
-    /// Transport error occurred.
-    #[error("{0}")]
-    Transport(#[from] TransportError),
-
-    /// Proposal error occurred.
-    #[error("{0}")]
-    Proposal(#[from] ProposalError),
-
-    // #[error("{0}")]
-    // RaftGroup(#[from] ::raft::Error),
-    /// A raft error occurred.
-    #[error("{0}")]
-    Raft(#[from] raft::Error),
-
-    #[error("{0}")]
-    RaftGroup(#[from] RaftGroupError),
-
-    #[error(
-        "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
-    )]
-    InconsistentReplicaId(u64, u64, u64),
-
-    // the tuple is (group_id, store_id)s
-    #[error("couldn't find replica id for this store ({1}) in group ({0})")]
-    ReplicaNotFound(u64, u64),
-}
-
-
 
 #[derive(thiserror::Error, Debug)]
 pub enum ProposalError {
@@ -118,3 +84,43 @@ impl PartialEq for ProposalError {
         
     }
 }
+
+
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum Error {
+    #[error("{0}")]
+    BadParameter(String),
+
+    /// Raft storage error occurred.
+    #[error("{0}")]
+    Store(#[from] MultiRaftStorageError),
+
+    /// Transport error occurred.
+    #[error("{0}")]
+    Transport(#[from] TransportError),
+
+    /// Proposal error occurred.
+    #[error("{0}")]
+    Proposal(#[from] ProposalError),
+
+    // #[error("{0}")]
+    // RaftGroup(#[from] ::raft::Error),
+    /// A raft error occurred.
+    #[error("{0}")]
+    Raft(#[from] RaftCoreError),
+
+    #[error("{0}")]
+    RaftGroup(#[from] RaftGroupError),
+
+    #[error(
+        "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
+    )]
+    InconsistentReplicaId(u64, u64, u64),
+
+    // the tuple is (group_id, store_id)s
+    #[error("couldn't find replica id for this store ({1}) in group ({0})")]
+    ReplicaNotFound(u64, u64),
+}
+
+
+

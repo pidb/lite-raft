@@ -22,6 +22,7 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tokio::time::interval;
 
 use tracing::debug;
@@ -30,7 +31,7 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 
-use raft::Config;
+// use raft::Config;
 
 use crate::multiraft::error::RaftGroupError;
 
@@ -41,7 +42,7 @@ use super::apply::ApplyResult;
 use super::apply::ApplyTask;
 use super::apply::ApplyTaskRequest;
 use super::apply::ApplyTaskResponse;
-use super::config::MultiRaftConfig;
+use super::config::Config;
 use super::error::Error;
 use super::error::ProposalError;
 use super::event::CallbackEvent;
@@ -101,10 +102,9 @@ pub struct MultiRaftActorContext<RS: Storage, MRS: MultiRaftStorage<RS>> {
     pub sync_replica_cache: bool,
 }
 
-pub struct MultiRaftActor<MI, T, RS, MRS>
+pub struct MultiRaftActor< T, RS, MRS>
 where
-    MI: MessageInterface,
-    T: Transport<MI>,
+    T: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
@@ -138,19 +138,17 @@ where
     replica_cache: ReplicaCache<RS, MRS>,
     sync_replica_cache: bool,
     _m1: PhantomData<RS>,
-    _m2: PhantomData<MI>,
 }
 
-impl<MI, T, RS, MRS> MultiRaftActor<MI, T, RS, MRS>
+impl< T, RS, MRS> MultiRaftActor< T, RS, MRS>
 where
-    MI: MessageInterface,
-    T: Transport<MI>,
+    T: Transport,
     RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
 {
     // #[tracing::instrument(name = "MultiRaftActor::spawn",  skip(storage))]
     pub fn spawn(
-        config: &MultiRaftConfig,
+        config: &Config,
         transport: T,
         storage: MRS,
         event_tx: Sender<Vec<Event>>,
@@ -193,7 +191,6 @@ where
             pending_events: Vec::new(),
             // waiting_ready_groups: VecDeque::default(),
             _m1: PhantomData,
-            _m2: PhantomData,
         };
 
         let main_loop = async move {
@@ -219,11 +216,14 @@ where
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
         let mut ticks = 0;
-        let mut ticker = interval(self.tick_interval);
+        let mut ticker = tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
         let mut activity_groups = HashSet::new();
+
+        let mut ready_ticker = tokio::time::interval_at(Instant::now() + Duration::from_millis(10), Duration::from_millis(10));
         loop {
             // handle events
             if !self.pending_events.is_empty() {
+                info!("send pending evnets");
                 for pending_event in self.pending_events.iter_mut() {
                     match pending_event {
                         Event::LederElection(leader_elect) => {
@@ -288,10 +288,10 @@ where
                     self.handle_callback(msg).await;
                 },
 
-                else => {
+                _ = ready_ticker.tick() => { 
                     self.on_groups_ready(&activity_groups).await;
                     activity_groups.clear();
-                },
+                }
             }
         }
     }
@@ -390,7 +390,7 @@ where
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,
             None => {
-                self.create_raft_group(group_id, to_replica.replica_id)
+                self.create_raft_group(group_id, to_replica.replica_id, vec![])
                     .await
                     .unwrap();
                 self.groups.get_mut(&group_id).unwrap()
@@ -585,21 +585,29 @@ where
         }
     }
 
+    #[tracing::instrument(
+        name = "MultiRaftActor::campagin",
+        skip(self)
+    )]
     async fn campagin_raft(&mut self, group_id: u64) {
         if let Some(group) = self.groups.get_mut(&group_id) {
+            info!("campagin raft group");
             group.raft_group.campaign().unwrap()
         }
     }
 
-    #[tracing::instrument(name = "MultiRaftActor::handle_manager_group_message", skip(self))]
+    // #[tracing::instrument(
+    //     name = "MultiRaftActor::handle_admin_request",
+    //     skip(self, msg, tx, activity_groups)
+    // )]
     async fn handle_admin_request(
         &mut self,
         msg: AdminMessage,
         tx: oneshot::Sender<Result<(), Error>>,
         activity_groups: &mut HashSet<u64>,
     ) {
-        // let mut activity_groups = vec![];
         let res = match msg.msg_type() {
+            // handle raft group management request
             AdminMessageType::RaftGroup => {
                 let msg = msg.raft_group.unwrap();
                 self.raft_group_management(msg, activity_groups).await
@@ -609,6 +617,10 @@ where
         if let Err(_error) = tx.send(res) {}
     }
 
+    // #[tracing::instrument(
+    //     name = "MultiRaftActor::raft_group_management",
+    //     skip(self, activity_groups)
+    // )]
     async fn raft_group_management(
         &mut self,
         msg: RaftGroupManagement,
@@ -617,10 +629,104 @@ where
         match msg.msg_type() {
             RaftGroupManagementType::MsgCreateGroup => {
                 activity_groups.insert(msg.group_id);
-                self.create_raft_group(msg.group_id, msg.replica_id).await
+                self.create_raft_group(msg.group_id, msg.replica_id, msg.replicas)
+                    .await
             }
             RaftGroupManagementType::MsgRemoveGoup => unimplemented!(),
         }
+    }
+
+    #[tracing::instrument(name = "MultiRaftActor::create_raft_group", skip(self))]
+    async fn create_raft_group(
+        &mut self,
+        group_id: u64,
+        replica_id: u64,
+        replicas_desc: Vec<ReplicaDesc>,
+    ) -> Result<(), Error> {
+        if self.groups.contains_key(&group_id) {
+            return Err(Error::RaftGroup(RaftGroupError::Exists(
+                self.node_id,
+                group_id,
+            )));
+        }
+
+        if group_id == 0 {
+            return Err(Error::BadParameter(format!("bad group_id parameter (0)")));
+        }
+
+        if replica_id == 0 {
+            return Err(Error::BadParameter(format!("bad replica_id parameter (0)")));
+        }
+
+        let group_storage = self.storage.group_storage(group_id, replica_id).await?;
+
+        // if replicas_desc are not empty and are valid data,
+        // we know where all replicas of the raft group are located.
+        //
+        // but, voters of raft and replicas_desc are not one-to-one, because voters
+        // can be added in the subsequent way of membership change.
+        let applied = 0; // TODO: get applied from stroage
+        let raft_cfg = raft::Config {
+            id: replica_id,
+            applied,
+            election_tick: self.election_tick,
+            heartbeat_tick: self.heartbeat_tick,
+            max_size_per_msg: 1024 * 1024,
+            max_inflight_msgs: 256,
+            ..Default::default()
+        };
+
+        let raft_store = group_storage.clone();
+        let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
+            .map_err(|err| Error::Raft(err))?;
+
+        info!("replica ({}) of raft group ({}) is created successfully", group_id, replica_id);
+        let mut group = RaftGroup {
+            group_id,
+            replica_id,
+            raft_group,
+            node_ids: Vec::new(),
+            proposals: GroupProposalQueue::new(replica_id),
+            leader: ReplicaDesc::default(), // TODO: init leader from storage
+            committed_term: 0,              // TODO: init committed term from storage
+        };
+
+        for replica_desc in replicas_desc.iter() {
+            self.replica_cache
+                .cache_replica_desc(group_id, replica_desc.clone(), true)
+                .await?;
+            // track the nodes which other members of the raft consensus group
+            group.node_ids.push(replica_desc.node_id);
+            self.node_manager.add_node(replica_desc.node_id, group_id);
+        }
+
+        // if voters are initialized in storage, we need to read
+        // the voter from replica_desc to build the data structure
+        let rs = group_storage
+            .initial_state()
+            .map_err(|err| Error::Raft(err))?;
+
+        let voters = rs.conf_state.voters;
+        for voter_id in voters.iter() {
+            // at this point, we maybe don't know the infomation about
+            // the node which replica. this implies two facts:
+            // 1. replicas_desc is empty, and the scheduler does not provide
+            //    raft group location information
+            // 2. replica_desc information corresponding to voter is not initialized
+            //    for the storage
+            // if so, we initialized these in subsequent way of raft message handler.
+            if let Some(replica_desc) = self.replica_cache.replica_desc(group_id, *voter_id).await?
+            {
+                if replica_desc.node_id == NO_NODE {
+                    continue;
+                }
+                group.node_ids.push(replica_desc.node_id);
+                self.node_manager.add_node(replica_desc.node_id, group_id);
+            }
+        }
+        self.groups.insert(group_id, group);
+
+        Ok(())
     }
 
     /// Initial the raft consensus group and start a replica in current node.
@@ -720,72 +826,6 @@ where
     // }
 
     /// Create a replica of the raft consensus group on this node.
-    #[tracing::instrument(name = "MultiRaftActor::create_raft_group", skip(self))]
-    async fn create_raft_group(&mut self, group_id: u64, replica_id: u64) -> Result<(), Error> {
-        if self.groups.contains_key(&group_id) {
-            return Err(Error::RaftGroup(RaftGroupError::Exists(
-                self.node_id,
-                group_id,
-            )));
-        }
-
-        if group_id == 0 {
-            return Err(Error::BadParameter(format!("bad group_id parameter (0)")));
-        }
-
-        if replica_id == 0 {
-            return Err(Error::BadParameter(format!("bad replica_id parameter (0)")));
-        }
-
-        let group_storage = self.storage.group_storage(group_id, replica_id).await?;
-
-        let rs = group_storage
-            .initial_state()
-            .map_err(|err| Error::Raft(err))?;
-
-        let voters = rs.conf_state.voters;
-
-        let applied = 0; // TODO: get applied from stroage
-        let raft_cfg = raft::Config {
-            id: replica_id,
-            applied,
-            election_tick: self.election_tick,
-            heartbeat_tick: self.heartbeat_tick,
-            max_size_per_msg: 1024 * 1024,
-            max_inflight_msgs: 256,
-            ..Default::default()
-        };
-
-        let raft_store = group_storage.clone();
-        let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
-            .map_err(|err| Error::Raft(err))?;
-
-        let mut group = RaftGroup {
-            group_id,
-            replica_id,
-            raft_group,
-            node_ids: Vec::new(),
-            proposals: GroupProposalQueue::new(replica_id),
-            leader: ReplicaDesc::default(), // TODO: init leader from storage
-            committed_term: 0,              // TODO: init committed term from storage
-        };
-
-        for voter_id in voters.iter() {
-            // at this point, we maybe don't know the infomation about
-            // the node which replica.
-            if let Some(replica_desc) = self.storage.replica_desc(group_id, *voter_id).await? {
-                if replica_desc.node_id == NO_NODE {
-                    continue;
-                }
-                // track the nodes which other members of the raft consensus group
-                group.node_ids.push(replica_desc.node_id);
-                self.node_manager.add_node(replica_desc.node_id, group_id);
-            }
-        }
-        self.groups.insert(group_id, group);
-
-        Ok(())
-    }
 
     // fn add_node(&mut self, node_id: u64, group_id: u64) {
     //     let node = match self.nodes.get_mut(&node_id) {
@@ -912,6 +952,10 @@ where
             .unwrap()
     }
 
+   #[tracing::instrument(
+        name = "MultiRaftActor::on_groups_ready",
+        skip(self)
+    )] 
     pub(crate) async fn on_groups_ready(&mut self, activity_groups: &HashSet<u64>) {
         // let mut ready_groups = HashMap::new();
         let mut ready_write_groups = HashMap::new();
@@ -982,6 +1026,7 @@ where
 
                 // send out messages
                 if !group_ready.messages().is_empty() {
+                    info!("handle group ({}) messges", group_id);
                     transport::send_messages(
                         self.node_id,
                         &self.storage,
@@ -1002,7 +1047,7 @@ where
 
                     let entries = group_ready.take_committed_entries();
                     let apply =
-                        MultiRaftActor::<MI, T, RS, MRS>::create_apply(replica_id, group, entries);
+                        MultiRaftActor::<T, RS, MRS>::create_apply(replica_id, group, entries);
 
                     apply_task_groups.insert(*group_id, ApplyTask::Apply(apply));
                 }
@@ -1069,6 +1114,7 @@ where
             }
 
             if !ready.persisted_messages().is_empty() {
+                info!("handle group ({}) persisted messages", group_id);
                 let persistent_msgs = ready.take_persisted_messages();
                 transport::send_messages(
                     self.node_id,
@@ -1126,7 +1172,7 @@ where
                 mut_group.maybe_update_committed_term(last_term);
 
                 let entries = light_ready.take_committed_entries();
-                let apply = MultiRaftActor::<MI, T, RS, MRS>::create_apply(
+                let apply = MultiRaftActor::<T, RS, MRS>::create_apply(
                     gwr.replica_id,
                     mut_group,
                     entries,

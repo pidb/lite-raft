@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 use raft::Storage;
 
 use super::apply::ApplyActor;
-use super::config::MultiRaftConfig;
+use super::config::Config;
 use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
@@ -27,34 +27,31 @@ pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<MI, T, RS, MRS>
+pub struct MultiRaft<T, RS, MRS>
 where
-    MI: MessageInterface,
-    T: Transport<MI>,
+    T: Transport,
     RS: Storage + Send + Sync + 'static,
     MRS: MultiRaftStorage<RS>,
 {
-    config: MultiRaftConfig,
+    config: Config,
     node_id: u64,
     actor_address: MultiRaftActorAddress,
     apply_join_handle: JoinHandle<()>,
     actor_join_handle: JoinHandle<()>,
-    _m1: PhantomData<MI>,
     _m2: PhantomData<T>,
     _m3: PhantomData<RS>,
     _m4: PhantomData<MRS>,
 }
 
-impl<MI, T, RS, MRS> MultiRaft<MI, T, RS, MRS>
+impl<T, RS, MRS> MultiRaft<T, RS, MRS>
 where
-    MI: MessageInterface,
-    T: Transport<MI>,
+    T: Transport,
     RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
 {
     /// Create a new multiraft. spawn multiraft actor and apply actor.
     pub fn new(
-        config: MultiRaftConfig,
+        config: Config,
         transport: T,
         storage: MRS,
         stop_rx: watch::Receiver<bool>,
@@ -69,7 +66,7 @@ where
             stop_rx.clone(),
         );
 
-        let (actor_join_handle, actor_address) = MultiRaftActor::spawn(
+        let (actor_join_handle, actor_address) = MultiRaftActor::<T, RS, MRS>::spawn(
             &config,
             transport,
             storage,
@@ -85,7 +82,6 @@ where
             apply_join_handle,
             actor_address,
             actor_join_handle,
-            _m1: PhantomData,
             _m2: PhantomData,
             _m3: PhantomData,
             _m4: PhantomData,

@@ -6,11 +6,11 @@ use tracing::info;
 use super::error::Error;
 use super::node::NodeManager;
 
+use super::storage::MultiRaftStorage;
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
-use super::storage::MultiRaftStorage;
 
 pub trait MessageInterface: Send + Sync + 'static {
     type RaftMessageFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
@@ -20,33 +20,19 @@ pub trait MessageInterface: Send + Sync + 'static {
     fn raft_message<'life0>(&'life0 self, msg: RaftMessage) -> Self::RaftMessageFuture<'life0>;
 }
 
-pub trait Transport<M>: Send + Sync + 'static
-where
-    M: MessageInterface,
-{
-    type ListenFuture<'life0>: Future<Output = Result<(), Error>>
+pub trait RaftMessageDispatcher: Send + Sync + 'static {
+    type DispatchFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
     where
         Self: 'life0;
 
-    fn listen<'life0>(
-        &'life0 self,
-        node_id: u64,
-        addr: &'life0 str,
-        msg_impl: M,
-    ) -> Self::ListenFuture<'life0>;
-
-    fn send(&self, msg: RaftMessage) -> Result<(), Error>;
-
-    type StopFuture<'life0>: Future<Output = Result<(), Error>>
-    where
-        Self: 'life0;
-
-    fn stop(&self, node_id: u64) -> Self::StopFuture<'_>;
-
-    // fn close();
+    fn dispatch<'life0>(&'life0 self, msg: RaftMessage) -> Self::DispatchFuture<'life0>;
 }
 
-pub async fn send_messages<MI, TR, RS, MRS>(
+pub trait Transport: Send + Sync + 'static {
+     fn send(&self, msg: RaftMessage) -> Result<(), Error>;
+}
+
+pub async fn send_messages<TR, RS, MRS>(
     from_node_id: u64,
     storage: &MRS,
     transport: &TR,
@@ -54,8 +40,7 @@ pub async fn send_messages<MI, TR, RS, MRS>(
     group_id: u64,
     msgs: Vec<Message>,
 ) where
-    MI: MessageInterface,
-    TR: Transport<MI>,
+    TR: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {
@@ -78,15 +63,14 @@ pub async fn send_messages<MI, TR, RS, MRS>(
     }
 }
 
-pub async fn send_message<MI, TR, RS, MRS>(
+pub async fn send_message<TR, RS, MRS>(
     storage: &MRS,
     transport: &TR,
     node_mgr: &mut NodeManager,
     group_id: u64,
     msg: Message,
 ) where
-    MI: MessageInterface,
-    TR: Transport<MI>,
+    TR: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
 {

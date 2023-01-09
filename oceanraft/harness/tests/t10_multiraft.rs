@@ -4,15 +4,18 @@ use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
-use oceanraft::multiraft::LocalTransport;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftConfig;
 use oceanraft::MultiRaftMessageSender;
 
+
+
+use raft::prelude::AdminMessage;
+use raft::prelude::AdminMessageType;
+use raft::prelude::RaftGroupManagement;
+use raft::prelude::RaftGroupManagementType;
 use raft_proto::prelude::ConfState;
 use raft_proto::prelude::HardState;
-use raft_proto::prelude::RaftGroupManagementMessage;
-use raft_proto::prelude::RaftGroupManagementMessageType;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::Snapshot;
 
@@ -48,7 +51,7 @@ impl FixtureCluster {
                 node_id: n + 1,
                 election_tick: 2,
                 heartbeat_tick: 1,
-                tick_interval: 1000,
+                tick_interval: 3_600_000, // hour ms
             };
 
             let (event_tx, event_rx) = channel(1);
@@ -78,7 +81,7 @@ impl FixtureCluster {
         let mut replicas = vec![];
         for i in 0..replica_num {
             let replica_id = (i + 1) as u64;
-            let node_id = first_node + i as u64;
+            let node_id = first_node + i as u64 + 1 as u64;
             voters.push(replica_id);
             replicas.push(ReplicaDesc {
                 node_id,
@@ -111,13 +114,17 @@ impl FixtureCluster {
             gs.wl().apply_snapshot(ss).unwrap();
 
             let multiraft = &self.multirafts[node_index];
-            let mut msg = RaftGroupManagementMessage::default();
-            msg.set_msg_type(RaftGroupManagementMessageType::MsgInitialGroup);
+
+            // create admin message for create raft grop
+            let mut admin_msg = AdminMessage::default();
+            admin_msg.set_msg_type(AdminMessageType::RaftGroup);
+            let mut msg = RaftGroupManagement::default();
+            msg.set_msg_type(RaftGroupManagementType::MsgCreateGroup);
             msg.group_id = group_id;
             msg.replica_id = replica_id;
             msg.replicas = replicas.clone();
-
-            multiraft.initial_raft_group(msg).await.unwrap();
+            admin_msg.raft_group = Some(msg);
+            multiraft.admin(admin_msg).await.unwrap();
 
             match self.groups.get_mut(&group_id) {
                 None => {
