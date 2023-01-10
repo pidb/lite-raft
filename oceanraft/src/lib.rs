@@ -10,4 +10,5 @@ pub mod multiraft;
 
 pub mod prelude {
     pub use raft_proto::prelude::*;
+    pub use crate::multiraft::{MultiRaft};
 }

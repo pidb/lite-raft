@@ -5,7 +5,6 @@ use crate::multiraft::storage::MultiRaftStorage;
 use crate::multiraft::Error;
 
 use futures::Future;
-use raft::storage::MemStorage;
 use raft_proto::prelude::ConfState;
 use raft_proto::prelude::RaftGroupDesc;
 use raft_proto::prelude::ReplicaDesc;
@@ -13,10 +12,13 @@ use tokio::sync::RwLock as AsyncRwLock;
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// This raft-rs MemStorage trait re-export.
+pub use raft::storage::MemStorage as RaftMemStorage;
+
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
     node_id: u64,
-    groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
+    groups: Arc<AsyncRwLock<HashMap<u64, RaftMemStorage>>>,
     group_desc_map: Arc<AsyncRwLock<HashMap<u64, RaftGroupDesc>>>,
 }
 
@@ -30,8 +32,8 @@ impl MultiRaftMemoryStorage {
     }
 }
 
-impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
-    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = Result<MemStorage>> + 'life0
+impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
+    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = Result<RaftMemStorage>> + 'life0
         where
             Self: 'life0,
             ConfState: From<T>,
@@ -50,13 +52,13 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         async move {
             let mut wl = self.groups.write().await;
             assert_ne!(wl.contains_key(&group_id), true);
-            let storage = MemStorage::new_with_conf_state(conf_state);
+            let storage = RaftMemStorage::new_with_conf_state(conf_state);
             wl.insert(group_id, storage.clone());
             Ok(storage)
         }
     }
 
-    type GroupStorageFuture<'life0> = impl Future<Output = Result<MemStorage>> + 'life0
+    type GroupStorageFuture<'life0> = impl Future<Output = Result<RaftMemStorage>> + 'life0
         where
             Self: 'life0;
     #[allow(unused)]
@@ -65,7 +67,7 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
             let mut wl = self.groups.write().await;
             match wl.get_mut(&group_id) {
                 None => {
-                    let storage = MemStorage::new();
+                    let storage = RaftMemStorage::new();
                     wl.insert(group_id, storage.clone());
                     Ok(storage)
                 }

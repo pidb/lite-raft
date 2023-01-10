@@ -7,6 +7,8 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use futures::Future;
+
 use raft::Storage;
 
 use super::apply::ApplyActor;
@@ -15,16 +17,41 @@ use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
 use super::multiraft_actor::MultiRaftActorAddress;
-use super::transport::MessageInterface;
+use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::RaftMessage;
+use raft_proto::prelude::RaftMessageResponse;
 
 use super::storage::MultiRaftStorage;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
+
+#[derive(Clone)]
+pub struct RaftMessageDispatchImpl {
+    actor_address: MultiRaftActorAddress,
+}
+
+impl RaftMessageDispatch for RaftMessageDispatchImpl {
+    type DispatchFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
+    where
+        Self: 'life0;
+
+    fn dispatch<'life0>(&'life0 self, msg: RaftMessage) -> Self::DispatchFuture<'life0> {
+        async move {
+            let (tx, rx) = oneshot::channel();
+            self.actor_address
+                .raft_message_tx
+                .send((msg, tx))
+                .await
+                .unwrap();
+            rx.await.unwrap()
+        }
+    }
+}
 
 /// MultiRaft represents a group of raft replicas
 pub struct MultiRaft<T, RS, MRS>
@@ -126,5 +153,10 @@ where
             Err(_error) => panic!("sender dopped"),
             Ok(res) => res,
         }
+    }
+
+    #[inline]
+    pub fn dispatch_impl(&self) -> RaftMessageDispatchImpl {
+        RaftMessageDispatchImpl { actor_address: self.actor_address.clone() }
     }
 }

@@ -12,15 +12,7 @@ use raft_proto::prelude::MessageType;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
 
-pub trait MessageInterface: Send + Sync + 'static {
-    type RaftMessageFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
-    where
-        Self: 'life0;
-
-    fn raft_message<'life0>(&'life0 self, msg: RaftMessage) -> Self::RaftMessageFuture<'life0>;
-}
-
-pub trait RaftMessageDispatcher: Send + Sync + 'static {
+pub trait RaftMessageDispatch: Send + Sync + 'static {
     type DispatchFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
     where
         Self: 'life0;
@@ -88,6 +80,7 @@ pub async fn send_message<TR, RS, MRS>(
         .unwrap();
     assert_ne!(from_replica.node_id, 0);
 
+    info!("from_node {} -> to_node {} send message {:?}", from_replica.node_id, to_replica.node_id, msg);
     if !node_mgr.contains_node(&to_replica.node_id) {
         node_mgr.add_node(to_replica.node_id, group_id);
     }

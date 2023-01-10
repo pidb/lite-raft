@@ -22,8 +22,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 use tokio::time::interval;
+use tokio::time::Instant;
 
 use tracing::debug;
 use tracing::error;
@@ -59,7 +59,6 @@ use super::proposal::ReadIndexProposal;
 use super::raft_group::RaftGroup;
 use super::replica_cache::ReplicaCache;
 use super::transport;
-use super::transport::MessageInterface;
 use super::transport::Transport;
 use super::util;
 
@@ -102,7 +101,7 @@ pub struct MultiRaftActorContext<RS: Storage, MRS: MultiRaftStorage<RS>> {
     pub sync_replica_cache: bool,
 }
 
-pub struct MultiRaftActor< T, RS, MRS>
+pub struct MultiRaftActor<T, RS, MRS>
 where
     T: Transport,
     RS: Storage,
@@ -140,7 +139,7 @@ where
     _m1: PhantomData<RS>,
 }
 
-impl< T, RS, MRS> MultiRaftActor< T, RS, MRS>
+impl<T, RS, MRS> MultiRaftActor<T, RS, MRS>
 where
     T: Transport,
     RS: Storage + Send + Sync + Clone + 'static,
@@ -216,10 +215,14 @@ where
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
         let mut ticks = 0;
-        let mut ticker = tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
+        let mut ticker =
+            tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
         let mut activity_groups = HashSet::new();
 
-        let mut ready_ticker = tokio::time::interval_at(Instant::now() + Duration::from_millis(10), Duration::from_millis(10));
+        let mut ready_ticker = tokio::time::interval_at(
+            Instant::now() + Duration::from_millis(10),
+            Duration::from_millis(10),
+        );
         loop {
             // handle events
             if !self.pending_events.is_empty() {
@@ -288,7 +291,7 @@ where
                     self.handle_callback(msg).await;
                 },
 
-                _ = ready_ticker.tick() => { 
+                _ = ready_ticker.tick() => {
                     self.on_groups_ready(&activity_groups).await;
                     activity_groups.clear();
                 }
@@ -326,6 +329,10 @@ where
     }
 
     /// Fanout node heartbeat and handle raft messages.
+    #[tracing::instrument(
+        name = "MultiRaftActor::handle_raft_message",
+        skip(self, tx, activity_groups)
+    )]
     async fn handle_raft_message(
         &mut self,
         mut msg: RaftMessage,
@@ -363,6 +370,7 @@ where
             .cache_replica_desc(group_id, from_replica.clone(), self.sync_replica_cache)
             .await
         {
+            error!("cachc replica description error: {}", err);
             tx.send(Err(err)).unwrap();
             return;
         }
@@ -372,6 +380,7 @@ where
             .cache_replica_desc(group_id, to_replica.clone(), self.sync_replica_cache)
             .await
         {
+            error!("cachc replica description error: {}", err);
             tx.send(Err(err)).unwrap();
             return;
         }
@@ -390,15 +399,24 @@ where
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,
             None => {
-                self.create_raft_group(group_id, to_replica.replica_id, vec![])
+                if let Err(err) = self
+                    .create_raft_group(group_id, to_replica.replica_id, vec![])
                     .await
-                    .unwrap();
+                {
+                    error!("create raft group error {}", err);
+                    panic!("{}", err);
+                }
                 self.groups.get_mut(&group_id).unwrap()
             }
         };
 
-        group.raft_group.step(raft_msg).unwrap();
+        if let Err(err) = group.raft_group.step(raft_msg) {
+            error!("step raft msg error {}", err);
+            panic!("{}", err);
+        }
         activity_groups.insert(group_id);
+        info!("step raft msg successs");
+        tx.send(Ok(RaftMessageResponse {  })).unwrap();
     }
 
     /// Fanout heartbeats from other nodes to all raft groups on this node.
@@ -585,10 +603,7 @@ where
         }
     }
 
-    #[tracing::instrument(
-        name = "MultiRaftActor::campagin",
-        skip(self)
-    )]
+    #[tracing::instrument(name = "MultiRaftActor::campagin", skip(self))]
     async fn campagin_raft(&mut self, group_id: u64) {
         if let Some(group) = self.groups.get_mut(&group_id) {
             info!("campagin raft group");
@@ -680,7 +695,10 @@ where
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
             .map_err(|err| Error::Raft(err))?;
 
-        info!("replica ({}) of raft group ({}) is created successfully", group_id, replica_id);
+        info!(
+            "replica ({}) of raft group ({}) is created successfully",
+            group_id, replica_id
+        );
         let mut group = RaftGroup {
             group_id,
             replica_id,
@@ -952,10 +970,7 @@ where
             .unwrap()
     }
 
-   #[tracing::instrument(
-        name = "MultiRaftActor::on_groups_ready",
-        skip(self)
-    )] 
+    #[tracing::instrument(name = "MultiRaftActor::on_groups_ready", skip(self))]
     pub(crate) async fn on_groups_ready(&mut self, activity_groups: &HashSet<u64>) {
         // let mut ready_groups = HashMap::new();
         let mut ready_write_groups = HashMap::new();
@@ -1172,11 +1187,8 @@ where
                 mut_group.maybe_update_committed_term(last_term);
 
                 let entries = light_ready.take_committed_entries();
-                let apply = MultiRaftActor::<T, RS, MRS>::create_apply(
-                    gwr.replica_id,
-                    mut_group,
-                    entries,
-                );
+                let apply =
+                    MultiRaftActor::<T, RS, MRS>::create_apply(gwr.replica_id, mut_group, entries);
 
                 apply_task_groups.insert(group_id, ApplyTask::Apply(apply));
             }

@@ -3,7 +3,6 @@ mod config;
 mod error;
 mod multiraft;
 mod multiraft_actor;
-mod multiraft_message;
 mod proposal;
 pub mod transport;
 // mod transport_local;
@@ -23,4 +22,4 @@ pub use error::{
 };
 pub use event::{ApplyNormalEvent, Event, LeaderElectionEvent};
 pub use multiraft::MultiRaft;
-pub use multiraft_message::MultiRaftMessageSender;
+pub use multiraft::RaftMessageDispatchImpl;

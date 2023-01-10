@@ -1,4 +1,3 @@
-use raft::Storage;
 use raft::StorageError;
 use raft_proto::prelude::ConfState;
 use raft_proto::prelude::RaftGroupDesc;
@@ -9,6 +8,9 @@ use futures::Future;
 
 use super::error::Result;
 
+/// This raft-rs Storage trait re-export.
+pub use raft::storage::Storage as RaftStorage;
+
 pub trait RaftSnapshotBuilder: Clone + Send + Sync + 'static {
     fn build_snapshot(&self, applied: u64) -> Result<Snapshot>;
 }
@@ -18,7 +20,7 @@ pub trait RaftSnapshotBuilder: Clone + Send + Sync + 'static {
 //----------------------------------------------------------------------
 
 /// MultiRaftStorage per raft group.
-pub trait MultiRaftStorage<S: Storage>: Clone + Send + Sync + 'static {
+pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     /// GAT trait for `group_storage`.
     type GroupStorageFuture<'life0>: Send + Future<Output = Result<S>>
     where

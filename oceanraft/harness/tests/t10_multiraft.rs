@@ -1,77 +1,90 @@
 use std::collections::HashMap;
 
 use oceanraft::memstore::MultiRaftMemoryStorage;
+use oceanraft::memstore::RaftMemStorage;
+
 use oceanraft::multiraft::storage::MultiRaftStorage;
+use oceanraft::multiraft::storage::RaftStorage;
+use oceanraft::multiraft::Config;
 use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
-use oceanraft::MultiRaft;
-use oceanraft::MultiRaftConfig;
-use oceanraft::MultiRaftMessageSender;
+use oceanraft::multiraft::RaftMessageDispatchImpl;
 
-
-
-use raft::prelude::AdminMessage;
-use raft::prelude::AdminMessageType;
-use raft::prelude::RaftGroupManagement;
-use raft::prelude::RaftGroupManagementType;
-use raft_proto::prelude::ConfState;
-use raft_proto::prelude::HardState;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::Snapshot;
-
-use raft::storage::MemStorage;
-use raft::storage::Storage;
+use oceanraft::prelude::AdminMessage;
+use oceanraft::prelude::AdminMessageType;
+use oceanraft::prelude::ConfState;
+use oceanraft::prelude::HardState;
+use oceanraft::prelude::MultiRaft;
+use oceanraft::prelude::RaftGroupManagement;
+use oceanraft::prelude::RaftGroupManagementType;
+use oceanraft::prelude::ReplicaDesc;
+use oceanraft::prelude::Snapshot;
 
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
+use tracing::dispatcher;
 use tracing::info;
 
-type FixtureMultiRaft = MultiRaft<
-    MultiRaftMessageSender,
-    LocalTransport<MultiRaftMessageSender>,
-    MemStorage,
-    MultiRaftMemoryStorage,
->;
+use harness::transport::LocalTransport;
+
+type FixtureMultiRaft =
+    MultiRaft<LocalTransport<RaftMessageDispatchImpl>, RaftMemStorage, MultiRaftMemoryStorage>;
 
 pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
     multirafts: Vec<FixtureMultiRaft>,
     events: Vec<Receiver<Vec<Event>>>,
     groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
+    transport: LocalTransport<RaftMessageDispatchImpl>,
 }
 
 impl FixtureCluster {
-    pub fn make(num: u64, stop: watch::Receiver<bool>) -> FixtureCluster {
+    pub async fn make(num: u64, stop: watch::Receiver<bool>) -> FixtureCluster {
         let mut multirafts = vec![];
         let mut storages = vec![];
         let mut events = vec![];
+        let transport = LocalTransport::new();
         for n in 0..num {
-            let config = MultiRaftConfig {
-                node_id: n + 1,
+            let node_id = n + 1;
+            let config = Config {
+                node_id,
                 election_tick: 2,
                 heartbeat_tick: 1,
                 tick_interval: 3_600_000, // hour ms
             };
 
             let (event_tx, event_rx) = channel(1);
-            let transport = LocalTransport::new();
             let storage = MultiRaftMemoryStorage::new(config.node_id);
-            storages.push(storage.clone());
 
             info!(
                 "start multiraft in node {}, config for {:?}",
                 config.node_id, config
             );
-            let multiraft =
-                FixtureMultiRaft::new(config, transport, storage, stop.clone(), event_tx);
+
+            let multiraft = FixtureMultiRaft::new(
+                config,
+                transport.clone(),
+                storage.clone(),
+                stop.clone(),
+                event_tx,
+            );
+
+            transport.listen(
+                node_id,
+                format!("test://node/{}", node_id).as_str(),
+                multiraft.dispatch_impl(),
+            ).await.unwrap();
+
             multirafts.push(multiraft);
             events.push(event_rx);
+            storages.push(storage);
         }
         Self {
             events,
             storages,
             multirafts,
+            transport,
             groups: HashMap::new(),
         }
     }
@@ -91,6 +104,7 @@ impl FixtureCluster {
 
         for i in 0..replica_num {
             let node_index = first_node as usize + i;
+            let node_id = first_node + i as u64 + 1 as u64;
             let replica_id = (i + 1) as u64;
             let storage = &self.storages[node_index];
             let gs = storage.group_storage(group_id, replica_id).await.unwrap();
@@ -128,9 +142,9 @@ impl FixtureCluster {
 
             match self.groups.get_mut(&group_id) {
                 None => {
-                    self.groups.insert(group_id, vec![node_index as u64]);
+                    self.groups.insert(group_id, vec![node_id as u64]);
                 }
-                Some(nodes) => nodes.push(node_index as u64),
+                Some(nodes) => nodes.push(node_id as u64),
             };
         }
     }
@@ -187,7 +201,7 @@ async fn test_initial_leader_elect() {
 
     for leader_id in 0..3 {
         let (stop_tx, stop_rx) = watch::channel(false);
-        let mut cluster = FixtureCluster::make(3, stop_rx);
+        let mut cluster = FixtureCluster::make(3, stop_rx).await;
         let group_id = 1;
         cluster.make_group(group_id, 0, 3).await;
 

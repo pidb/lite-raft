@@ -14,12 +14,12 @@ use tokio::task::JoinHandle;
 
 use oceanraft::prelude::RaftMessage;
 use oceanraft::prelude::RaftMessageResponse;
-use oceanraft::multiraft::transport::RaftMessageDispatcher;
+use oceanraft::multiraft::transport::RaftMessageDispatch;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::TransportError;
 
-struct LocalServer<M: RaftMessageDispatcher> {
+struct LocalServer<M: RaftMessageDispatch> {
     tx: Sender<(
         RaftMessage,
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
@@ -28,7 +28,7 @@ struct LocalServer<M: RaftMessageDispatcher> {
     _m1: PhantomData<M>,
 }
 
-impl<RD: RaftMessageDispatcher> LocalServer<RD> {
+impl<RD: RaftMessageDispatch> LocalServer<RD> {
     /// Spawn a server to accepct request.
     #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher, stop))]
     fn spawn(
@@ -47,6 +47,7 @@ impl<RD: RaftMessageDispatcher> LocalServer<RD> {
             loop {
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
+                        info!("recv msg {:?} and dispatch it", msg);
                         let res = dispatcher.dispatch(msg).await;
                         tx.send(res).unwrap();
                     },
@@ -63,11 +64,12 @@ impl<RD: RaftMessageDispatcher> LocalServer<RD> {
     }
 }
 
-pub struct LocalTransport<M: RaftMessageDispatcher> {
+#[derive(Clone)]
+pub struct LocalTransport<M: RaftMessageDispatch> {
     servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
 }
 
-impl<M: RaftMessageDispatcher> LocalTransport<M> {
+impl<M: RaftMessageDispatch> LocalTransport<M> {
     pub fn new() -> Self {
         Self {
             servers: Default::default(),
@@ -75,7 +77,7 @@ impl<M: RaftMessageDispatcher> LocalTransport<M> {
     }
 }
 
-impl<RD: RaftMessageDispatcher> LocalTransport<RD> {
+impl<RD: RaftMessageDispatch> LocalTransport<RD> {
     #[tracing::instrument(name = "LocalTransport::listen", skip(self, dispatcher))]
     pub async fn listen<'life0>(
         &'life0 self,
@@ -124,12 +126,13 @@ impl<RD: RaftMessageDispatcher> LocalTransport<RD> {
 
 impl<RD> Transport for LocalTransport<RD>
 where
-    RD: RaftMessageDispatcher,
+    RD: RaftMessageDispatch,
 {
     #[tracing::instrument(name = "LocalTransport::send", skip(self, msg))]
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
-        let (_from_node, to_node) = (msg.from_node, msg.to_node);
+        let (from_node, to_node) = (msg.from_node, msg.to_node);
 
+        info!("{} -> {}", from_node, to_node);
         let servers = self.servers.clone();
 
         // get client
@@ -147,8 +150,10 @@ where
 
             // and receive response
             if let Ok(res) = rx.await {
+                info!("recv response ok()");
                 res
             } else {
+                info!("recv response error()");
                 Err(Error::Transport(TransportError::Server(format!(
                     "server ({}) stopped",
                     to_node
