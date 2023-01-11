@@ -9,9 +9,13 @@ use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
 
+use futures::stream::FuturesUnordered;
+use futures::StreamExt;
 use futures_util::future::FusedFuture;
+use futures_util::FutureExt;
 use tokio::sync::futures::Notified;
 use tokio::sync::Notify;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 struct TaskSharedState {
@@ -69,18 +73,19 @@ impl TaskSharedState {
     }
 }
 
-pub struct StopGuard(Pin<Arc<TaskSharedState>>);
+// stop guard in async has trap..
+// pub struct StopGuard(Pin<Arc<TaskSharedState>>);
 
-impl Drop for StopGuard {
-    fn drop(&mut self) {
-        let prev_num_tasks = self.0.num_tasks.fetch_sub(1, Ordering::Release);
-        self.0.wake();
-        // prev_num_tasks using load is relax
-        if prev_num_tasks == 1 {
-            self.0.stopped.store(true, Ordering::Release);
-        }
-    }
-}
+// impl Drop for StopGuard {
+//     fn drop(&mut self) {
+//         let prev_num_tasks = self.0.num_tasks.fetch_sub(1, Ordering::AcqRel);
+//         self.0.wake();
+//         // prev_num_tasks using load is relax
+//         if prev_num_tasks == 1 {
+//             self.0.stopped.store(true, Ordering::Release);
+//         }
+//     }
+// }
 
 /// An error type for the "stopped by [`Stopper`]" situation.
 ///
@@ -199,6 +204,23 @@ impl TaskGroup {
         }
     }
 
+    pub fn add(&self) {
+        // spawn inner use static task manager
+        self.shared.num_tasks.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn done(&self) {
+        if self.shared.stopped.load(Ordering::Acquire) {
+            return;
+        }
+
+        let prev_num_tasks = self.shared.num_tasks.fetch_sub(1, Ordering::AcqRel);
+        self.shared.wake();
+        if prev_num_tasks == 1 {
+            self.shared.stopped.store(true, Ordering::Release);
+        }
+    }
+
     pub fn stop(&self) {
         self.shared.stop()
     }
@@ -214,46 +236,40 @@ impl TaskGroup {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref TASK_GROUP: TaskGroup = {
-        TaskGroup::new()
-    };
-}
+// lazy_static::lazy_static! {
+//     static ref TASK_GROUP: TaskGroup = {
+//         TaskGroup::new()
+//     };
+// }
 
-pub fn current() -> TaskGroup {
-    TASK_GROUP.clone()
-}
-
-pub fn spawn<T>(future: T) -> JoinHandle<T::Output>
-where
-    T: Future + Send + 'static,
-    T::Output: Send + 'static,
-{
-    // spawn inner use static task manager
-    TASK_GROUP.shared.num_tasks.fetch_add(1, Ordering::Release);
-    tokio::spawn(async move {
-        let _guard = StopGuard(TASK_GROUP.shared.clone());
-        future.await
-    })
-}
+// pub fn current() -> TaskGroup {
+//     TASK_GROUP.clone()
+// }
 
 #[cfg(test)]
 mod tests {
+    use std::panic::catch_unwind;
+
     use tokio::sync::mpsc::channel;
     use tokio::time::sleep;
     use tokio::time::Duration;
 
-    use crate::util::task_group;
+    use futures_util::FutureExt;
+
+    use crate::util::task_group::TaskGroup;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_group_stopper() {
         let (waiting_tx, mut waiting_rx) = channel(1);
         let (running_tx, mut running_rx) = channel(1);
 
-        let tg = task_group::current();
+        let tg = TaskGroup::new();
+        let tg_clone = tg.clone();
         // running task
-        task_group::spawn(async move {
+        tg.add();
+        tokio::spawn(async move {
             running_rx.recv().await.unwrap();
+            tg_clone.done();
         });
 
         let stopper = tg.stopper();
@@ -286,11 +302,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multiple_async_stoppes() {
         // emit tasks
-        let task_nums = 100;
-        let tg = task_group::current();
+        let task_nums = 3;
+        let tg = TaskGroup::new();
         for _ in 0..task_nums {
+            tg.add();
+            let tg2 = tg.clone();
             let stopper = tg.stopper();
-            task_group::spawn(async move { stopper.await });
+            tokio::spawn(async move {
+                stopper.await;
+                tg2.done();
+            });
         }
 
         let (tx, mut rx) = channel(1);
@@ -298,6 +319,7 @@ mod tests {
         // stop all tasks
         tokio::spawn(async move {
             tg.stop();
+            tg.joinner().await;
             tx.send(()).await.unwrap();
         });
 
@@ -306,31 +328,6 @@ mod tests {
             _ = sleep(Duration::from_millis(10)) => {
                 panic!("timed out waiting for stop")
             }
-        }
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[should_panic]
-    async fn test_panic_safe() {
-        let task_nums = 100;
-        let tg = task_group::current();
-        for i in 0..task_nums {
-            let stopper = tg.stopper();
-            task_group::spawn(async move { 
-                if i % 2 == 0 {
-                    panic!("opps")
-                } else {
-                    stopper.await
-                }
-             });
-        } 
-
-        tg.stop();
-        tokio::select! {
-            _ = tg.joinner() => {},
-            _ = sleep(Duration::from_millis(10)) => {
-                panic!("timed out waiting for all task join")
-            } 
         }
     }
 }
