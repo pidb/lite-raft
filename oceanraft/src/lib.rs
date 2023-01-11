@@ -2,7 +2,7 @@
 
 pub mod memstore;
 pub mod multiraft;
-
+pub mod util;
 
 // pub use multiraft::MultiRaft;
 // pub use multiraft::MultiRaftConfig;
