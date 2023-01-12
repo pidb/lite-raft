@@ -221,7 +221,6 @@ impl TaskGroup {
         tokio::spawn(async move {
             defer! {
                this.done();
-               println!("call in defer");
             };
             future.await
         })

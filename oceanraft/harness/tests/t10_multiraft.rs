@@ -20,6 +20,7 @@ use oceanraft::prelude::RaftGroupManagementType;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 
+use oceanraft::util::TaskGroup;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
@@ -40,7 +41,7 @@ pub struct FixtureCluster {
 }
 
 impl FixtureCluster {
-    pub async fn make(num: u64, stop: watch::Receiver<bool>) -> FixtureCluster {
+    pub async fn make(num: u64, task_group: TaskGroup) -> FixtureCluster {
         let mut multirafts = vec![];
         let mut storages = vec![];
         let mut events = vec![];
@@ -66,15 +67,18 @@ impl FixtureCluster {
                 config,
                 transport.clone(),
                 storage.clone(),
-                stop.clone(),
+                task_group.clone(),
                 event_tx,
             );
 
-            transport.listen(
-                node_id,
-                format!("test://node/{}", node_id).as_str(),
-                multiraft.dispatch_impl(),
-            ).await.unwrap();
+            transport
+                .listen(
+                    node_id,
+                    format!("test://node/{}", node_id).as_str(),
+                    multiraft.dispatch_impl(),
+                )
+                .await
+                .unwrap();
 
             multirafts.push(multiraft);
             events.push(event_rx);
@@ -149,23 +153,26 @@ impl FixtureCluster {
         }
     }
 
-    pub async fn check_elect(&mut self, node_index: u64, group_id: u64) {
+    pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {
+        println!("check node {} leader {} in group {}", node_index + 1, should_leaeder_id, group_id);
         // trigger an election for the replica in the group of the node where leader nodes.
         self.trigger_elect(node_index, group_id).await;
 
         for node_id in self.groups.get(&group_id).unwrap().iter() {
-            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id)
+            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id - 1)
                 .await
                 .unwrap();
             assert_ne!(election.leader_id, 0);
             assert_eq!(election.group_id, group_id);
+            assert_eq!(election.leader_id, should_leaeder_id);
             let storage = &self.storages[node_index as usize];
             let replica_desc = storage
                 .replica_for_node(group_id, *node_id)
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(election.leader_id, replica_desc.replica_id);
+            println!("replica_desc {:?}", replica_desc);
+            // assert_eq!(election.replica_id, replica_desc.replica_id);
         }
     }
 
@@ -199,13 +206,17 @@ async fn test_initial_leader_elect() {
     // install global collector configured based on RUST_LOG env var.
     tracing_subscriber::fmt::init();
 
-    for leader_id in 0..3 {
-        let (stop_tx, stop_rx) = watch::channel(false);
-        let mut cluster = FixtureCluster::make(3, stop_rx).await;
+    for node_index in 0..3 {
+        let task_group = TaskGroup::new();
+        let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
         let group_id = 1;
         cluster.make_group(group_id, 0, 3).await;
 
-        cluster.check_elect(leader_id, group_id).await;
-        let _ = stop_tx.send(true);
+        cluster
+            .check_elect(node_index, node_index + 1, group_id)
+            .await;
+        task_group.stop();
+        task_group.joinner().await;
+        cluster.transport.stop_all().await.unwrap();
     }
 }

@@ -48,6 +48,7 @@ impl Default for CallbackEvent {
 #[derive(Debug)]
 pub struct LeaderElectionEvent {
     pub group_id: u64,
+    pub replica_id: u64,
     pub leader_id: u64,
     pub committed_term: u64,
 }

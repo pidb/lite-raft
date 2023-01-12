@@ -2,6 +2,8 @@ use std::collections::hash_map::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+use oceanraft::util::Stopper;
+use oceanraft::util::TaskGroup;
 use tracing::info;
 
 use tokio::sync::mpsc::channel;
@@ -12,25 +14,24 @@ use tokio::sync::watch;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use oceanraft::prelude::RaftMessage;
-use oceanraft::prelude::RaftMessageResponse;
 use oceanraft::multiraft::transport::RaftMessageDispatch;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::TransportError;
+use oceanraft::prelude::RaftMessage;
+use oceanraft::prelude::RaftMessageResponse;
 
 struct LocalServer<M: RaftMessageDispatch> {
     tx: Sender<(
         RaftMessage,
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
     )>,
-    stop_tx: watch::Sender<bool>,
     _m1: PhantomData<M>,
 }
 
 impl<RD: RaftMessageDispatch> LocalServer<RD> {
     /// Spawn a server to accepct request.
-    #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher, stop))]
+    #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher, task_group))]
     fn spawn(
         node_id: u64,
         addr: &str,
@@ -39,9 +40,10 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
             RaftMessage,
             oneshot::Sender<Result<RaftMessageResponse, Error>>,
         )>,
-        mut stop: watch::Receiver<bool>,
+        task_group: &TaskGroup,
     ) -> JoinHandle<()> {
         let addr = addr.to_string().clone();
+        let mut stopper = task_group.stopper();
         let main_loop = async move {
             info!("the node ({}) of server listen at {}", node_id, addr);
             loop {
@@ -51,27 +53,28 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
                         let res = dispatcher.dispatch(msg).await;
                         tx.send(res).unwrap();
                     },
-                    Ok(_) = stop.changed() => {
-                        if *stop.borrow() {
-                            break
-                        }
+                    _ = &mut stopper => {
+                        println!("server stop");
+                        break
                     },
                 }
             }
         };
 
-        tokio::spawn(main_loop)
+        task_group.spawn(main_loop)
     }
 }
 
 #[derive(Clone)]
 pub struct LocalTransport<M: RaftMessageDispatch> {
+    task_group: TaskGroup,
     servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
 }
 
 impl<M: RaftMessageDispatch> LocalTransport<M> {
     pub fn new() -> Self {
         Self {
+            task_group: TaskGroup::new(),
             servers: Default::default(),
         }
     }
@@ -96,11 +99,10 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
         }
 
         // create server
-        let (stop_tx, stop_rx) = watch::channel(false);
+
         let (tx, rx) = channel(1);
         let local_server = LocalServer {
             tx,
-            stop_tx,
             _m1: PhantomData,
         };
 
@@ -108,18 +110,15 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
         wl.insert(node_id, local_server);
 
         // spawn server to accepct request
-        let _ = LocalServer::spawn(node_id, addr, dispatcher, rx, stop_rx);
+        let _ = LocalServer::spawn(node_id, addr, dispatcher, rx, &self.task_group);
 
         Ok(())
     }
 
-    #[tracing::instrument(name = "LocalTransport::stop", skip(self))]
-    pub async fn stop(&self, node_id: u64) -> Result<(), Error> {
-        let mut wl = self.servers.write().await;
-        if let Some(node) = wl.remove(&node_id) {
-            let _ = node.stop_tx.send(true);
-        }
-
+    #[tracing::instrument(name = "LocalTransport::stop_all", skip(self))]
+    pub async fn stop_all(&self) -> Result<(), Error> {
+        self.task_group.stop();
+        self.task_group.joinner().await;
         Ok(())
     }
 }

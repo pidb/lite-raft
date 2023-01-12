@@ -34,6 +34,7 @@ use tracing::warn;
 // use raft::Config;
 
 use crate::multiraft::error::RaftGroupError;
+use crate::util::TaskGroup;
 
 use super::apply::Apply;
 use super::apply::ApplyActor;
@@ -136,6 +137,7 @@ where
     // proposals: ProposalQueueManager,
     replica_cache: ReplicaCache<RS, MRS>,
     sync_replica_cache: bool,
+    task_group: TaskGroup,
     _m1: PhantomData<RS>,
 }
 
@@ -153,7 +155,7 @@ where
         event_tx: Sender<Vec<Event>>,
         callback_event_rx: Receiver<CallbackEvent>,
         apply_actor_address: ApplyActorAddress,
-        stop_rx: watch::Receiver<bool>,
+        task_group: TaskGroup,
     ) -> (JoinHandle<()>, MultiRaftActorAddress) {
         let (raft_message_tx, raft_message_rx) = channel(1);
         let (campagin_tx, campagin_rx) = channel(1);
@@ -188,15 +190,16 @@ where
             sync_replica_cache: true,
             replica_cache: ReplicaCache::new(storage.clone()),
             pending_events: Vec::new(),
+            task_group: task_group.clone(),
             // waiting_ready_groups: VecDeque::default(),
             _m1: PhantomData,
         };
 
         let main_loop = async move {
-            actor.start(stop_rx).await;
+            actor.start().await;
         };
 
-        let join = tokio::spawn(main_loop);
+        let join = task_group.spawn(main_loop);
 
         let address = MultiRaftActorAddress {
             campagin_tx,
@@ -209,8 +212,8 @@ where
         (join, address)
     }
 
-    #[tracing::instrument(name = "MultiRaftActor::start", skip(self, stop_rx))]
-    async fn start(mut self, mut stop_rx: watch::Receiver<bool>) {
+    #[tracing::instrument(name = "MultiRaftActor::start", skip(self))]
+    async fn start(mut self) {
         info!("node ({}) multiraft actor start", self.node_id);
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
@@ -223,7 +226,10 @@ where
             Instant::now() + Duration::from_millis(10),
             Duration::from_millis(10),
         );
+
         loop {
+         let mut stopper = self.task_group.stopper();
+
             // handle events
             if !self.pending_events.is_empty() {
                 info!("send pending evnets");
@@ -248,10 +254,9 @@ where
 
             tokio::select! {
                 // handle stop
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        break
-                    }
+                _ = stopper => {
+                    println!("MultiRaftActor receive stop notify");
+                    break
                 }
 
                 _ = ticker.tick() => {
@@ -1029,11 +1034,13 @@ where
                             .await
                             .unwrap()
                             .unwrap();
+                        let replica_id = replica_desc.replica_id;
                         group.leader = replica_desc;
                         self.pending_events
                             .push(Event::LederElection(LeaderElectionEvent {
                                 group_id: *group_id,
                                 leader_id: ss.leader_id,
+                                replica_id: replica_id,
                                 committed_term: group.committed_term,
                             }))
                     }

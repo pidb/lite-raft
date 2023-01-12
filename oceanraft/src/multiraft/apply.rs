@@ -28,6 +28,8 @@ use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
 
 use crate::multiraft::config::Config;
+use crate::util::Stopper;
+use crate::util::TaskGroup;
 
 // use super::apply_command::ApplyCommand;
 use super::error::Error;
@@ -114,6 +116,7 @@ pub struct ApplyActor {
     callback_event_tx: Sender<CallbackEvent>,
     // apply_to_tx: Sender<Vec<ApplyCommand>>,
     group_pending_apply: HashMap<u64, Apply>,
+    task_group: TaskGroup,
 }
 
 impl ApplyActor {
@@ -123,7 +126,7 @@ impl ApplyActor {
         config: Config,
         event_tx: Sender<Vec<Event>>,
         callback_event_tx: Sender<CallbackEvent>,
-        stop_rx: watch::Receiver<bool>,
+        task_group: TaskGroup,
     ) -> (JoinHandle<()>, ApplyActorAddress) {
         let (request_tx, request_rx) = channel(1);
         let (response_tx, response_rx) = channel(1);
@@ -139,34 +142,37 @@ impl ApplyActor {
             rx: request_rx,
             tx: response_tx,
             callback_event_tx,
+            task_group: task_group.clone(),
             group_pending_apply: HashMap::new(),
         };
 
-        let join_handle = tokio::spawn(async move {
-            actor.start(stop_rx).await;
+        let join_handle = task_group.spawn(async move {
+            actor.start().await;
         });
 
         (join_handle, address)
     }
 
-    #[tracing::instrument(name = "ApplyActor::start", skip(self, stop_rx))]
-    async fn start(mut self, mut stop_rx: watch::Receiver<bool>) {
+    #[tracing::instrument(name = "ApplyActor::start", skip(self))]
+    async fn start(mut self) {
         info!("node ({}) apply actor start", self.node_id);
         loop {
+        let mut stopper = self.task_group.stopper();
+
             tokio::select! {
-                _ = stop_rx.changed() => {
-                    if *stop_rx.borrow() {
-                        break
-                    }
+                _ = stopper => {
+                    println!("ApplyActor receive stop notiy");
+                    break
                 },
                 Some(request) = self.rx.recv() => self.handle_request(request).await,
             }
         }
+
         info!("node ({}) apply actor stop", self.node_id);
     }
 
     async fn handle_request(&mut self, request: ApplyTaskRequest) {
-        let mut apply_results  = HashMap::new();
+        let mut apply_results = HashMap::new();
         for (group_id, task) in request.groups.into_iter() {
             match task {
                 ApplyTask::Apply(mut apply) => {
@@ -188,9 +194,7 @@ impl ApplyActor {
             }
         }
 
-        let task_response = ApplyTaskResponse {
-            apply_results,
-        };
+        let task_response = ApplyTaskResponse { apply_results };
 
         self.tx.send(task_response).await.unwrap();
     }

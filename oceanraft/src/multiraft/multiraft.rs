@@ -4,12 +4,13 @@ use raft::prelude::AdminMessage;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use futures::Future;
 
 use raft::Storage;
+
+use crate::util::TaskGroup;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -81,7 +82,7 @@ where
         config: Config,
         transport: T,
         storage: MRS,
-        stop_rx: watch::Receiver<bool>,
+        task_group: TaskGroup,
         event_tx: Sender<Vec<Event>>,
     ) -> Self {
         let (callback_event_tx, callback_event_rx) = channel(1);
@@ -90,7 +91,7 @@ where
             config.clone(),
             event_tx.clone(),
             callback_event_tx,
-            stop_rx.clone(),
+            task_group.clone(),
         );
 
         let (actor_join_handle, actor_address) = MultiRaftActor::<T, RS, MRS>::spawn(
@@ -100,7 +101,7 @@ where
             event_tx.clone(),
             callback_event_rx,
             apply_actor_address,
-            stop_rx.clone(),
+            task_group.clone(),
         );
 
         Self {
