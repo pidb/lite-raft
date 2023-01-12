@@ -2,21 +2,22 @@ use std::fmt;
 use std::future::Future;
 use std::mem;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Waker;
 
-use futures::stream::FuturesUnordered;
-use futures::StreamExt;
 use futures_util::future::FusedFuture;
-use futures_util::FutureExt;
+
 use tokio::sync::futures::Notified;
 use tokio::sync::Notify;
-use tokio::task::JoinError;
 use tokio::task::JoinHandle;
+
+use crate::util::macros::defer;
 
 struct TaskSharedState {
     num_tasks: AtomicU32,
@@ -157,7 +158,7 @@ impl Future for Stopper {
 
 impl FusedFuture for Stopper {
     fn is_terminated(&self) -> bool {
-        self.stopped()
+        self.shared.stopped.load(Ordering::Acquire)
     }
 }
 
@@ -192,6 +193,12 @@ impl Future for Joinner {
     }
 }
 
+impl FusedFuture for Joinner {
+    fn is_terminated(&self) -> bool {
+        self.shared.stopped.load(Ordering::Acquire)
+    }
+}
+
 #[derive(Clone)]
 pub struct TaskGroup {
     shared: Pin<Arc<TaskSharedState>>,
@@ -204,8 +211,24 @@ impl TaskGroup {
         }
     }
 
+    pub fn spawn<T>(&self, future: T) -> JoinHandle<T::Output>
+    where
+        T: Future + Send + 'static,
+        T::Output: Send + 'static,
+    {
+        self.add();
+        let this = self.clone();
+        tokio::spawn(async move {
+            defer! {
+               this.done();
+               println!("call in defer");
+            };
+            future.await
+        })
+    }
+
+    #[inline]
     pub fn add(&self) {
-        // spawn inner use static task manager
         self.shared.num_tasks.fetch_add(1, Ordering::Release);
     }
 
@@ -221,30 +244,23 @@ impl TaskGroup {
         }
     }
 
+    #[inline]
     pub fn stop(&self) {
         self.shared.stop()
     }
 
+    #[inline]
     pub fn stopper(&self) -> Stopper {
         Stopper::new(&self.shared)
     }
 
+    #[inline]
     pub fn joinner(&self) -> Joinner {
         Joinner {
             shared: self.shared.clone(),
         }
     }
 }
-
-// lazy_static::lazy_static! {
-//     static ref TASK_GROUP: TaskGroup = {
-//         TaskGroup::new()
-//     };
-// }
-
-// pub fn current() -> TaskGroup {
-//     TASK_GROUP.clone()
-// }
 
 #[cfg(test)]
 mod tests {
@@ -253,8 +269,6 @@ mod tests {
     use tokio::sync::mpsc::channel;
     use tokio::time::sleep;
     use tokio::time::Duration;
-
-    use futures_util::FutureExt;
 
     use crate::util::task_group::TaskGroup;
 
@@ -327,6 +341,33 @@ mod tests {
             _ = rx.recv() => {},
             _ = sleep(Duration::from_millis(10)) => {
                 panic!("timed out waiting for stop")
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_num_tasks() {
+        let task_nums = 3;
+        let tg = TaskGroup::new();
+        for i in 0..task_nums  {
+            tg.add();
+        }
+    }
+
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[should_panic]
+    async fn test_panic_safe() {
+        let tg = TaskGroup::new();
+        tg.spawn(async {
+            _ = catch_unwind(|| panic!("opps"));
+        });
+
+        tg.stop();
+        tokio::select! {
+            _ = tg.joinner() => {},
+            _ = sleep(Duration::from_millis(10)) => {
+                panic!("timed out waiting for all task join")
             }
         }
     }
