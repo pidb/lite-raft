@@ -91,6 +91,9 @@ pub enum Error {
     #[error("{0}")]
     BadParameter(String),
 
+    #[error("the multiraft stopped")]
+    Stop,
+
     /// Raft storage error occurred.
     #[error("{0}")]
     Store(#[from] MultiRaftStorageError),
@@ -112,14 +115,14 @@ pub enum Error {
     #[error("{0}")]
     RaftGroup(#[from] RaftGroupError),
 
-    #[error(
-        "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
-    )]
-    InconsistentReplicaId(u64, u64, u64),
+    // #[error(
+    //     "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
+    // )]
+    // InconsistentReplicaId(u64, u64, u64),
 
-    // the tuple is (group_id, store_id)s
-    #[error("couldn't find replica id for this store ({1}) in group ({0})")]
-    ReplicaNotFound(u64, u64),
+    // // the tuple is (group_id, store_id)s
+    // #[error("couldn't find replica id for this store ({1}) in group ({0})")]
+    // ReplicaNotFound(u64, u64),
 }
 
 

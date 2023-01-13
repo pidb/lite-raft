@@ -4,6 +4,7 @@ use raft::Storage;
 use tracing::info;
 
 use super::error::Error;
+use super::multiraft::Context;
 use super::node::NodeManager;
 
 use super::storage::MultiRaftStorage;
@@ -21,7 +22,7 @@ pub trait RaftMessageDispatch: Send + Sync + 'static {
 }
 
 pub trait Transport: Send + Sync + 'static {
-     fn send(&self, msg: RaftMessage) -> Result<(), Error>;
+    fn send(&self, msg: RaftMessage) -> Result<(), Error>;
 }
 
 pub async fn send_messages<TR, RS, MRS>(
@@ -80,7 +81,10 @@ pub async fn send_message<TR, RS, MRS>(
         .unwrap();
     assert_ne!(from_replica.node_id, 0);
 
-    info!("from_node {} -> to_node {} send message {:?}", from_replica.node_id, to_replica.node_id, msg);
+    info!(
+        "from_node {} -> to_node {} send message {:?}",
+        from_replica.node_id, to_replica.node_id, msg
+    );
     if !node_mgr.contains_node(&to_replica.node_id) {
         node_mgr.add_node(to_replica.node_id, group_id);
     }

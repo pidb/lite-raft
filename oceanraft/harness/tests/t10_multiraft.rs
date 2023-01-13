@@ -23,8 +23,6 @@ use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
-use tokio::sync::watch;
-use tracing::dispatcher;
 use tracing::info;
 
 use harness::transport::LocalTransport;
@@ -154,7 +152,12 @@ impl FixtureCluster {
     }
 
     pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {
-        println!("check node {} leader {} in group {}", node_index + 1, should_leaeder_id, group_id);
+        println!(
+            "check node {} leader {} in group {}",
+            node_index + 1,
+            should_leaeder_id,
+            group_id
+        );
         // trigger an election for the replica in the group of the node where leader nodes.
         self.trigger_elect(node_index, group_id).await;
 
@@ -204,7 +207,10 @@ impl FixtureCluster {}
 #[tokio::test(flavor = "multi_thread")]
 async fn test_initial_leader_elect() {
     // install global collector configured based on RUST_LOG env var.
-    tracing_subscriber::fmt::init();
+    let collector = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    tracing::subscriber::set_global_default(collector);
 
     for node_index in 0..3 {
         let task_group = TaskGroup::new();
@@ -215,8 +221,9 @@ async fn test_initial_leader_elect() {
         cluster
             .check_elect(node_index, node_index + 1, group_id)
             .await;
+        
+        cluster.transport.stop_all().await.unwrap();
         task_group.stop();
         task_group.joinner().await;
-        cluster.transport.stop_all().await.unwrap();
     }
 }

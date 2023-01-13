@@ -1,4 +1,4 @@
-mod apply;
+mod apply_actor;
 mod config;
 mod error;
 mod multiraft;
@@ -21,5 +21,6 @@ pub use error::{
     Error, MultiRaftStorageError, ProposalError, RaftCoreError, RaftGroupError, TransportError,
 };
 pub use event::{ApplyNormalEvent, Event, LeaderElectionEvent};
-pub use multiraft::MultiRaft;
-pub use multiraft::RaftMessageDispatchImpl;
+pub use multiraft::{
+    MultiRaft, Context,RaftMessageDispatchImpl,
+};

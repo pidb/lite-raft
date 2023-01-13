@@ -12,12 +12,18 @@ use raft::Storage;
 
 use crate::util::TaskGroup;
 
-use super::apply::ApplyActor;
+use super::apply_actor;
+use super::apply_actor::ApplyActor;
+use super::apply_actor::ApplyActorContext;
+use super::apply_actor::ApplyActorInner;
+use super::apply_actor::ApplyActorSender;
 use super::config::Config;
 use super::error::Error;
 use super::event::Event;
+use super::multiraft_actor;
 use super::multiraft_actor::MultiRaftActor;
-use super::multiraft_actor::MultiRaftActorAddress;
+use super::multiraft_actor::MultiRaftActorContext;
+use super::multiraft_actor::MultiRaftActorSender;
 use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
 
@@ -31,10 +37,18 @@ use super::storage::MultiRaftStorage;
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
 
+/// Shard multiraft inner state.
 #[derive(Clone)]
-pub struct RaftMessageDispatchImpl {
-    actor_address: MultiRaftActorAddress,
+pub struct Context {
+    pub config: Config,
+    pub multiraft_actor_ctx: MultiRaftActorContext,
+    pub multiraft_actor_tx: MultiRaftActorSender,
+    pub apply_actor_ctx: ApplyActorContext,
+    pub apply_actor_tx: ApplyActorSender,
 }
+
+#[derive(Clone)]
+pub struct RaftMessageDispatchImpl(Context);
 
 impl RaftMessageDispatch for RaftMessageDispatchImpl {
     type DispatchFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
@@ -43,8 +57,12 @@ impl RaftMessageDispatch for RaftMessageDispatchImpl {
 
     fn dispatch<'life0>(&'life0 self, msg: RaftMessage) -> Self::DispatchFuture<'life0> {
         async move {
+            if self.0.multiraft_actor_ctx.stopped() {
+                return Err(Error::Stop);
+            }
             let (tx, rx) = oneshot::channel();
-            self.actor_address
+            self.0
+                .multiraft_actor_tx
                 .raft_message_tx
                 .send((msg, tx))
                 .await
@@ -61,11 +79,9 @@ where
     RS: Storage + Send + Sync + 'static,
     MRS: MultiRaftStorage<RS>,
 {
-    config: Config,
-    node_id: u64,
-    actor_address: MultiRaftActorAddress,
-    apply_join_handle: JoinHandle<()>,
-    actor_join_handle: JoinHandle<()>,
+    ctx: Context,
+    multiraft_actor: MultiRaftActor,
+    apply_actor: ApplyActor,
     _m2: PhantomData<T>,
     _m3: PhantomData<RS>,
     _m4: PhantomData<MRS>,
@@ -87,29 +103,34 @@ where
     ) -> Self {
         let (callback_event_tx, callback_event_rx) = channel(1);
 
-        let (apply_join_handle, apply_actor_address) = ApplyActor::spawn(
+        let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
             config.clone(),
             event_tx.clone(),
             callback_event_tx,
             task_group.clone(),
         );
 
-        let (actor_join_handle, actor_address) = MultiRaftActor::<T, RS, MRS>::spawn(
+        let (multiraft_actor, multiraft_actor_tx) = multiraft_actor::spawn::<T, RS, MRS>(
             &config,
             transport,
             storage,
             event_tx.clone(),
             callback_event_rx,
-            apply_actor_address,
+            apply_actor_tx.clone(),
+            apply_actor_rx,
             task_group.clone(),
         );
 
         Self {
-            node_id: config.node_id,
-            config,
-            apply_join_handle,
-            actor_address,
-            actor_join_handle,
+            ctx: Context {
+                config,
+                multiraft_actor_ctx: multiraft_actor.context(),
+                multiraft_actor_tx,
+                apply_actor_ctx: apply_actor.context(),
+                apply_actor_tx,
+            },
+            multiraft_actor,
+            apply_actor,
             _m2: PhantomData,
             _m3: PhantomData,
             _m4: PhantomData,
@@ -119,7 +140,8 @@ where
     pub async fn write(&self, request: AppWriteRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_) = self
-            .actor_address
+            .ctx
+            .multiraft_actor_tx
             .write_propose_tx
             .send((request, tx))
             .await
@@ -131,7 +153,8 @@ where
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         if let Err(_) = self
-            .actor_address
+            .ctx
+            .multiraft_actor_tx
             .read_index_propose_tx
             .send((request, tx))
             .await
@@ -141,12 +164,17 @@ where
     }
 
     pub async fn campagin(&self, group_id: u64) {
-        self.actor_address.campagin_tx.send(group_id).await.unwrap()
+        self.ctx
+            .multiraft_actor_tx
+            .campagin_tx
+            .send(group_id)
+            .await
+            .unwrap()
     }
 
     pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_error) = self.actor_address.admin_tx.send((msg, tx)).await {
+        if let Err(_error) = self.ctx.multiraft_actor_tx.admin_tx.send((msg, tx)).await {
             panic!("manager group receiver dropped")
         }
 
@@ -158,6 +186,6 @@ where
 
     #[inline]
     pub fn dispatch_impl(&self) -> RaftMessageDispatchImpl {
-        RaftMessageDispatchImpl { actor_address: self.actor_address.clone() }
+        RaftMessageDispatchImpl(self.ctx.clone())
     }
 }

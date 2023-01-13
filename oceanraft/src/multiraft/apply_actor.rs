@@ -2,8 +2,13 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::vec::IntoIter;
 
+use serde::__private::de::Content;
+use tokio::task::JoinError;
 use tracing::info;
 
 use futures::Future;
@@ -39,10 +44,107 @@ use super::event::ApplyNormalEvent;
 use super::event::CallbackEvent;
 use super::event::Event;
 use super::event::MembershipChangeView;
-use super::event::MultiRaftAsyncCb;
+// use super::event::MultiRaftAsyncCb;
 use super::multiraft_actor::MultiRaftActorContext;
 use super::proposal::Proposal;
 use super::storage::MultiRaftStorage;
+
+struct Shard {
+    stopped: AtomicBool,
+}
+
+impl Shard {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+        }
+    }
+}
+
+/// ApplyActorContext is used to safely shard the state
+/// of an actor between threads.
+pub struct ApplyActorContext {
+    shard: Arc<Shard>,
+}
+impl ApplyActorContext {
+    pub fn new() -> Self {
+        Self {
+            shard: Arc::new(Shard::new()),
+        }
+    }
+}
+
+impl Clone for ApplyActorContext {
+    fn clone(&self) -> Self {
+        Self {
+            shard: self.shard.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ApplyActorSender {
+    pub tx: Sender<ApplyTaskRequest>,
+}
+
+pub struct ApplyActorReceiver {
+    pub rx: Receiver<ApplyTaskResponse>,
+}
+
+pub struct ApplyActor {
+    join: JoinHandle<()>,
+    ctx: ApplyActorContext,
+}
+
+impl ApplyActor {
+    /// clone and return `MultiRaftActorContext`.
+    pub fn context(&self) -> ApplyActorContext {
+        self.ctx.clone()
+    }
+
+    /// join take onwership to join actor.
+    async fn join(self) -> Result<(), JoinError> {
+        self.join.await
+    }
+
+    /// `true` if actor stop.
+    pub fn stopped(&self) -> bool {
+        self.ctx.shard.stopped.load(Ordering::Acquire)
+    }
+}
+
+pub fn spawn(
+    config: Config,
+    event_tx: Sender<Vec<Event>>,
+    callback_event_tx: Sender<CallbackEvent>,
+    task_group: TaskGroup,
+) -> (ApplyActor, ApplyActorSender, ApplyActorReceiver) {
+    let (request_tx, request_rx) = channel(1);
+    let (response_tx, response_rx) = channel(1);
+
+    let ctx = ApplyActorContext::new();
+
+    let actor_inner = ApplyActorInner {
+        node_id: config.node_id,
+        event_tx,
+        ctx: ctx.clone(),
+        rx: request_rx,
+        tx: response_tx,
+        callback_event_tx,
+        task_group: task_group.clone(),
+        group_pending_apply: HashMap::new(),
+    };
+
+    let join = task_group.spawn(async move {
+        actor_inner.start().await;
+    });
+
+    (
+        ApplyActor { join, ctx },
+        ApplyActorSender { tx: request_tx },
+        ApplyActorReceiver { rx: response_rx },
+    )
+}
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
@@ -103,13 +205,9 @@ pub struct ApplyTaskResponse {
     pub apply_results: HashMap<u64, ApplyResult>,
 }
 
-pub struct ApplyActorAddress {
-    pub tx: Sender<ApplyTaskRequest>,
-    pub rx: Receiver<ApplyTaskResponse>,
-}
-
-pub struct ApplyActor {
+pub struct ApplyActorInner {
     node_id: u64,
+    ctx: ApplyActorContext,
     rx: Receiver<ApplyTaskRequest>,
     tx: Sender<ApplyTaskResponse>,
     event_tx: Sender<Vec<Event>>,
@@ -119,45 +217,12 @@ pub struct ApplyActor {
     task_group: TaskGroup,
 }
 
-impl ApplyActor {
-    /// the `event_tx` send apply event to application.
-    /// the `committed_tx` send committed event to multiraft actor.
-    pub fn spawn(
-        config: Config,
-        event_tx: Sender<Vec<Event>>,
-        callback_event_tx: Sender<CallbackEvent>,
-        task_group: TaskGroup,
-    ) -> (JoinHandle<()>, ApplyActorAddress) {
-        let (request_tx, request_rx) = channel(1);
-        let (response_tx, response_rx) = channel(1);
-
-        let address = ApplyActorAddress {
-            tx: request_tx,
-            rx: response_rx,
-        };
-
-        let actor = ApplyActor {
-            node_id: config.node_id,
-            event_tx,
-            rx: request_rx,
-            tx: response_tx,
-            callback_event_tx,
-            task_group: task_group.clone(),
-            group_pending_apply: HashMap::new(),
-        };
-
-        let join_handle = task_group.spawn(async move {
-            actor.start().await;
-        });
-
-        (join_handle, address)
-    }
-
+impl ApplyActorInner {
     #[tracing::instrument(name = "ApplyActor::start", skip(self))]
     async fn start(mut self) {
         info!("node ({}) apply actor start", self.node_id);
         loop {
-        let mut stopper = self.task_group.stopper();
+            let mut stopper = self.task_group.stopper();
 
             tokio::select! {
                 _ = stopper => {

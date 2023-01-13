@@ -2,50 +2,44 @@ use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::fmt::Debug;
-use std::hash::Hash;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use std::time::Duration;
 
-use prost::Message as ProstMessage;
 use raft::prelude::AdminMessage;
 use raft::prelude::AdminMessageType;
 use raft::prelude::RaftGroupManagement;
 use raft::prelude::RaftGroupManagementType;
 use raft::LightReady;
-use raft::RawNode;
 use raft::Ready;
 use raft::Storage;
-use smallvec::SmallVec;
+
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tokio::sync::watch;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
-use tokio::time::interval;
 use tokio::time::Instant;
 
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-use tracing::trace;
 use tracing::warn;
-
-// use raft::Config;
 
 use crate::multiraft::error::RaftGroupError;
 use crate::util::TaskGroup;
 
-use super::apply::Apply;
-use super::apply::ApplyActor;
-use super::apply::ApplyActorAddress;
-use super::apply::ApplyResult;
-use super::apply::ApplyTask;
-use super::apply::ApplyTaskRequest;
-use super::apply::ApplyTaskResponse;
+use super::apply_actor::Apply;
+use super::apply_actor::ApplyActorReceiver;
+use super::apply_actor::ApplyActorSender;
+use super::apply_actor::ApplyTask;
+use super::apply_actor::ApplyTaskRequest;
+use super::apply_actor::ApplyTaskResponse;
 use super::config::Config;
 use super::error::Error;
-use super::error::ProposalError;
 use super::event::CallbackEvent;
 use super::event::Event;
 use super::event::LeaderElectionEvent;
@@ -54,9 +48,6 @@ use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
 use super::proposal::GroupProposalQueue;
-use super::proposal::Proposal;
-use super::proposal::ProposalQueueManager;
-use super::proposal::ReadIndexProposal;
 use super::raft_group::RaftGroup;
 use super::replica_cache::ReplicaCache;
 use super::transport;
@@ -84,7 +75,7 @@ pub struct GroupWriteRequest {
 
 /// MultiRaftAddress is used to communicate with MultiRaftActor
 #[derive(Clone)]
-pub struct MultiRaftActorAddress {
+pub struct MultiRaftActorSender {
     pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
     pub campagin_tx: Sender<u64>,
@@ -95,14 +86,144 @@ pub struct MultiRaftActorAddress {
     pub admin_tx: Sender<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
 }
 
-pub struct MultiRaftActorContext<RS: Storage, MRS: MultiRaftStorage<RS>> {
-    pub node_manager: NodeManager,
-    pub groups: HashMap<u64, RaftGroup<RS>>,
-    pub replica_cache: ReplicaCache<RS, MRS>,
-    pub sync_replica_cache: bool,
+// pub struct MultiRaftActorContext<RS: Storage, MRS: MultiRaftStorage<RS>> {
+//     pub node_manager: NodeManager,
+//     pub groups: HashMap<u64, RaftGroup<RS>>,
+//     pub replica_cache: ReplicaCache<RS, MRS>,
+//     pub sync_replica_cache: bool,
+// }
+
+struct Shard {
+    stopped: AtomicBool,
 }
 
-pub struct MultiRaftActor<T, RS, MRS>
+impl Shard {
+    fn new() -> Self {
+        Self {
+            stopped: AtomicBool::new(false),
+        }
+    }
+}
+
+/// MultiRaftActorContext is used to safely shard the state 
+/// of an actor between threads.
+pub struct MultiRaftActorContext {
+    shard: Arc<Shard>,
+}
+
+impl MultiRaftActorContext {
+    pub fn new() -> Self {
+        Self {
+            shard: Arc::new(Shard::new()),
+        }
+    }
+
+    /// `true` if actor stop.
+    pub fn stopped(&self) -> bool {
+        self.shard.stopped.load(Ordering::Acquire)
+    }
+}
+
+impl Clone for MultiRaftActorContext {
+    fn clone(&self) -> Self {
+        Self {
+            shard: self.shard.clone(),
+        }
+    }
+}
+
+pub struct MultiRaftActor {
+    join: JoinHandle<()>,
+    ctx: MultiRaftActorContext,
+}
+
+impl MultiRaftActor {
+    /// clone and return `MultiRaftActorContext`.
+    pub fn context(&self) -> MultiRaftActorContext {
+        self.ctx.clone()
+    }
+
+    /// join take onwership to join actor.
+    async fn join(self) -> Result<(), JoinError> {
+        self.join.await
+    }
+}
+
+/// spawn a multi raft actor.
+pub fn spawn<TR, RS, MRS>(
+    config: &Config,
+    transport: TR,
+    storage: MRS,
+    event_tx: Sender<Vec<Event>>,
+    callback_event_rx: Receiver<CallbackEvent>,
+    apply_actor_tx: ApplyActorSender,
+    apply_actor_rx: ApplyActorReceiver,
+    task_group: TaskGroup,
+) -> (MultiRaftActor, MultiRaftActorSender)
+where
+    TR: Transport,
+    RS: Storage + Send + Sync + Clone + 'static,
+    MRS: MultiRaftStorage<RS>,
+{
+    // write channel
+    let (write_propose_tx, write_propose_rx) = channel(1);
+    // read_index channel
+    let (read_index_propose_tx, read_index_propose_rx) = channel(1);
+    // admin cahnnel
+    let (admin_tx, admin_rx) = channel(1);
+    // cmapgin channel use for harness test.
+    let (campagin_tx, campagin_rx) = channel(1);
+    // raft_message channel forward RaftMessage.
+    let (raft_message_tx, raft_message_rx) = channel(1);
+
+    let ctx = MultiRaftActorContext::new();
+
+    let actor_inner = MultiRaftActorInner {
+        ctx: ctx.clone(),
+        node_id: config.node_id,
+        node_manager: NodeManager::new(),
+        event_tx,
+        callback_event_rx,
+        groups: HashMap::new(),
+        tick_interval: Duration::from_millis(config.tick_interval),
+        election_tick: config.election_tick,
+        heartbeat_tick: config.heartbeat_tick,
+        write_propose_rx,
+        read_index_propose_rx,
+        campagin_rx,
+        raft_message_rx,
+        admin_rx,
+        storage: storage.clone(),
+        transport,
+        apply_actor_tx,
+        apply_actor_rx,
+        sync_replica_cache: true,
+        replica_cache: ReplicaCache::new(storage.clone()),
+        pending_events: Vec::new(),
+        task_group: task_group.clone(),
+        _m1: PhantomData,
+    };
+
+    let main_loop = async move {
+        actor_inner.start().await;
+    };
+
+    let join = task_group.spawn(main_loop);
+
+    let actor = MultiRaftActor { join, ctx };
+
+    let address = MultiRaftActorSender {
+        campagin_tx,
+        raft_message_tx,
+        admin_tx,
+        write_propose_tx,
+        read_index_propose_tx,
+    };
+
+    (actor, address)
+}
+
+struct MultiRaftActorInner<T, RS, MRS>
 where
     T: Transport,
     RS: Storage,
@@ -130,7 +251,8 @@ where
     event_tx: Sender<Vec<Event>>,
     callback_event_rx: Receiver<CallbackEvent>,
     // write_actor_address: WriteAddress,
-    apply_actor_address: ApplyActorAddress,
+    apply_actor_tx: ApplyActorSender,
+    apply_actor_rx: ApplyActorReceiver,
     storage: MRS,
     transport: T,
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
@@ -138,80 +260,16 @@ where
     replica_cache: ReplicaCache<RS, MRS>,
     sync_replica_cache: bool,
     task_group: TaskGroup,
+    ctx: MultiRaftActorContext,
     _m1: PhantomData<RS>,
 }
 
-impl<T, RS, MRS> MultiRaftActor<T, RS, MRS>
+impl<T, RS, MRS> MultiRaftActorInner<T, RS, MRS>
 where
     T: Transport,
     RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
 {
-    // #[tracing::instrument(name = "MultiRaftActor::spawn",  skip(storage))]
-    pub fn spawn(
-        config: &Config,
-        transport: T,
-        storage: MRS,
-        event_tx: Sender<Vec<Event>>,
-        callback_event_rx: Receiver<CallbackEvent>,
-        apply_actor_address: ApplyActorAddress,
-        task_group: TaskGroup,
-    ) -> (JoinHandle<()>, MultiRaftActorAddress) {
-        let (raft_message_tx, raft_message_rx) = channel(1);
-        let (campagin_tx, campagin_rx) = channel(1);
-        let (manager_group_tx, manager_group_rx) = channel(1);
-
-        // let (write_actor_join, write_actor_address) =
-        //     WriterActor::spawn(storage.clone(), stop.clone());
-
-        // create write propose channel
-        let (write_propose_tx, write_propose_rx) = channel(1);
-        let (read_index_propose_tx, read_index_propose_rx) = channel(1);
-
-        let actor = MultiRaftActor {
-            node_id: config.node_id,
-            // nodes: HashMap::new(),
-            node_manager: NodeManager::new(),
-            event_tx,
-            callback_event_rx,
-            groups: HashMap::new(),
-            tick_interval: Duration::from_millis(config.tick_interval),
-            election_tick: config.election_tick,
-            heartbeat_tick: config.heartbeat_tick,
-            write_propose_rx,
-            read_index_propose_rx,
-            campagin_rx,
-            raft_message_rx,
-            admin_rx: manager_group_rx,
-            storage: storage.clone(),
-            transport,
-            // write_actor_address,
-            apply_actor_address,
-            sync_replica_cache: true,
-            replica_cache: ReplicaCache::new(storage.clone()),
-            pending_events: Vec::new(),
-            task_group: task_group.clone(),
-            // waiting_ready_groups: VecDeque::default(),
-            _m1: PhantomData,
-        };
-
-        let main_loop = async move {
-            actor.start().await;
-        };
-
-        let join = task_group.spawn(main_loop);
-
-        let address = MultiRaftActorAddress {
-            campagin_tx,
-            raft_message_tx,
-            admin_tx: manager_group_tx,
-            write_propose_tx,
-            read_index_propose_tx,
-        };
-
-        (join, address)
-    }
-
     #[tracing::instrument(name = "MultiRaftActor::start", skip(self))]
     async fn start(mut self) {
         info!("node ({}) multiraft actor start", self.node_id);
@@ -227,10 +285,8 @@ where
             Duration::from_millis(10),
         );
 
+        let mut stopper = self.task_group.stopper();
         loop {
-         let mut stopper = self.task_group.stopper();
-
-            // handle events
             if !self.pending_events.is_empty() {
                 info!("send pending evnets");
                 for pending_event in self.pending_events.iter_mut() {
@@ -253,9 +309,10 @@ where
             }
 
             tokio::select! {
-                // handle stop
-                _ = stopper => {
-                    println!("MultiRaftActor receive stop notify");
+                // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
+                // information about why mut here.
+                _ = &mut stopper => {
+                    info!("MultiRaftActor receive stop notify");
                     break
                 }
 
@@ -289,7 +346,7 @@ where
                 },
 
                 // handle apply actor response.
-                Some(response) = self.apply_actor_address.rx.recv() => self.handle_apply_task_response(response).await,
+                Some(response) = self.apply_actor_rx.rx.recv() => self.handle_apply_task_response(response).await,
 
                 // handle application callback event.
                 Some(msg) = self.callback_event_rx.recv() => {
@@ -302,6 +359,8 @@ where
                 }
             }
         }
+
+        self.ctx.shard.stopped.store(true, Ordering::Release);
     }
 
     /// The node sends heartbeats to other nodes instead
@@ -421,7 +480,7 @@ where
         }
         activity_groups.insert(group_id);
         info!("step raft msg successs");
-        tx.send(Ok(RaftMessageResponse {  })).unwrap();
+        tx.send(Ok(RaftMessageResponse {})).unwrap();
     }
 
     /// Fanout heartbeats from other nodes to all raft groups on this node.
@@ -1069,7 +1128,7 @@ where
 
                     let entries = group_ready.take_committed_entries();
                     let apply =
-                        MultiRaftActor::<T, RS, MRS>::create_apply(replica_id, group, entries);
+                        MultiRaftActorInner::<T, RS, MRS>::create_apply(replica_id, group, entries);
 
                     apply_task_groups.insert(*group_id, ApplyTask::Apply(apply));
                 }
@@ -1087,7 +1146,7 @@ where
         }
 
         if !apply_task_groups.is_empty() {
-            self.apply_actor_address
+            self.apply_actor_tx
                 .tx
                 .send(ApplyTaskRequest {
                     groups: apply_task_groups,
@@ -1194,15 +1253,18 @@ where
                 mut_group.maybe_update_committed_term(last_term);
 
                 let entries = light_ready.take_committed_entries();
-                let apply =
-                    MultiRaftActor::<T, RS, MRS>::create_apply(gwr.replica_id, mut_group, entries);
+                let apply = MultiRaftActorInner::<T, RS, MRS>::create_apply(
+                    gwr.replica_id,
+                    mut_group,
+                    entries,
+                );
 
                 apply_task_groups.insert(group_id, ApplyTask::Apply(apply));
             }
         }
 
         if !apply_task_groups.is_empty() {
-            self.apply_actor_address
+            self.apply_actor_tx
                 .tx
                 .send(ApplyTaskRequest {
                     groups: apply_task_groups,

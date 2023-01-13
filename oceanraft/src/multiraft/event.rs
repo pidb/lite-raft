@@ -14,11 +14,11 @@ use super::error::Error;
 use super::multiraft_actor::MultiRaftActorContext;
 use super::storage::MultiRaftStorage;
 
-pub type MultiRaftAsyncCb<'r, RS: Storage, MRS: MultiRaftStorage<RS>> = Box<
-    dyn FnOnce(
-        &'r mut MultiRaftActorContext<RS, MRS>,
-    ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'r>>,
->;
+// pub type MultiRaftAsyncCb<'r, RS: Storage, MRS: MultiRaftStorage<RS>> = Box<
+//     dyn FnOnce(
+//         &'r mut MultiRaftActorContext<RS, MRS>,
+//     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'r>>,
+// >;
 
 /// Apply membership change results.
 ///
