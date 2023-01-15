@@ -1,21 +1,19 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oceanraft::memstore::MultiRaftMemoryStorage;
-use oceanraft::memstore::RaftMemStorage;
-
-use opentelemetry::global;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::Receiver;
 
+use oceanraft::memstore::MultiRaftMemoryStorage;
+use oceanraft::memstore::RaftMemStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
 use oceanraft::multiraft::Config;
 use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
 use oceanraft::multiraft::RaftMessageDispatchImpl;
-
 use oceanraft::prelude::AdminMessage;
 use oceanraft::prelude::AdminMessageType;
 use oceanraft::prelude::ConfState;
@@ -25,23 +23,20 @@ use oceanraft::prelude::RaftGroupManagement;
 use oceanraft::prelude::RaftGroupManagementType;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
-
 use oceanraft::util::TaskGroup;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tracing::info;
 
-use harness::transport::LocalTransport;
+
+use crate::transport::LocalTransport;
 
 type FixtureMultiRaft =
     MultiRaft<LocalTransport<RaftMessageDispatchImpl>, RaftMemStorage, MultiRaftMemoryStorage>;
 
 pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
-    multirafts: Vec<FixtureMultiRaft>,
-    events: Vec<Receiver<Vec<Event>>>,
+    pub multirafts: Vec<FixtureMultiRaft>,
+    pub events: Vec<Receiver<Vec<Event>>>,
     groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
-    transport: LocalTransport<RaftMessageDispatchImpl>,
+    pub transport: LocalTransport<RaftMessageDispatchImpl>,
 }
 
 impl FixtureCluster {
@@ -160,12 +155,6 @@ impl FixtureCluster {
     }
 
     pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {
-        println!(
-            "check node {} leader {} in group {}",
-            node_index + 1,
-            should_leaeder_id,
-            group_id
-        );
         // trigger an election for the replica in the group of the node where leader nodes.
         self.trigger_elect(node_index, group_id).await;
 
@@ -187,7 +176,7 @@ impl FixtureCluster {
         }
     }
 
-    async fn trigger_elect(&self, node_index: u64, group_id: u64) {
+   pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
         self.multirafts[node_index as usize]
             .campagin(group_id)
             .await
@@ -217,50 +206,3 @@ impl FixtureCluster {
 }
 
 impl FixtureCluster {}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_initial_leader_elect() {
-    // install global collector configured based on RUST_LOG env var.
-    // Allows you to pass along context (i.e., trace IDs) across services
-    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    // Sets up the machinery needed to export data to Jaeger
-    // There are other OTel crates that provide pipelines for the vendors
-    // mentioned earlier.
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name("test_initial_leader_elect")
-        .install_simple()
-        .unwrap();
-
-    // Create a tracing layer with the configured tracer
-    let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // The SubscriberExt and SubscriberInitExt traits are needed to extend the
-    // Registry to accept `opentelemetry (the OpenTelemetryLayer type).
-    tracing_subscriber::registry()
-        .with(opentelemetry)
-        // Continue logging to stdout
-        .with(fmt::Layer::default())
-        .try_init()
-        .unwrap();
-
-    for node_index in 0..3 {
-        let task_group = TaskGroup::new();
-        let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-        let group_id = 1;
-        cluster.make_group(group_id, 0, 3).await;
-
-        cluster
-            .check_elect(node_index, node_index + 1, group_id)
-            .await;
-
-        if let Err(_) = timeout_at(Instant::now() + Duration::from_millis(100), cluster.transport.stop_all()).await {
-            panic!("wait stop transport error")
-        }
-        cluster.transport.stop_all().await.unwrap();
-        task_group.stop();
-         if let Err(_) = timeout_at(Instant::now() + Duration::from_millis(100), task_group.joinner()).await {
-            panic!("wait cluster taks stop error")
-        }
-    }
-}
-

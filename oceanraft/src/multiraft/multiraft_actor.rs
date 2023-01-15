@@ -291,31 +291,11 @@ where
 
         let mut stopper = self.task_group.stopper();
         loop {
+            self.send_pending_events().await;
             // 1. if `on_groups_ready` is executed, `activity_groups` is empty until loop,
             //    and if the events treats the contained group as active, the group inserted
             //    into `activity_group`.
-
-            if !self.pending_events.is_empty() {
-                // info!("send pending evnets");
-                for pending_event in self.pending_events.iter_mut() {
-                    match pending_event {
-                        Event::LederElection(leader_elect) => {
-                            let group = self.groups.get(&leader_elect.group_id).unwrap();
-                            if leader_elect.committed_term != group.committed_term
-                                && group.committed_term != 0
-                            {
-                                leader_elect.committed_term = group.committed_term;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                let pending_events = std::mem::take(&mut self.pending_events);
-
-                self.event_tx.send(pending_events).await.unwrap();
-            }
-
+     
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -369,6 +349,36 @@ where
         }
 
         self.do_stop()
+    }
+
+    async fn send_pending_events(&mut self) {
+        if !self.pending_events.is_empty() {
+            // updating all valid LederElections is required because the lastest commited_term
+            // of the follower cannot be updated until after the leader committed.
+            let pending_events = std::mem::take(&mut self.pending_events)
+                .into_iter()
+                .filter_map(|mut pending_event| {
+                    match pending_event {
+                        Event::LederElection(ref mut leader_elect) => {
+                            if let Some(group) = self.groups.get(&leader_elect.group_id) {
+                                if leader_elect.committed_term != group.committed_term
+                                    && group.committed_term != 0
+                                {
+                                    leader_elect.committed_term = group.committed_term;
+                                }
+                                Some(pending_event)
+                            } else {
+                                // group is removed, but event incoming, so ignore it.
+                                None
+                            }
+                        }
+                        _ => Some(pending_event),
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            self.event_tx.send(pending_events).await.unwrap();
+        }
     }
 
     /// The node sends heartbeats to other nodes instead
@@ -989,15 +999,15 @@ where
                     },
                 };
 
-                // there are dispatch soft state if changed.
-                if let Some(ss) = group_ready.ss() {
-                    let _ = MultiRaftActorInner::<T, RS, MRS>::dispatch_soft_state_change(
+                // make apply task if need to apply commit entries
+                if !group_ready.committed_entries().is_empty() {
+                    // grouping_commit_entries will update latest commit term by commit entries.
+                    MultiRaftActorInner::<T, RS, MRS>::grouping_commit_entries(
+                        replica_id,
                         group,
-                        ss,
-                        &mut self.replica_cache,
-                        &mut self.pending_events,
-                    )
-                    .await;
+                        group_ready.take_committed_entries(),
+                        &mut apply_task_groups,
+                    );
                 }
 
                 // send out messages
@@ -1013,14 +1023,15 @@ where
                     .await;
                 }
 
-                // make apply task if need to apply commit entries
-                if !group_ready.committed_entries().is_empty() {
-                    MultiRaftActorInner::<T, RS, MRS>::grouping_commit_entries(
-                        replica_id,
+                // there are dispatch soft state if changed.
+                if let Some(ss) = group_ready.ss() {
+                    let _ = MultiRaftActorInner::<T, RS, MRS>::dispatch_soft_state_change(
                         group,
-                        group_ready.take_committed_entries(),
-                        &mut apply_task_groups,
-                    );
+                        ss,
+                        &mut self.replica_cache,
+                        &mut self.pending_events,
+                    )
+                    .await;
                 }
 
                 // make write task if need to write disk.
@@ -1096,8 +1107,7 @@ where
                     "replica {} of raft group {} becomes leader, but  node id is not known",
                     ss.leader_id, group.group_id
                 );
-                // this means that we don't know which node the leader is on.
-                // This means that we do not know which node the leader is on,
+                // this means that we do not know which node the leader is on,
                 // but this does not affect us to send LeaderElectionEvent, as
                 // this will be fixed by subsequent message communication.
                 // TODO: and asynchronous broadcasting

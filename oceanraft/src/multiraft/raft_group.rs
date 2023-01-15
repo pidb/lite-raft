@@ -55,6 +55,8 @@ where
         self.raft_group.raft.raft_log.last_index()
     }
 
+    /// Update the term of the latest entries committed during
+    /// the term of the leader.
     #[inline]
     pub fn maybe_update_committed_term(&mut self, term: u64) {
         if self.committed_term != term && self.leader.replica_id != 0 {
