@@ -15,15 +15,24 @@ message RaftGroupDesc {
     repeated ReplicaDesc replicas = 3;
 }
 
-// RaftMessageRequest is the request used to send raft messages using our
-// protobuf-based RPC codec.
+// RaftGroupMessage wraps eraft.Message and includes the node information.
+// 1. `group_id` is the raft group identifier. it must define that 0 is invalid.
+// 2. `from_node` represents which node the message came from, so `msg.from` represents 
+//    which replica id came from the node.
+// 3. `to_node` represents the node to which the message is sent, so `msg.to` represents 
+//    the replica id sent to the node.
+// 4. `replica` contains the location information of the raft group replica. It can be empty. 
+//     Note: This field is used to configure new replicas to learn this information when the 
+//     raft group sends initialization messages to other nodes after a membership change.
+// 5. `msg` is eraft.Message.
 message RaftMessage {
     uint64 group_id = 1;
     uint64 from_node = 2;
     uint64 to_node = 3;
+    repeated ReplicaDesc replicas = 4;
     // ReplicaMetadata from_replica = 2;
     // ReplicaMetadata to_replica = 3;
-    eraftpb.Message msg = 4;
+    eraftpb.Message msg = 5;
 }
 
 // RaftMessageResponse is an empty message returned by raft RPCs. If a

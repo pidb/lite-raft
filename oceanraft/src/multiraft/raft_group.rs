@@ -1,13 +1,18 @@
+use std::collections::VecDeque;
+
 use prost::Message;
 use raft::RawNode;
 use raft::StateRole;
 use raft::Storage;
+use raft::prelude::Entry;
 use tokio::sync::oneshot;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::ReplicaDesc;
 
+use super::apply_actor::Apply;
+use super::util;
 use super::error::Error;
 use super::error::ProposalError;
 use super::proposal::GroupProposalQueue;
@@ -54,6 +59,44 @@ where
     pub fn maybe_update_committed_term(&mut self, term: u64) {
         if self.committed_term != term && self.leader.replica_id != 0 {
             self.committed_term = term
+        }
+    }
+
+    pub fn create_apply(&mut self, replica_id: u64, entries: Vec<Entry>) -> Apply {
+        let current_term = self.raft_group.raft.term;
+        let commit_index = self.raft_group.raft.raft_log.committed;
+        let mut proposals = VecDeque::new();
+        if !proposals.is_empty() {
+            for entry in entries.iter() {
+                match self
+                    .proposals
+                    .find_proposal(entry.term, entry.index, current_term)
+                {
+                    Err(error) => {
+                        continue;
+                    }
+                    Ok(proposal) => match proposal {
+                        None => continue,
+
+                        Some(p) => proposals.push_back(p),
+                    },
+                };
+            }
+        }
+
+        let entries_size = entries
+            .iter()
+            .map(|ent| util::compute_entry_size(ent))
+            .sum::<usize>();
+        Apply {
+            replica_id,
+            group_id: self.group_id,
+            term: current_term,
+            commit_index,
+            commit_term: 0, // TODO: get commit term
+            entries,
+            entries_size,
+            proposals,
         }
     }
 

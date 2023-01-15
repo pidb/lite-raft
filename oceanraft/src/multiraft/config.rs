@@ -5,4 +5,6 @@ pub struct Config {
     pub election_tick: usize,
     pub heartbeat_tick: usize,
     pub tick_interval: u64, // ms
+    pub batch_apply: bool,
+    pub batch_size: usize,
 }

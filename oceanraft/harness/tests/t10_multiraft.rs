@@ -1,7 +1,13 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::memstore::RaftMemStorage;
+
+use opentelemetry::global;
+use tokio::time::timeout_at;
+use tokio::time::Instant;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
@@ -51,15 +57,17 @@ impl FixtureCluster {
                 election_tick: 2,
                 heartbeat_tick: 1,
                 tick_interval: 3_600_000, // hour ms
+                batch_apply: false,
+                batch_size: 0,
             };
 
             let (event_tx, event_rx) = channel(1);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
 
-            info!(
-                "start multiraft in node {}, config for {:?}",
-                config.node_id, config
-            );
+            // info!(
+            //     "start multiraft in node {}, config for {:?}",
+            //     config.node_id, config
+            // );
 
             let multiraft = FixtureMultiRaft::new(
                 config,
@@ -190,13 +198,19 @@ impl FixtureCluster {
         node_id: u64,
     ) -> Option<LeaderElectionEvent> {
         let event = &mut events[node_id as usize];
-        loop {
-            let events = event.recv().await.unwrap();
-            for event in events {
-                match event {
-                    Event::LederElection(leader_elect) => return Some(leader_elect),
-                    _ => {}
+        match timeout_at(Instant::now() + Duration::from_millis(100), event.recv()).await {
+            Err(_) => {
+                panic!("")
+            }
+            Ok(events) => {
+                for event in events.unwrap() {
+                    match event {
+                        Event::LederElection(leader_elect) => return Some(leader_elect),
+                        _ => {}
+                    }
                 }
+
+                return None;
             }
         }
     }
@@ -207,10 +221,27 @@ impl FixtureCluster {}
 #[tokio::test(flavor = "multi_thread")]
 async fn test_initial_leader_elect() {
     // install global collector configured based on RUST_LOG env var.
-    let collector = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::TRACE)
-        .finish();
-    tracing::subscriber::set_global_default(collector);
+    // Allows you to pass along context (i.e., trace IDs) across services
+    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
+    // Sets up the machinery needed to export data to Jaeger
+    // There are other OTel crates that provide pipelines for the vendors
+    // mentioned earlier.
+    let tracer = opentelemetry_jaeger::new_agent_pipeline()
+        .with_service_name("test_initial_leader_elect")
+        .install_simple()
+        .unwrap();
+
+    // Create a tracing layer with the configured tracer
+    let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // The SubscriberExt and SubscriberInitExt traits are needed to extend the
+    // Registry to accept `opentelemetry (the OpenTelemetryLayer type).
+    tracing_subscriber::registry()
+        .with(opentelemetry)
+        // Continue logging to stdout
+        .with(fmt::Layer::default())
+        .try_init()
+        .unwrap();
 
     for node_index in 0..3 {
         let task_group = TaskGroup::new();
@@ -221,9 +252,15 @@ async fn test_initial_leader_elect() {
         cluster
             .check_elect(node_index, node_index + 1, group_id)
             .await;
-        
+
+        if let Err(_) = timeout_at(Instant::now() + Duration::from_millis(100), cluster.transport.stop_all()).await {
+            panic!("wait stop transport error")
+        }
         cluster.transport.stop_all().await.unwrap();
         task_group.stop();
-        task_group.joinner().await;
+         if let Err(_) = timeout_at(Instant::now() + Duration::from_millis(100), task_group.joinner()).await {
+            panic!("wait cluster taks stop error")
+        }
     }
 }
+

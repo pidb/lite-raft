@@ -10,6 +10,7 @@ use std::vec::IntoIter;
 use serde::__private::de::Content;
 use tokio::task::JoinError;
 use tracing::info;
+use tracing::Level;
 
 use futures::Future;
 use raft::prelude::ConfChangeV2;
@@ -127,6 +128,7 @@ pub fn spawn(
     let actor_inner = ApplyActorInner {
         node_id: config.node_id,
         event_tx,
+        cfg: config,
         ctx: ctx.clone(),
         rx: request_rx,
         tx: response_tx,
@@ -160,9 +162,17 @@ pub struct Apply {
 }
 
 impl Apply {
-    fn try_batch(&mut self, that: &mut Apply) -> bool {
+    fn try_batch(&mut self, that: &mut Apply, config: &Config) -> bool {
+        if !config.batch_apply {
+            return false
+        }
+
         assert_eq!(self.replica_id, that.replica_id);
         assert_eq!(self.group_id, that.group_id);
+        if config.batch_size != 0  &&  self.entries_size + that.entries_size > config.batch_size {
+            return false
+        }
+
         if self.entries_size + that.entries_size > MAX_APPLY_BATCH_SIZE {
             return false;
         }
@@ -179,14 +189,6 @@ impl Apply {
         return true;
     }
 }
-
-// #[derive(Default)]
-// pub struct GroupApplyRequest {
-//     pub term: u64,
-//     pub commit_index: u64,
-//     pub entries: Vec<raft::prelude::Entry>,
-//     pub apply_commands: Vec<ApplyCommand>,
-// }
 
 pub enum ApplyTask {
     Apply(Apply),
@@ -207,6 +209,7 @@ pub struct ApplyTaskResponse {
 
 pub struct ApplyActorInner {
     node_id: u64,
+    cfg: Config,
     ctx: ApplyActorContext,
     rx: Receiver<ApplyTaskRequest>,
     tx: Sender<ApplyTaskResponse>,
@@ -218,15 +221,16 @@ pub struct ApplyActorInner {
 }
 
 impl ApplyActorInner {
-    #[tracing::instrument(name = "ApplyActor::start", skip(self))]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyActorInner::start", 
+        skip_all
+    )]
     async fn start(mut self) {
-        info!("node ({}) apply actor start", self.node_id);
+        let mut stopper = self.task_group.stopper();
         loop {
-            let mut stopper = self.task_group.stopper();
-
             tokio::select! {
-                _ = stopper => {
-                    println!("ApplyActor receive stop notiy");
+                _ = &mut stopper => {
                     break
                 },
                 Some(request) = self.rx.recv() => self.handle_request(request).await,
@@ -234,8 +238,14 @@ impl ApplyActorInner {
         }
 
         info!("node ({}) apply actor stop", self.node_id);
+        self.do_stop();
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyActorInner::handle_request", 
+        skip_all
+    )]
     async fn handle_request(&mut self, request: ApplyTaskRequest) {
         let mut apply_results = HashMap::new();
         for (group_id, task) in request.groups.into_iter() {
@@ -243,7 +253,7 @@ impl ApplyActorInner {
                 ApplyTask::Apply(mut apply) => {
                     match self.group_pending_apply.get_mut(&group_id) {
                         Some(batch) => {
-                            if batch.try_batch(&mut apply) {
+                            if batch.try_batch(&mut apply, &self.cfg) {
                                 continue;
                             }
 
@@ -264,6 +274,11 @@ impl ApplyActorInner {
         self.tx.send(task_response).await.unwrap();
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyActorInner::handle_apply", 
+        skip_all
+    )]
     async fn handle_apply(&mut self, apply: Apply) -> Result<ApplyResult, Error> {
         let mut delegate = ApplyDelegate {
             group_id: apply.group_id,
@@ -287,6 +302,15 @@ impl ApplyActorInner {
         //      if cc apply inner data structure and
         //      if other, together entry and proposal to vec
         // send batch apply to user interface
+    }
+
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyActorInner::do_stop", 
+        skip_all
+    )]
+    fn do_stop(mut self) {
+
     }
 }
 
@@ -331,6 +355,11 @@ impl ApplyDelegate {
     // fn set_apply_state<'life0>(&'life0 mut self, apply_state: &ApplyState) {
     // }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyDelegate::handle_committed_entries", 
+        skip_all
+    )]
     fn handle_committed_entries(&mut self, ents: Vec<Entry>) {
         for entry in ents.into_iter() {
             match entry.entry_type() {
@@ -342,6 +371,11 @@ impl ApplyDelegate {
         }
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyDelegate::handle_committed_normal", 
+        skip_all
+    )]
     fn handle_committed_normal(&mut self, entry: Entry) {
         let entry_index = entry.index;
         let entry_term = entry.term;
@@ -374,6 +408,11 @@ impl ApplyDelegate {
         self.staging_events.push(apply_command);
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyDelegate::handle_committed_conf_change", 
+        skip_all
+    )]
     fn handle_committed_conf_change(&mut self, entry: Entry) {
         // TODO: empty adta?
 
@@ -434,6 +473,11 @@ impl ApplyDelegate {
         // self.apply_state.applied_term = entry.term;
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "ApplyDelegate::response_stale_proposals", 
+        skip_all
+    )]
     fn response_stale_proposals(&mut self, index: u64, term: u64) {
         while let Some(p) = self.pop_normal(index, term) {
             p.tx.map(|tx| tx.send(Err(Error::Proposal(ProposalError::Stale(p.term)))));

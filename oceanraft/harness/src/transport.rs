@@ -26,6 +26,7 @@ struct LocalServer<M: RaftMessageDispatch> {
         RaftMessage,
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
     )>,
+    stopped: bool,
     _m1: PhantomData<M>,
 }
 
@@ -49,16 +50,16 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
             loop {
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
-                        info!("recv msg {:?} and dispatch it", msg);
                         let res = dispatcher.dispatch(msg).await;
                         tx.send(res).unwrap();
                     },
                     _ = &mut stopper => {
-                        println!("server stop");
+                        
                         break
                     },
                 }
             }
+            
         };
 
         task_group.spawn(main_loop)
@@ -103,6 +104,7 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
         let (tx, rx) = channel(1);
         let local_server = LocalServer {
             tx,
+            stopped: false,
             _m1: PhantomData,
         };
 
@@ -117,6 +119,10 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
 
     #[tracing::instrument(name = "LocalTransport::stop_all", skip(self))]
     pub async fn stop_all(&self) -> Result<(), Error> {
+        let mut wl = self.servers.write().await;
+        for (_, server) in wl.iter_mut() {
+            server.stopped = true
+        }
         self.task_group.stop();
         self.task_group.joinner().await;
         Ok(())
@@ -142,9 +148,14 @@ where
                 return Err(Error::Transport(TransportError::ServerNodeFound(to_node)));
             }
 
-            let (tx, rx) = oneshot::channel();
+
             // send reqeust
             let local_server = rl.get(&to_node).unwrap();
+            if local_server.stopped {
+                // FIXME: should return some error
+                return Ok(RaftMessageResponse{})
+            }
+            let (tx, rx) = oneshot::channel();
             local_server.tx.send((msg, tx)).await.unwrap();
 
             // and receive response

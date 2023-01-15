@@ -93,6 +93,7 @@ pub async fn send_message<TR, RS, MRS>(
         group_id,
         from_node: from_replica.node_id,
         to_node: to_replica.node_id,
+        replicas: vec![],
         msg: Some(msg),
     };
     transport.send(msg).unwrap();

@@ -18,3 +18,7 @@ fxhash = "0.2.1"
 lazy_static = "1"
 protobuf = "2"
 regex = "1"
+
+opentelemetry = "0.18"
+tracing-opentelemetry = "0.18" 
+opentelemetry-jaeger = "0.17"
