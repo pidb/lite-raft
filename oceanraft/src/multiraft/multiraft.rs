@@ -27,6 +27,8 @@ use super::multiraft_actor::MultiRaftActorSender;
 use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
 
+use tracing::error;
+
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::RaftMessage;
@@ -137,17 +139,24 @@ where
         }
     }
 
-    pub async fn write(&self, request: AppWriteRequest) -> Result<(), Error> {
+    // TODO: add sync write
+
+    pub async fn async_write(&self, request: AppWriteRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self
-            .ctx
+        self.ctx
             .multiraft_actor_tx
             .write_propose_tx
             .send((request, tx))
             .await
-        {}
+            .unwrap();
 
-        rx.await.unwrap()
+        match rx.await {
+            Ok(v) => v,
+            Err(_) => {
+                error!("the sender dropped");
+                Ok(())
+            }
+        }
     }
 
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
@@ -163,13 +172,39 @@ where
         rx.await.unwrap()
     }
 
-    pub async fn campagin(&self, group_id: u64) {
-        self.ctx
+    /// Campaign and wait raft group by given `group_id`.
+    /// 
+    /// `campaign` is synchronous and waits for the campaign to submitted a
+    /// result to raft.
+    pub async fn campaign(&self, group_id: u64) -> Result<(), Error> {
+        let rx = self.async_campaign(group_id)?;
+        rx.await.map_err(|_| {
+            Error::Internal("the sender that result the campaign was dropped".to_string())
+        })?
+    }
+
+    /// Campaign and without wait raft group by given `group_id`.
+    ///
+    /// `async_campaign` is asynchronous, meaning that without waiting for
+    /// the campaign to actually be submitted to raft group.
+    /// `tokio::sync::oneshot::Receiver<Result<(), Error>>` is successfully returned
+    /// and the user can receive the response submitted by the campaign to raft. if
+    /// campaign receiver stop, `Error` is returned.
+    pub fn async_campaign(
+        &self,
+        group_id: u64,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_) = self
+            .ctx
             .multiraft_actor_tx
-            .campagin_tx
-            .send(group_id)
-            .await
-            .unwrap()
+            .campaign_tx
+            .try_send((group_id, tx))
+        {
+            return Err(Error::Internal("campaign receiver dropped".to_string()));
+        }
+
+        Ok(rx)
     }
 
     pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {

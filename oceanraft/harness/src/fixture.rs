@@ -178,11 +178,11 @@ impl FixtureCluster {
 
    pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
         self.multirafts[node_index as usize]
-            .campagin(group_id)
-            .await
+            .campaign(group_id)
+            .await.unwrap();
     }
 
-    async fn wait_for_leader_elect(
+    pub async fn wait_for_leader_elect(
         events: &mut Vec<Receiver<Vec<Event>>>,
         node_id: u64,
     ) -> Option<LeaderElectionEvent> {

@@ -32,6 +32,7 @@ use raft_proto::prelude::EntryType;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
+use tracing::trace;
 
 use crate::multiraft::config::Config;
 use crate::util::Stopper;
@@ -150,6 +151,7 @@ pub fn spawn(
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
+#[derive(Debug)]
 pub struct Apply {
     pub replica_id: u64,
     pub group_id: u64,
@@ -163,14 +165,10 @@ pub struct Apply {
 
 impl Apply {
     fn try_batch(&mut self, that: &mut Apply, config: &Config) -> bool {
-        if !config.batch_apply {
-            return false
-        }
-
         assert_eq!(self.replica_id, that.replica_id);
         assert_eq!(self.group_id, that.group_id);
-        if config.batch_size != 0  &&  self.entries_size + that.entries_size > config.batch_size {
-            return false
+        if config.batch_size != 0 && self.entries_size + that.entries_size > config.batch_size {
+            return false;
         }
 
         if self.entries_size + that.entries_size > MAX_APPLY_BATCH_SIZE {
@@ -224,6 +222,7 @@ impl ApplyActorInner {
     #[tracing::instrument(
         level = Level::TRACE,
         name = "ApplyActorInner::start", 
+        fields(node_id=self.node_id)
         skip_all
     )]
     async fn start(mut self) {
@@ -251,20 +250,26 @@ impl ApplyActorInner {
         for (group_id, task) in request.groups.into_iter() {
             match task {
                 ApplyTask::Apply(mut apply) => {
-                    match self.group_pending_apply.get_mut(&group_id) {
-                        Some(batch) => {
-                            if batch.try_batch(&mut apply, &self.cfg) {
-                                continue;
-                            }
+                    if self.cfg.batch_apply {
+                        match self.group_pending_apply.get_mut(&group_id) {
+                            Some(batch) => {
+                                if batch.try_batch(&mut apply, &self.cfg) {
+                                    continue;
+                                }
 
-                            let take_batch = self.group_pending_apply.remove(&group_id).unwrap();
-                            let res = self.handle_apply(take_batch).await.unwrap();
-                            apply_results.insert(group_id, res);
-                        }
-                        None => {
-                            self.group_pending_apply.insert(group_id, apply);
-                        }
-                    };
+                                let take_batch =
+                                    self.group_pending_apply.remove(&group_id).unwrap();
+                                let res = self.handle_apply(take_batch).await.unwrap();
+                                apply_results.insert(group_id, res);
+                            }
+                            None => {
+                                self.group_pending_apply.insert(group_id, apply);
+                            }
+                        };
+                    } else {
+                        let res = self.handle_apply(apply).await.unwrap();
+                        apply_results.insert(group_id, res);
+                    }
                 }
             }
         }
@@ -288,7 +293,9 @@ impl ApplyActorInner {
         };
 
         delegate.handle_committed_entries(apply.entries);
-        self.event_tx.send(delegate.staging_events).await.unwrap();
+        if !delegate.staging_events.is_empty() {
+            self.notify_apply(delegate.staging_events).await;
+        }
 
         let res = ApplyResult {};
         Ok(res)
@@ -306,12 +313,19 @@ impl ApplyActorInner {
 
     #[tracing::instrument(
         level = Level::TRACE,
+        name = "ApplyActorInner::notify_apply", 
+        skip_all
+    )]
+    async fn notify_apply(&self, events: Vec<Event>) {
+        self.event_tx.send(events).await.unwrap();
+    }
+
+    #[tracing::instrument(
+        level = Level::TRACE,
         name = "ApplyActorInner::do_stop", 
         skip_all
     )]
-    fn do_stop(mut self) {
-
-    }
+    fn do_stop(mut self) {}
 }
 
 pub struct ApplyDelegate {
@@ -381,6 +395,17 @@ impl ApplyDelegate {
         let entry_term = entry.term;
 
         if entry.data.is_empty() {
+            info!(
+                "skip noop log({}, {}), proposals = {:?}",
+                entry_index, entry_term, self.pending_proposals
+            );
+
+            if !self.pending_proposals.is_empty() {
+                self.response_stale_proposals(entry_index, entry_term);
+                return;
+            }
+
+            return;
             // TODO: detect user propose empty data and if there any pending proposal, we don't
             // apply it and notify client.
             // info!(
@@ -392,9 +417,12 @@ impl ApplyDelegate {
             // );
             // self.apply_state.applied_term = entry_term;
             // self.apply_state.applied_index = entry_index;
-            self.response_stale_proposals(entry_index, entry_term);
-            return;
         }
+        trace!(
+            "staging pending apply entry log ({}, {})",
+            entry_index,
+            entry_term
+        );
         let tx = self
             .find_pending(entry.term, entry.index)
             .map_or(None, |p| p.tx);

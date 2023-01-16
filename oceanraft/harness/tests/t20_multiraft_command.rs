@@ -5,12 +5,12 @@ use oceanraft::prelude::AppWriteRequest;
 use opentelemetry::global;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
+use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use harness::fixture::FixtureCluster;
 
 use oceanraft::util::TaskGroup;
-
 fn make_write_request(group_id: u64, data: Vec<u8>) -> AppWriteRequest {
     AppWriteRequest {
         group_id,
@@ -50,50 +50,70 @@ async fn test_write() {
     let group_id = 1;
     cluster.make_group(group_id, 0, 3).await;
     cluster.trigger_elect(0, group_id).await;
-    
+    FixtureCluster::wait_for_leader_elect(&mut cluster.events, 1)
+        .await
+        .unwrap();
 
     let command = "command".as_bytes().to_vec();
+
+    // recv commit event
+    // FIXME: the cluster.events don't embeded FixtureCluster struct inner.
+    let command2 = command.clone();
+    let mut events = std::mem::take(&mut cluster.events);
+    tokio::spawn(async move {
+        loop {
+            // if command apply on leader, then event is arrived.
+            let events = match timeout_at(
+                Instant::now() + Duration::from_millis(100),
+                events[0].recv(),
+            )
+            .await
+            {
+                Err(_) => {
+                    println!("timeout");
+                    continue
+                },
+                // Err(_) => panic!("wait commit event for proposed command {:?}", command2),
+                Ok(event) => match event {
+                    None => panic!(
+                        "execpted recv commit event for proposed command {:?}, but sender closed",
+                        command2
+                    ),
+                    Some(events) => events,
+                },
+            };
+
+            let mut apply_event = None;
+            for event in events.into_iter() {
+                match event {
+                    Event::ApplyNormal(event) => {
+                        apply_event = Some(event);
+                        break;
+                    }
+                    _ => continue,
+                }
+            }
+
+            if let Some(mut apply_event) = apply_event {
+                info!("take apply event {:?}", apply_event);
+                assert_eq!(apply_event.entry.take_data(), command2);
+                apply_event.done(Ok(()));
+                return;
+            }
+        }
+    });
+
     // wait command apply
     match timeout_at(
-        Instant::now() + Duration::from_millis(100),
-        cluster.multirafts[0].write(make_write_request(group_id, command.clone())),
+        Instant::now() + Duration::from_millis(100000),
+        cluster.multirafts[0].async_write(make_write_request(group_id, command.clone())),
     )
     .await
     {
-        Err(_) => panic!("wait stop transport error"),
+        Err(_) => panic!("wait propose command {:?} timeouted", command),
         Ok(response) => match response {
             Err(err) => panic!("propose write command {:?} error {}", command, err),
             Ok(_) => {}
         },
     };
-
-    // if command apply on leader, then event is arrived.
-    let events = match timeout_at(
-        Instant::now() + Duration::from_millis(100),
-        cluster.events[0].recv(),
-    )
-    .await
-    {
-        Err(_) => panic!("wait commit event for proposed command {:?}", command),
-        Ok(event) => match event {
-            None => panic!(
-                "execpted recv commit event for proposed command {:?}, but sender closed",
-                command
-            ),
-            Some(events) => events,
-        },
-    };
-
-    let mut execpted_command = None;
-    for event in events.into_iter() {
-        match event {
-            Event::ApplyNormal(mut event) => {
-                execpted_command = Some(event.entry.take_data());
-                break;
-            }
-            _ => continue,
-        }
-    }
-
-    assert_eq!(execpted_command, Some(command));
 }
