@@ -14,6 +14,7 @@ use raft::prelude::RaftGroupManagementType;
 use raft::LightReady;
 use raft::Ready;
 use raft::SoftState;
+use raft::StateRole;
 use raft::Storage;
 
 use tokio::sync::mpsc::channel;
@@ -707,7 +708,10 @@ where
             self.activity_groups.insert(group_id);
             group.raft_group.campaign().map_err(|err| Error::Raft(err))
         } else {
-            warn!("the node({}) campaign group({}) is removed", self.node_id, group_id);
+            warn!(
+                "the node({}) campaign group({}) is removed",
+                self.node_id, group_id
+            );
             Err(Error::RaftGroup(RaftGroupError::NotFound(
                 group_id,
                 self.node_id,
@@ -1109,25 +1113,36 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         pending_events: &mut Vec<Event>,
     ) -> Result<(), Error> {
-        // if leader change
-        // FIXME: should add state
-        if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
-            return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
-                group,
-                ss,
-                replica_cache,
-                pending_events,
-            )
-            .await;
+        match ss.raft_state {
+            StateRole::Leader => {
+                // if leader change
+                if ss.leader_id != 0
+                    && ss.raft_state == StateRole::Leader
+                    && ss.leader_id != group.leader.replica_id
+                {
+                    return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
+                        group,
+                        ss,
+                        replica_cache,
+                        pending_events,
+                    )
+                    .await;
+                }
+            }
+            StateRole::Candidate => {}
+            StateRole::PreCandidate => {}
+            StateRole::Follower => {}
         }
 
-        // TODO: add more event
-        // there are no events we care about.
         Ok(())
     }
 
     // Process soft state changed on leader changed.
-    #[tracing::instrument(name = "MultiRaftActorInner::on_leader_change", skip_all)]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::on_leader_change", 
+        skip_all
+    )]
     async fn on_leader_change(
         group: &mut RaftGroup<RS>,
         ss: &SoftState,
@@ -1154,7 +1169,7 @@ where
                 }
             }
         };
-        debug!(
+        trace!(
             "replica ({}) of raft group ({}) becomes leader",
             ss.leader_id, group.group_id
         );
