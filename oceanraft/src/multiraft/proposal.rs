@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
+use tracing::info;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
@@ -95,6 +96,7 @@ impl GroupProposalQueue {
     ) -> Result<Option<Proposal>, Error> {
         while let Some(proposal) = self.pop(term, index) {
             if proposal.term == term {
+                info!("find proposal index {} = {}", proposal.index, index);
                 // term matched.
                 if proposal.index == index {
                     return Ok(Some(proposal));

@@ -93,6 +93,9 @@ pub enum Error {
 
     #[error("the multiraft stopped")]
     Stop,
+    
+    #[error("{0}")]
+    Internal(String),
 
     /// Raft storage error occurred.
     #[error("{0}")]

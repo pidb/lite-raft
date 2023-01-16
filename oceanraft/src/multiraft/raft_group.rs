@@ -1,23 +1,25 @@
 use std::collections::VecDeque;
 
 use prost::Message;
+use raft::prelude::Entry;
 use raft::RawNode;
 use raft::StateRole;
 use raft::Storage;
-use raft::prelude::Entry;
 use tokio::sync::oneshot;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::ReplicaDesc;
 
+use tracing::trace;
+
 use super::apply_actor::Apply;
-use super::util;
 use super::error::Error;
 use super::error::ProposalError;
 use super::proposal::GroupProposalQueue;
 use super::proposal::Proposal;
 use super::proposal::ReadIndexProposal;
+use super::util;
 
 /// Represents a replica of a raft group.
 pub struct RaftGroup<RS: Storage> {
@@ -68,17 +70,34 @@ where
         let current_term = self.raft_group.raft.term;
         let commit_index = self.raft_group.raft.raft_log.committed;
         let mut proposals = VecDeque::new();
-        if !proposals.is_empty() {
+        if !self.proposals.is_empty() {
             for entry in entries.iter() {
+                trace!(
+                    "try find propsal with entry ({}, {}, {:?}) on replica {} in proposals {:?}",
+                    entry.index,
+                    entry.term,
+                    entry.data,
+                    replica_id,
+                    self.proposals
+                );
                 match self
                     .proposals
                     .find_proposal(entry.term, entry.index, current_term)
                 {
-                    Err(error) => {
-                        continue;
+                    Err(err) => {
+                        // FIXME: don't panic
+                        panic!("find proposal error {}", err);
                     }
                     Ok(proposal) => match proposal {
-                        None => continue,
+                        None => {
+                            trace!(
+                                "can't find entry ({}, {}) related proposal on replica {}",
+                                entry.index,
+                                entry.term,
+                                replica_id
+                            );
+                            continue;
+                        }
 
                         Some(p) => proposals.push_back(p),
                     },
@@ -86,11 +105,13 @@ where
             }
         }
 
+        trace!("find proposals {:?} on replica {}", proposals, replica_id);
+
         let entries_size = entries
             .iter()
             .map(|ent| util::compute_entry_size(ent))
             .sum::<usize>();
-        Apply {
+        let apply = Apply {
             replica_id,
             group_id: self.group_id,
             term: current_term,
@@ -99,10 +120,14 @@ where
             entries,
             entries_size,
             proposals,
-        }
+        };
+
+        trace!("make apply {:?}", apply);
+
+        apply
     }
 
-    fn write_pre_propose(&mut self, request: &AppWriteRequest) -> Result<(), Error>
+    fn pre_propose_write(&mut self, request: &AppWriteRequest) -> Result<(), Error>
     where
         RS: Storage,
     {
@@ -125,20 +150,19 @@ where
         Ok(())
     }
 
-    pub fn write_propose(
+    pub fn propose_write(
         &mut self,
         request: AppWriteRequest,
         tx: oneshot::Sender<Result<(), Error>>,
     ) {
-        if let Err(err) = self.write_pre_propose(&request) {
+        if let Err(err) = self.pre_propose_write(&request) {
             tx.send(Err(err)).unwrap();
             return;
         }
         let term = self.term();
 
-        // propose to raft gorup
-        let expected_next_index = self.last_index() + 1;
-
+        // propose to raft group
+        let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(request.context, request.data) {
             tx.send(Err(Error::Proposal(ProposalError::Other(Box::new(err)))))
                 .unwrap();
@@ -146,14 +170,14 @@ where
         }
 
         let index = self.last_index() + 1;
-        if expected_next_index != index {
+        if next_index == index {
             tx.send(Err(Error::Proposal(ProposalError::Unexpected(index))))
                 .unwrap();
             return;
         }
 
         let proposal = Proposal {
-            index,
+            index: next_index,
             term,
             is_conf_change: false,
             tx: Some(tx),

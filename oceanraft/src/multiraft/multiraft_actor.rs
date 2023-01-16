@@ -36,6 +36,7 @@ use raft_proto::prelude::ReplicaDesc;
 
 use tracing::debug;
 use tracing::error;
+use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
@@ -75,7 +76,7 @@ pub struct GroupWriteRequest {
 pub struct MultiRaftActorSender {
     pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    pub campagin_tx: Sender<u64>,
+    pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         RaftMessage,
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
@@ -169,7 +170,7 @@ where
     // admin cahnnel
     let (admin_tx, admin_rx) = channel(1);
     // cmapgin channel use for harness test.
-    let (campagin_tx, campagin_rx) = channel(1);
+    let (campaign_tx, campaign_rx) = channel(1);
     // raft_message channel forward RaftMessage.
     let (raft_message_tx, raft_message_rx) = channel(1);
 
@@ -188,7 +189,7 @@ where
         heartbeat_tick: config.heartbeat_tick,
         write_propose_rx,
         read_index_propose_rx,
-        campagin_rx,
+        campaign_rx,
         raft_message_rx,
         admin_rx,
         storage: storage.clone(),
@@ -212,7 +213,7 @@ where
     let actor = MultiRaftActor { join, ctx };
 
     let address = MultiRaftActorSender {
-        campagin_tx,
+        campaign_tx,
         raft_message_tx,
         admin_tx,
         write_propose_tx,
@@ -242,7 +243,7 @@ where
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
     )>,
 
-    campagin_rx: Receiver<u64>,
+    campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
 
     admin_rx: Receiver<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
 
@@ -295,7 +296,7 @@ where
             // 1. if `on_groups_ready` is executed, `activity_groups` is empty until loop,
             //    and if the events treats the contained group as active, the group inserted
             //    into `activity_group`.
-     
+
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -320,7 +321,7 @@ where
 
                 Some((msg, tx)) = self.raft_message_rx.recv() => self.handle_raft_message(msg, tx).await,
 
-                Some(group_id) = self.campagin_rx.recv() => self.campagin_raft(group_id).await,
+                Some((group_id, tx)) = self.campaign_rx.recv() => self.campaign_raft(group_id, tx),
 
                 // handle application write request
                 Some((request, tx)) = self.write_propose_rx.recv() => self.handle_write_request(request, tx),
@@ -697,13 +698,24 @@ where
     }
 
     #[tracing::instrument(
-        level = Level::INFO,
-        name = "MultiRaftActorInner::campagin", 
-        skip(self)
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::campagin_raft", 
+        skip(self, tx)
     )]
-    async fn campagin_raft(&mut self, group_id: u64) {
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            group.raft_group.campaign().unwrap()
+    fn campaign_raft(&mut self, group_id: u64, tx: oneshot::Sender<Result<(), Error>>) {
+        let res = if let Some(group) = self.groups.get_mut(&group_id) {
+            self.activity_groups.insert(group_id);
+            group.raft_group.campaign().map_err(|err| Error::Raft(err))
+        } else {
+            warn!("the node({}) campaign group({}) is removed", self.node_id, group_id);
+            Err(Error::RaftGroup(RaftGroupError::NotFound(
+                group_id,
+                self.node_id,
+            )))
+        };
+
+        if let Err(_) = tx.send(res) {
+            warn!("the node({}) campaign group({}) successfully but the receiver of receive the result is dropped", self.node_id, group_id)
         }
     }
 
@@ -837,14 +849,24 @@ where
         Ok(())
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActor::handle_write_request",
+        skip(self, tx))
+    ]
     fn handle_write_request(
         &mut self,
         request: AppWriteRequest,
         tx: oneshot::Sender<Result<(), Error>>,
     ) {
         let group_id = request.group_id;
-        let group = self.groups.get_mut(&group_id).unwrap();
-        group.write_propose(request, tx);
+        if let Some(group) = self.groups.get_mut(&group_id) {
+            // TODO: process node deleted, we need remove pending proposals when node not found.
+            group.propose_write(request, tx);
+        } else {
+            panic!("the {} group droped", group_id);
+        }
+        // TODO: process group deleted, we need remove pending proposals.
     }
 
     fn handle_read_index_request(
@@ -857,8 +879,13 @@ where
         group.read_index_propose(request, tx);
     }
 
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActor::handle_apply_task_response",
+        skip(self))
+    ]
     async fn handle_apply_task_response(&mut self, response: ApplyTaskResponse) {
-        for (group_id, results) in response.apply_results {
+        for (group_id, _results) in response.apply_results {
             let group = match self.groups.get_mut(&group_id) {
                 Some(group) => group,
                 None => {
@@ -867,6 +894,7 @@ where
                 }
             };
             group.raft_group.advance_apply();
+            trace!("group {} advanced apply", group_id);
         }
     }
 
@@ -942,9 +970,12 @@ where
             .unwrap()
     }
 
-    #[tracing::instrument(name = "MultiRaftActorInner::dispatch_ready_groups", skip(self))]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::dispatch_ready_groups",
+        skip(self)
+    )]
     pub(crate) async fn dispatch_ready_groups(&mut self) {
-        // let mut ready_groups = HashMap::new();
         let mut ready_write_groups = HashMap::new();
         let mut apply_task_groups = HashMap::new();
         for group_id in self.activity_groups.iter() {
@@ -1067,7 +1098,11 @@ where
     }
 
     // Dispatch soft state changed related events.
-    #[tracing::instrument(name = "MultiRaftActorInner::dispatch_soft_state_change", skip_all)]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::dispatch_soft_state_change", 
+        skip(group, replica_cache, pending_events)
+    )]
     async fn dispatch_soft_state_change(
         group: &mut RaftGroup<RS>,
         ss: &SoftState,
@@ -1075,6 +1110,7 @@ where
         pending_events: &mut Vec<Event>,
     ) -> Result<(), Error> {
         // if leader change
+        // FIXME: should add state
         if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
             return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
                 group,
@@ -1085,6 +1121,7 @@ where
             .await;
         }
 
+        // TODO: add more event
         // there are no events we care about.
         Ok(())
     }

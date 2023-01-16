@@ -61,6 +61,14 @@ pub struct ApplyNormalEvent {
     pub tx: Option<oneshot::Sender<Result<(), Error>>>,
 }
 
+impl ApplyNormalEvent {
+    // FIXME: response with typed.
+    pub fn done(self, response: Result<(), Error>) {
+        println!("call done!");
+        self.tx.map(|tx| tx.send(response).unwrap());
+    }
+}
+
 #[derive(Debug)]
 pub struct ApplyMembershipChangeEvent {
     pub group_id: u64,
