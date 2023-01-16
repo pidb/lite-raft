@@ -1034,6 +1034,19 @@ where
                     },
                 };
 
+                // send out messages
+                if !group_ready.messages().is_empty() {
+                    transport::send_messages(
+                        self.node_id,
+                        &self.transport,
+                        &mut self.replica_cache,
+                        &mut self.node_manager,
+                        *group_id,
+                        group_ready.take_messages(),
+                    )
+                    .await;
+                }
+
                 // make apply task if need to apply commit entries
                 if !group_ready.committed_entries().is_empty() {
                     // grouping_commit_entries will update latest commit term by commit entries.
@@ -1043,19 +1056,6 @@ where
                         group_ready.take_committed_entries(),
                         &mut apply_task_groups,
                     );
-                }
-
-                // send out messages
-                if !group_ready.messages().is_empty() {
-                    transport::send_messages(
-                        self.node_id,
-                        &self.storage,
-                        &self.transport,
-                        &mut self.node_manager,
-                        *group_id,
-                        group_ready.take_messages(),
-                    )
-                    .await;
                 }
 
                 // there are dispatch soft state if changed.
@@ -1113,31 +1113,21 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         pending_events: &mut Vec<Event>,
     ) -> Result<(), Error> {
-        match ss.raft_state {
-            StateRole::Leader => {
-                // if leader change
-                if ss.leader_id != 0
-                    && ss.raft_state == StateRole::Leader
-                    && ss.leader_id != group.leader.replica_id
-                {
-                    return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
-                        group,
-                        ss,
-                        replica_cache,
-                        pending_events,
-                    )
-                    .await;
-                }
-            }
-            StateRole::Candidate => {}
-            StateRole::PreCandidate => {}
-            StateRole::Follower => {}
+        // if leader change
+        if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
+            return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
+                group,
+                ss,
+                replica_cache,
+                pending_events,
+            )
+            .await;
         }
 
         Ok(())
     }
 
-    // Process soft state changed on leader changed.
+    // Process soft state changed on leader changed
     #[tracing::instrument(
         level = Level::TRACE,
         name = "MultiRaftActorInner::on_leader_change", 
@@ -1171,7 +1161,8 @@ where
         };
         trace!(
             "replica ({}) of raft group ({}) becomes leader",
-            ss.leader_id, group.group_id
+            ss.leader_id,
+            group.group_id
         );
         let replica_id = replica_desc.replica_id;
         group.leader = replica_desc; // always set because node_id maybe NO_NODE.
@@ -1224,8 +1215,8 @@ where
             if !ready.persisted_messages().is_empty() {
                 transport::send_messages(
                     self.node_id,
-                    &self.storage,
                     &self.transport,
+                    &mut self.replica_cache,
                     &mut self.node_manager,
                     *group_id,
                     ready.take_persisted_messages(),
@@ -1264,8 +1255,8 @@ where
                 let messages = light_ready.take_messages();
                 transport::send_messages(
                     self.node_id,
-                    &self.storage,
                     &self.transport,
+                    &mut self.replica_cache,
                     &mut self.node_manager,
                     group_id,
                     messages,
