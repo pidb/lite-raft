@@ -26,7 +26,7 @@ async fn wait_for_command_apply<P>(rx: &mut Receiver<Vec<Event>>, mut predicate:
 where
     P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
 {
-    let loop_fn = async {
+    // let loop_fn = async {
         loop {
             let events = match rx.recv().await {
                 None => panic!("sender dropped"),
@@ -49,7 +49,7 @@ where
                 }
             }
         }
-    };
+    // };
 }
 
 #[tokio::test(flavor = "multi_thread")]
