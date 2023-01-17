@@ -514,7 +514,10 @@ where
         }
 
         self.activity_groups.insert(group_id);
-        tx.send(Ok(RaftMessageResponse {})).unwrap();
+        if let Err(_) = tx.send(Ok(RaftMessageResponse {})) {
+            // the server of transport dropped
+            error!("failed to reespond to RaftMessageRequest, the receiver dropped");
+        }
     }
 
     /// Fanout heartbeats from other nodes to all raft groups on this node.
@@ -1175,13 +1178,16 @@ where
         Ok(())
     }
 
-    #[tracing::instrument(name = "MultiRaftActorInner::handle_groups_write", skip_all)]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::handle_groups_write", 
+        skip_all
+    )]
     async fn handle_groups_write(
         &mut self,
         mut ready_write_groups: HashMap<u64, GroupWriteRequest>,
     ) -> HashMap<u64, GroupWriteRequest> {
         // TODO(yuanchang.xu) Disk write flow control
-        // let mut light_readys = HashMap::new();
         for (group_id, group_write_request) in ready_write_groups.iter_mut() {
             let group = self.groups.get_mut(&group_id).unwrap();
             let gs = match self
@@ -1190,7 +1196,11 @@ where
                 .await
             {
                 Ok(gs) => gs,
-                Err(error) => {
+                Err(err) => {
+                    error!(
+                        "node({}) group({}) ready but got group storage error {}",
+                        self.node_id, group_id, err
+                    );
                     continue;
                 }
             };
@@ -1231,12 +1241,22 @@ where
         ready_write_groups
     }
 
-    #[tracing::instrument(name = "MultiRaftActorInner::handle_groups_write_finish", skip_all)]
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActorInner::handle_groups_write_finish", 
+        skip_all
+    )]
     async fn handle_groups_write_finish(&mut self, ready_groups: HashMap<u64, GroupWriteRequest>) {
         let mut apply_task_groups = HashMap::new();
         for (group_id, mut gwr) in ready_groups.into_iter() {
             let mut_group = match self.groups.get_mut(&group_id) {
-                None => continue,
+                None => {
+                    error!(
+                        "node({}) group({}) ready finish, but group is dropped",
+                        self.node_id, group_id
+                    );
+                    continue;
+                }
                 Some(g) => g,
             };
 

@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use tokio::time::timeout_at;
-use tokio::time::Instant;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
+use tokio::time::timeout_at;
+use tokio::time::Instant;
 
 use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::memstore::RaftMemStorage;
@@ -25,7 +25,6 @@ use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
 
-
 use crate::transport::LocalTransport;
 
 type FixtureMultiRaft =
@@ -34,8 +33,8 @@ type FixtureMultiRaft =
 pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
     pub multirafts: Vec<FixtureMultiRaft>,
-    pub events: Vec<Receiver<Vec<Event>>>,
-    groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
+    pub events: Vec<Receiver<Vec<Event>>>, // FIXME: should hidden this field
+    groups: HashMap<u64, Vec<u64>>,        // track group which nodes, group_id -> nodes
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
 }
 
@@ -154,6 +153,11 @@ impl FixtureCluster {
         }
     }
 
+    /// Remove event rx from cluster events.
+    pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
+        self.events.remove(index)
+    }
+
     pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {
         // trigger an election for the replica in the group of the node where leader nodes.
         self.trigger_elect(node_index, group_id).await;
@@ -171,15 +175,15 @@ impl FixtureCluster {
                 .await
                 .unwrap()
                 .unwrap();
-            println!("replica_desc {:?}", replica_desc);
             // assert_eq!(election.replica_id, replica_desc.replica_id);
         }
     }
 
-   pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
+    pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
         self.multirafts[node_index as usize]
             .campaign(group_id)
-            .await.unwrap();
+            .await
+            .unwrap();
     }
 
     pub async fn wait_for_leader_elect(
