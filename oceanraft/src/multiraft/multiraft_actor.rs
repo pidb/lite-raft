@@ -60,6 +60,7 @@ use super::multiraft::NO_NODE;
 use super::node::NodeManager;
 use super::proposal::GroupProposalQueue;
 use super::raft_group::RaftGroup;
+use super::raft_group::RaftGroupState;
 use super::raft_group::RaftGroupWriteRequest;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
@@ -814,6 +815,7 @@ where
             proposals: GroupProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
             committed_term: 0,              // TODO: init committed term from storage
+            state: RaftGroupState::default(),
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -886,7 +888,7 @@ where
         skip(self))
     ]
     async fn handle_apply_task_response(&mut self, response: ApplyTaskResponse) {
-        for (group_id, _results) in response.apply_results {
+        for (group_id, apply_result) in response.apply_results {
             let group = match self.groups.get_mut(&group_id) {
                 Some(group) => group,
                 None => {
@@ -894,8 +896,16 @@ where
                     continue;
                 }
             };
+
+            // set apply state
+            group.state.apply_state = apply_result.apply_state;
+            trace!(
+                " apply state change = {:?}, group = {}",
+                group.state.apply_state,
+                group_id
+            );
             group.raft_group.advance_apply();
-            trace!("group {} advanced apply", group_id);
+            trace!("advance apply, group = {}", group_id);
         }
     }
 

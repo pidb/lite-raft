@@ -14,6 +14,8 @@ use tokio::sync::oneshot;
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::ReplicaDesc;
+use raft_proto::prelude::HardState;
+use raft_proto::prelude::ConfState;
 
 use tracing::debug;
 use tracing::error;
@@ -32,11 +34,29 @@ use super::proposal::GroupProposalQueue;
 use super::proposal::Proposal;
 use super::proposal::ReadIndexProposal;
 use super::replica_cache::ReplicaCache;
-use super::storage;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::util;
 use super::Event;
+
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct RaftGroupApplyState {
+    pub commit_index: u64,
+    pub commit_term: u64,
+    pub applied_term: u64,
+    pub applied_index: u64,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub struct RaftGroupState {
+    pub group_id: u64,
+    pub replica_id: u64,
+    // pub hard_state: HardState,
+    pub soft_state: SoftState,
+    pub membership_state: ConfState,
+    pub apply_state: RaftGroupApplyState,
+
+}
 
 #[derive(Default, Debug)]
 pub struct RaftGroupWriteRequest {
@@ -55,6 +75,7 @@ pub struct RaftGroup<RS: Storage> {
     pub proposals: GroupProposalQueue,
     pub leader: ReplicaDesc,
     pub committed_term: u64,
+    pub state: RaftGroupState,
 }
 
 impl<RS> RaftGroup<RS>

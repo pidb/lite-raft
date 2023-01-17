@@ -50,6 +50,7 @@ use super::event::MembershipChangeView;
 // use super::event::MultiRaftAsyncCb;
 use super::multiraft_actor::MultiRaftActorContext;
 use super::proposal::Proposal;
+use super::raft_group::RaftGroupApplyState;
 use super::storage::MultiRaftStorage;
 
 struct Shard {
@@ -128,6 +129,7 @@ pub fn spawn(
     let ctx = ApplyActorContext::new();
 
     let actor_inner = ApplyActorInner {
+        multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
         node_id: config.node_id,
         event_tx,
         cfg: config,
@@ -194,7 +196,9 @@ pub enum ApplyTask {
 }
 
 #[derive(Debug)]
-pub struct ApplyResult {}
+pub struct ApplyResult {
+    pub apply_state: RaftGroupApplyState,
+}
 
 #[derive(Default)]
 pub struct ApplyTaskRequest {
@@ -207,6 +211,8 @@ pub struct ApplyTaskResponse {
 }
 
 pub struct ApplyActorInner {
+    multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
+
     node_id: u64,
     cfg: Config,
     ctx: ApplyActorContext,
@@ -260,7 +266,7 @@ impl ApplyActorInner {
 
                                 let take_batch =
                                     self.group_pending_apply.remove(&group_id).unwrap();
-                                let res = self.handle_apply(take_batch).await.unwrap();
+                                let res = self.handle_apply(group_id, take_batch).await.unwrap();
                                 apply_results.insert(group_id, res);
                             }
                             None => {
@@ -268,7 +274,7 @@ impl ApplyActorInner {
                             }
                         };
                     } else {
-                        let res = self.handle_apply(apply).await.unwrap();
+                        let res = self.handle_apply(group_id, apply).await.unwrap();
                         apply_results.insert(group_id, res);
                     }
                 }
@@ -285,7 +291,30 @@ impl ApplyActorInner {
         name = "ApplyActorInner::handle_apply", 
         skip_all
     )]
-    async fn handle_apply(&mut self, apply: Apply) -> Result<ApplyResult, Error> {
+    async fn handle_apply(&mut self, group_id: u64, apply: Apply) -> Result<ApplyResult, Error> {
+        let apply_state = match self.multi_groups_apply_state.get_mut(&group_id) {
+            Some(state) => state,
+            None => {
+                // FIXME: Should be initialized at raft group creation time
+                self.multi_groups_apply_state
+                    .insert(group_id, RaftGroupApplyState::default());
+                self.multi_groups_apply_state.get_mut(&group_id).unwrap()
+            }
+        };
+
+        let (prev_applied_index, prev_applied_term) =
+            (apply_state.applied_index, apply_state.applied_term);
+        let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
+        // check if the state machine is backword
+        if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
+            // FIXME: need load curr_commit_term
+            // panic!(
+            //     "commit state jump backward {:?} -> {:?}",
+            //     (prev_applied_index, prev_applied_term),
+            //     (curr_commit_index, curr_commit_term)
+            // );
+        }
+
         let mut delegate = ApplyDelegate {
             group_id: apply.group_id,
             pending_proposals: apply.proposals,
@@ -293,12 +322,14 @@ impl ApplyActorInner {
             callback_event_tx: self.callback_event_tx.clone(),
         };
 
-        delegate.handle_committed_entries(apply.entries);
+        delegate.handle_committed_entries(apply.entries, apply_state);
         if !delegate.staging_events.is_empty() {
-            self.notify_apply(delegate.staging_events).await;
+            ApplyActorInner::notify_apply(&self.event_tx, delegate.staging_events).await;
         }
 
-        let res = ApplyResult {};
+        let res = ApplyResult {
+            apply_state: apply_state.clone(),
+        };
         Ok(res)
     }
 
@@ -307,8 +338,8 @@ impl ApplyActorInner {
         name = "ApplyActorInner::notify_apply", 
         skip_all
     )]
-    async fn notify_apply(&self, events: Vec<Event>) {
-        if let Err(err) = self.event_tx.send(events).await {
+    async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
+        if let Err(err) = event_tx.send(events).await {
             warn!("notify apply events {:?}, but receiver dropped", err.0);
         }
     }
@@ -359,20 +390,17 @@ impl ApplyDelegate {
         return None;
     }
 
-    // fn set_apply_state<'life0>(&'life0 mut self, apply_state: &ApplyState) {
-    // }
-
     #[tracing::instrument(
         level = Level::TRACE,
         name = "ApplyDelegate::handle_committed_entries", 
         skip_all
     )]
-    fn handle_committed_entries(&mut self, ents: Vec<Entry>) {
+    fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
         for entry in ents.into_iter() {
             match entry.entry_type() {
-                EntryType::EntryNormal => self.handle_committed_normal(entry),
+                EntryType::EntryNormal => self.handle_committed_normal(entry, state),
                 EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    self.handle_committed_conf_change(entry)
+                    self.handle_committed_conf_change(entry, state)
                 }
             }
         }
@@ -383,50 +411,43 @@ impl ApplyDelegate {
         name = "ApplyDelegate::handle_committed_normal", 
         skip_all
     )]
-    fn handle_committed_normal(&mut self, entry: Entry) {
+    fn handle_committed_normal(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         let entry_index = entry.index;
         let entry_term = entry.term;
 
         if entry.data.is_empty() {
-            info!(
-                "skip noop log({}, {}), proposals = {:?}",
-                entry_index, entry_term, self.pending_proposals
-            );
-
+            // When the new leader online, a no-op log will be send and commit.
+            // we will skip this log for the application and set index and term after
+            // apply.
+            info!("skip no-op index = {}, term = {}", entry_index, entry_term);
             if !self.pending_proposals.is_empty() {
+                info!(
+                    "skip no-op log index = {}, term = {}, remove stale proposals = {:?}",
+                    entry_index, entry_term, self.pending_proposals
+                );
                 self.response_stale_proposals(entry_index, entry_term);
-                return;
             }
+        } else {
+            trace!(
+                "staging pending apply entry log ({}, {})",
+                entry_index,
+                entry_term
+            );
+            let tx = self
+                .find_pending(entry.term, entry.index)
+                .map_or(None, |p| p.tx);
 
-            return;
-            // TODO: detect user propose empty data and if there any pending proposal, we don't
-            // apply it and notify client.
-            // info!(
-            //     self.ctx.root_logger,
-            //     "{} skip no-op log index = {}, term = {}",
-            //     self.ctx.peer_id,
-            //     entry_index,
-            //     entry_term
-            // );
-            // self.apply_state.applied_term = entry_term;
-            // self.apply_state.applied_index = entry_index;
+            let apply_command = Event::ApplyNormal(ApplyNormalEvent {
+                group_id: self.group_id,
+                is_conf_change: false,
+                entry,
+                tx,
+            });
+            self.staging_events.push(apply_command);
         }
-        trace!(
-            "staging pending apply entry log ({}, {})",
-            entry_index,
-            entry_term
-        );
-        let tx = self
-            .find_pending(entry.term, entry.index)
-            .map_or(None, |p| p.tx);
 
-        let apply_command = Event::ApplyNormal(ApplyNormalEvent {
-            group_id: self.group_id,
-            is_conf_change: false,
-            entry,
-            tx,
-        });
-        self.staging_events.push(apply_command);
+        state.applied_index = entry_index;
+        state.applied_term = entry_term;
     }
 
     #[tracing::instrument(
@@ -434,8 +455,10 @@ impl ApplyDelegate {
         name = "ApplyDelegate::handle_committed_conf_change", 
         skip_all
     )]
-    fn handle_committed_conf_change(&mut self, entry: Entry) {
+    fn handle_committed_conf_change(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         // TODO: empty adta?
+        let entry_index = entry.index;
+        let entry_term = entry.term;
 
         let tx = self
             .find_pending(entry.term, entry.index)
@@ -490,8 +513,8 @@ impl ApplyDelegate {
         let apply_command = Event::ApplyMembershipChange(event);
         self.staging_events.push(apply_command);
 
-        // self.apply_state.applied_index = entry.index;
-        // self.apply_state.applied_term = entry.term;
+        state.applied_index = entry_index;
+        state.applied_term = entry_term;
     }
 
     #[tracing::instrument(
