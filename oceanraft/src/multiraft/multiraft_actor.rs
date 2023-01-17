@@ -60,17 +60,11 @@ use super::multiraft::NO_NODE;
 use super::node::NodeManager;
 use super::proposal::GroupProposalQueue;
 use super::raft_group::RaftGroup;
+use super::raft_group::RaftGroupWriteRequest;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::transport::Transport;
-
-#[derive(Default, Debug)]
-pub struct GroupWriteRequest {
-    replica_id: u64,
-    ready: Option<Ready>,
-    light_ready: Option<LightReady>,
-}
 
 /// MultiRaftAddress is used to communicate with MultiRaftActor
 #[derive(Clone)]
@@ -342,7 +336,7 @@ where
 
                 _ = ready_ticker.tick() => {
                     if !self.activity_groups.is_empty() {
-                        self.dispatch_ready_groups().await;
+                        self.on_multi_groups_ready().await;
                         self.activity_groups.clear();
                         // TODO: shirk_to_fit
                     }
@@ -979,222 +973,62 @@ where
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActorInner::dispatch_ready_groups",
+        name = "MultiRaftActorInner::on_multi_groups_ready",
         skip(self)
     )]
-    pub(crate) async fn dispatch_ready_groups(&mut self) {
-        let mut ready_write_groups = HashMap::new();
-        let mut apply_task_groups = HashMap::new();
+    pub(crate) async fn on_multi_groups_ready(&mut self) {
+        let mut multi_groups_write = HashMap::new();
+        let mut multi_groups_apply = HashMap::new();
         for group_id in self.activity_groups.iter() {
             if *group_id == NO_GORUP {
                 continue;
             }
 
             if let Some(group) = self.groups.get_mut(group_id) {
-                if !group.raft_group.has_ready() {
-                    continue;
-                }
-
-                let mut group_ready = group.raft_group.ready();
-
-                // we need to know which replica in raft group is ready.
-                let replica_id = match self
-                    .replica_cache
-                    .replica_for_node(*group_id, self.node_id)
-                    .await
-                {
-                    Err(err) => {
-                        error!(
-                            "write is error, got {} group replica  of storage error {}",
-                            group_id, err
-                        );
-                        continue;
-                    }
-                    Ok(replica_desc) => match replica_desc {
-                        Some(replica_desc) => replica_desc.replica_id,
-                        None => {
-                            // if we can't look up the replica in storage, but the group is ready,
-                            // we know that one of the replicas must be ready, so we can repair the
-                            // storage to store this replica.
-                            let replica_id = group.raft_group.raft.id;
-                            let repaired_replica_desc = ReplicaDesc {
-                                node_id: self.node_id,
-                                replica_id: group.raft_group.raft.id,
-                            };
-                            if let Err(err) = self
-                                .replica_cache
-                                .cache_replica_desc(*group_id, repaired_replica_desc, true)
-                                .await
-                            {
-                                error!(
-                                    "write is error, got {} group replica  of storage error {}",
-                                    group_id, err
-                                );
-                                continue;
-                            }
-                            replica_id
-                        }
-                    },
-                };
-
-                // send out messages
-                if !group_ready.messages().is_empty() {
-                    transport::send_messages(
+                group
+                    .on_ready(
                         self.node_id,
                         &self.transport,
                         &mut self.replica_cache,
                         &mut self.node_manager,
-                        *group_id,
-                        group_ready.take_messages(),
-                    )
-                    .await;
-                }
-
-                // make apply task if need to apply commit entries
-                if !group_ready.committed_entries().is_empty() {
-                    // grouping_commit_entries will update latest commit term by commit entries.
-                    MultiRaftActorInner::<T, RS, MRS>::grouping_commit_entries(
-                        replica_id,
-                        group,
-                        group_ready.take_committed_entries(),
-                        &mut apply_task_groups,
-                    );
-                }
-
-                // there are dispatch soft state if changed.
-                if let Some(ss) = group_ready.ss() {
-                    let _ = MultiRaftActorInner::<T, RS, MRS>::dispatch_soft_state_change(
-                        group,
-                        ss,
-                        &mut self.replica_cache,
+                        &mut multi_groups_write,
+                        &mut multi_groups_apply,
                         &mut self.pending_events,
                     )
                     .await;
-                }
-
-                // make write task if need to write disk.
-                ready_write_groups.insert(
-                    *group_id,
-                    GroupWriteRequest {
-                        replica_id,
-                        ready: Some(group_ready),
-                        light_ready: None,
-                    },
-                );
             }
         }
-
-        if !apply_task_groups.is_empty() {
-            debug!("send grouping apply msg to apply actor");
+        if !multi_groups_apply.is_empty() {
             if let Err(_err) = self
                 .apply_actor_tx
                 .tx
                 .send(ApplyTaskRequest {
-                    groups: apply_task_groups,
+                    groups: multi_groups_apply,
                 })
                 .await
             {
                 // FIXME
                 warn!("apply actor stopped");
             }
-            debug!("sended grouping apply msg to apply actor");
         }
 
-        let gwrs = self.handle_groups_write(ready_write_groups).await;
-        self.handle_groups_write_finish(gwrs).await;
+        let gwrs = self.do_multi_groups_write(multi_groups_write).await;
+        self.do_multi_groups_write_finish(gwrs).await;
     }
 
-    // Dispatch soft state changed related events.
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActorInner::dispatch_soft_state_change", 
-        skip(group, replica_cache, pending_events)
-    )]
-    async fn dispatch_soft_state_change(
-        group: &mut RaftGroup<RS>,
-        ss: &SoftState,
-        replica_cache: &mut ReplicaCache<RS, MRS>,
-        pending_events: &mut Vec<Event>,
-    ) -> Result<(), Error> {
-        // if leader change
-        if ss.leader_id != 0 && ss.leader_id != group.leader.replica_id {
-            return MultiRaftActorInner::<T, RS, MRS>::on_leader_change(
-                group,
-                ss,
-                replica_cache,
-                pending_events,
-            )
-            .await;
-        }
-
-        Ok(())
-    }
-
-    // Process soft state changed on leader changed
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::on_leader_change", 
+        name = "MultiRaftActorInner::on_multi_groups_write", 
         skip_all
     )]
-    async fn on_leader_change(
-        group: &mut RaftGroup<RS>,
-        ss: &SoftState,
-        replica_cache: &mut ReplicaCache<RS, MRS>,
-        pending_events: &mut Vec<Event>,
-    ) -> Result<(), Error> {
-        let replica_desc = match replica_cache
-            .replica_desc(group.group_id, ss.leader_id)
-            .await?
-        {
-            Some(desc) => desc,
-            None => {
-                warn!(
-                    "replica {} of raft group {} becomes leader, but  node id is not known",
-                    ss.leader_id, group.group_id
-                );
-                // this means that we do not know which node the leader is on,
-                // but this does not affect us to send LeaderElectionEvent, as
-                // this will be fixed by subsequent message communication.
-                // TODO: and asynchronous broadcasting
-                ReplicaDesc {
-                    node_id: NO_NODE,
-                    replica_id: ss.leader_id,
-                }
-            }
-        };
-        trace!(
-            "replica ({}) of raft group ({}) becomes leader",
-            ss.leader_id,
-            group.group_id
-        );
-        let replica_id = replica_desc.replica_id;
-        group.leader = replica_desc; // always set because node_id maybe NO_NODE.
-        pending_events.push(Event::LederElection(LeaderElectionEvent {
-            group_id: group.group_id,
-            leader_id: ss.leader_id,
-            replica_id,
-            committed_term: group.committed_term,
-        }));
-        Ok(())
-    }
-
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::handle_groups_write", 
-        skip_all
-    )]
-    async fn handle_groups_write(
+    async fn do_multi_groups_write(
         &mut self,
-        mut ready_write_groups: HashMap<u64, GroupWriteRequest>,
-    ) -> HashMap<u64, GroupWriteRequest> {
+        mut ready_write_groups: HashMap<u64, RaftGroupWriteRequest>,
+    ) -> HashMap<u64, RaftGroupWriteRequest> {
         // TODO(yuanchang.xu) Disk write flow control
-        for (group_id, group_write_request) in ready_write_groups.iter_mut() {
-            let group = self.groups.get_mut(&group_id).unwrap();
-            let gs = match self
-                .storage
-                .group_storage(*group_id, group_write_request.replica_id)
-                .await
-            {
+        for (group_id, gwr) in ready_write_groups.iter_mut() {
+            // TODO: cache storage in related raft group.
+            let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
                 Err(err) => {
                     error!(
@@ -1205,37 +1039,25 @@ where
                 }
             };
 
-            let mut ready = group_write_request.ready.take().unwrap();
-            if *ready.snapshot() != raft::prelude::Snapshot::default() {
-                let snapshot = ready.snapshot().clone();
-                // TODO: add apply snapshot
-                // if let Err(_error) = gs.apply_snapshot(snapshot) {}
+            if let Some(group) = self.groups.get_mut(&group_id) {
+                // TODO: return LightRaftGroupWrite
+                group
+                    .do_write(
+                        self.node_id,
+                        gwr,
+                        &gs,
+                        &self.transport,
+                        &mut self.replica_cache,
+                        &mut self.node_manager,
+                    )
+                    .await;
+            } else {
+                // TODO: should process this case
+                error!(
+                    "node({}) group({}) readyed, but group is dropped",
+                    self.node_id, group_id
+                );
             }
-
-            if !ready.entries().is_empty() {
-                let entries = ready.take_entries();
-                if let Err(_error) = gs.append_entries(&entries) {}
-            }
-
-            if let Some(hs) = ready.hs() {
-                let hs = hs.clone();
-                if let Err(_error) = gs.set_hardstate(hs) {}
-            }
-
-            if !ready.persisted_messages().is_empty() {
-                transport::send_messages(
-                    self.node_id,
-                    &self.transport,
-                    &mut self.replica_cache,
-                    &mut self.node_manager,
-                    *group_id,
-                    ready.take_persisted_messages(),
-                )
-                .await;
-            }
-
-            let light_ready = group.raft_group.advance(ready);
-            group_write_request.light_ready = Some(light_ready);
         }
 
         ready_write_groups
@@ -1243,11 +1065,14 @@ where
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActorInner::handle_groups_write_finish", 
+        name = "MultiRaftActorInner::on_multi_groups_write_finish", 
         skip_all
     )]
-    async fn handle_groups_write_finish(&mut self, ready_groups: HashMap<u64, GroupWriteRequest>) {
-        let mut apply_task_groups = HashMap::new();
+    async fn do_multi_groups_write_finish(
+        &mut self,
+        ready_groups: HashMap<u64, RaftGroupWriteRequest>,
+    ) {
+        let mut multi_groups_apply = HashMap::new();
         for (group_id, mut gwr) in ready_groups.into_iter() {
             let mut_group = match self.groups.get_mut(&group_id) {
                 None => {
@@ -1259,76 +1084,31 @@ where
                 }
                 Some(g) => g,
             };
-
-            let mut light_ready = gwr.light_ready.take().unwrap();
-            // let group_storage = self
-            //     .storage
-            //     .group_storage(group_id, gwr.replica_id)
-            //     .await
-            //     .unwrap();
-
-            if let Some(commit) = light_ready.commit_index() {
-                // group_storage.set_commit(commit);
-            }
-
-            if !light_ready.messages().is_empty() {
-                let messages = light_ready.take_messages();
-                transport::send_messages(
+            mut_group
+                .do_write_finish(
                     self.node_id,
+                    &mut gwr,
                     &self.transport,
                     &mut self.replica_cache,
                     &mut self.node_manager,
-                    group_id,
-                    messages,
+                    &mut multi_groups_apply,
                 )
                 .await;
-            }
-
-            if !light_ready.committed_entries().is_empty() {
-                MultiRaftActorInner::<T, RS, MRS>::grouping_commit_entries(
-                    gwr.replica_id,
-                    mut_group,
-                    light_ready.take_committed_entries(),
-                    &mut apply_task_groups,
-                );
-            }
         }
 
-        if !apply_task_groups.is_empty() {
-            debug!("send grouping apply msg to apply actor");
+        if !multi_groups_apply.is_empty() {
             if let Err(_err) = self
                 .apply_actor_tx
                 .tx
                 .send(ApplyTaskRequest {
-                    groups: apply_task_groups,
+                    groups: multi_groups_apply,
                 })
                 .await
             {
                 // FIXME
                 warn!("apply actor stopped");
             }
-            debug!("sended grouping apply msg to apply actor");
         }
-    }
-
-    #[tracing::instrument(name = "MultiRaftActorInner::grouping_commit_entries", skip_all)]
-    fn grouping_commit_entries(
-        replica_id: u64,
-        group: &mut RaftGroup<RS>,
-        entries: Vec<Entry>,
-        task_groups: &mut HashMap<u64, ApplyTask>,
-    ) {
-        let group_id = group.group_id;
-        debug!(
-            "replica ({}) of raft group ({}) commit entries {:?}",
-            replica_id, group_id, entries
-        );
-        let last_term = entries[entries.len() - 1].term;
-        group.maybe_update_committed_term(last_term);
-
-        let apply = group.create_apply(replica_id, entries);
-
-        task_groups.insert(group_id, ApplyTask::Apply(apply));
     }
 
     #[tracing::instrument(
