@@ -71,8 +71,8 @@ async fn test_write() {
             {
                 Err(_) => {
                     println!("timeout");
-                    continue
-                },
+                    continue;
+                }
                 // Err(_) => panic!("wait commit event for proposed command {:?}", command2),
                 Ok(event) => match event {
                     None => panic!(

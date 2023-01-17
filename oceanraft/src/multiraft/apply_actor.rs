@@ -33,6 +33,7 @@ use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
 use tracing::trace;
+use tracing::warn;
 
 use crate::multiraft::config::Config;
 use crate::util::Stopper;
@@ -299,16 +300,6 @@ impl ApplyActorInner {
 
         let res = ApplyResult {};
         Ok(res)
-
-        // delegate.apply_to(&self.apply_to_tx);
-        // take entries
-        // transervel entry
-        //   get proposal if exists
-        //
-        //   match entry type
-        //      if cc apply inner data structure and
-        //      if other, together entry and proposal to vec
-        // send batch apply to user interface
     }
 
     #[tracing::instrument(
@@ -317,7 +308,9 @@ impl ApplyActorInner {
         skip_all
     )]
     async fn notify_apply(&self, events: Vec<Event>) {
-        self.event_tx.send(events).await.unwrap();
+        if let Err(err) = self.event_tx.send(events).await {
+            warn!("notify apply events {:?}, but receiver dropped", err.0);
+        }
     }
 
     #[tracing::instrument(
