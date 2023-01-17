@@ -1,8 +1,10 @@
 use std::time::Duration;
 
+use oceanraft::multiraft::ApplyNormalEvent;
 use oceanraft::multiraft::Event;
 use oceanraft::prelude::AppWriteRequest;
 use opentelemetry::global;
+use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 use tracing::info;
@@ -18,6 +20,36 @@ fn make_write_request(group_id: u64, data: Vec<u8>) -> AppWriteRequest {
         context: vec![],
         data,
     }
+}
+
+async fn wait_for_command_apply<P>(rx: &mut Receiver<Vec<Event>>, mut predicate: P)
+where
+    P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
+{
+    let loop_fn = async {
+        loop {
+            let events = match rx.recv().await {
+                None => panic!("sender dropped"),
+                Some(events) => events,
+            };
+
+            for event in events.into_iter() {
+                match event {
+                    Event::ApplyNormal(apply_event) => match predicate(apply_event) {
+                        Err(err) => panic!("{}", err),
+                        Ok(matched) => {
+                            if !matched {
+                                continue;
+                            } else {
+                                return;
+                            }
+                        }
+                    },
+                    _ => continue,
+                }
+            }
+        }
+    };
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -59,48 +91,26 @@ async fn test_write() {
     // recv commit event
     // FIXME: the cluster.events don't embeded FixtureCluster struct inner.
     let command2 = command.clone();
-    let mut events = std::mem::take(&mut cluster.events);
+    let mut event_rx = cluster.take_event_rx(0);
     tokio::spawn(async move {
-        loop {
-            // if command apply on leader, then event is arrived.
-            let events = match timeout_at(
-                Instant::now() + Duration::from_millis(100),
-                events[0].recv(),
-            )
-            .await
-            {
-                Err(_) => {
-                    println!("timeout");
-                    continue;
-                }
-                // Err(_) => panic!("wait commit event for proposed command {:?}", command2),
-                Ok(event) => match event {
-                    None => panic!(
-                        "execpted recv commit event for proposed command {:?}, but sender closed",
-                        command2
-                    ),
-                    Some(events) => events,
-                },
-            };
-
-            let mut apply_event = None;
-            for event in events.into_iter() {
-                match event {
-                    Event::ApplyNormal(event) => {
-                        apply_event = Some(event);
-                        break;
-                    }
-                    _ => continue,
-                }
-            }
-
-            if let Some(mut apply_event) = apply_event {
-                info!("take apply event {:?}", apply_event);
-                assert_eq!(apply_event.entry.take_data(), command2);
+        let fut = wait_for_command_apply(&mut event_rx, |apply_event| {
+            if apply_event.entry.data == command2 {
                 apply_event.done(Ok(()));
-                return;
+                Ok(true)
+            } else {
+                let err = format!("expected {:?} got {:?}", command2, apply_event.entry.data);
+                apply_event.done(Ok(()));
+                Err(err)
             }
-        }
+        });
+
+        match timeout_at(Instant::now() + Duration::from_millis(100), fut).await {
+            Err(_) => {
+                panic!("timeout");
+            }
+            // Err(_) => panic!("wait commit event for proposed command {:?}", command2),
+            Ok(_) => {}
+        };
     });
 
     // wait command apply
