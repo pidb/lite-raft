@@ -13,9 +13,9 @@ use tokio::sync::oneshot;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::HardState;
 use raft_proto::prelude::ConfState;
+use raft_proto::prelude::HardState;
+use raft_proto::prelude::ReplicaDesc;
 
 use tracing::debug;
 use tracing::error;
@@ -55,7 +55,6 @@ pub struct RaftGroupState {
     pub soft_state: SoftState,
     pub membership_state: ConfState,
     pub apply_state: RaftGroupApplyState,
-
 }
 
 #[derive(Default, Debug)]
@@ -112,6 +111,7 @@ where
         &mut self,
         node_id: u64,
         transport: &TR,
+        storage: &MRS,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
@@ -160,6 +160,21 @@ where
             },
         };
 
+        // TODO: cache storage in related raft group.
+        let gs = match storage
+            .group_storage(group_id, replica_desc.replica_id)
+            .await
+        {
+            Ok(gs) => gs,
+            Err(err) => {
+                error!(
+                    "node({}) group({}) ready but got group storage error {}",
+                    node_id, group_id, err
+                );
+                return;
+            }
+        };
+
         // send out messages
         if !rd.messages().is_empty() {
             transport::send_messages(
@@ -177,6 +192,7 @@ where
         if !rd.committed_entries().is_empty() {
             // insert_commit_entries will update latest commit term by commit entries.
             self.insert_apply_task(
+                &gs,
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
                 multi_groups_apply,
@@ -202,6 +218,7 @@ where
 
     fn insert_apply_task(
         &mut self,
+        gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
@@ -214,7 +231,7 @@ where
         let last_term = entries[entries.len() - 1].term;
         self.maybe_update_committed_term(last_term);
 
-        let apply = self.create_apply(replica_id, entries);
+        let apply = self.create_apply(gs, replica_id, entries);
 
         multi_groups_apply.insert(group_id, ApplyTask::Apply(apply));
     }
@@ -228,9 +245,11 @@ where
         }
     }
 
-    pub fn create_apply(&mut self, replica_id: u64, entries: Vec<Entry>) -> Apply {
+    pub fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
         let current_term = self.raft_group.raft.term;
+        // TODO: min(persistent, committed)
         let commit_index = self.raft_group.raft.raft_log.committed;
+        let commit_term = gs.term(commit_index).unwrap();
         let mut proposals = VecDeque::new();
         if !self.proposals.is_empty() {
             for entry in entries.iter() {
@@ -278,7 +297,7 @@ where
             group_id: self.group_id,
             term: current_term,
             commit_index,
-            commit_term: 0, // TODO: get commit term
+            commit_term,
             entries,
             entries_size,
             proposals,
@@ -417,10 +436,11 @@ where
     pub async fn do_write_finish<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
-        gwr: &mut RaftGroupWriteRequest,
         transport: &TR,
+        storage: &MRS,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
+        gwr: &mut RaftGroupWriteRequest,
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
     ) {
         let group_id = self.group_id;
@@ -450,7 +470,22 @@ where
         }
 
         if !light_ready.committed_entries().is_empty() {
+            // TODO: cache storage in related raft group.
+            let gs = match storage
+                .group_storage(group_id, gwr.replica_id)
+                .await
+            {
+                Ok(gs) => gs,
+                Err(err) => {
+                    error!(
+                        "node({}) group({}) ready but got group storage error {}",
+                        node_id, group_id, err
+                    );
+                    return;
+                }
+            };
             self.insert_apply_task(
+                &gs,
                 replica_id,
                 light_ready.take_committed_entries(),
                 multi_groups_apply,

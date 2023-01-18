@@ -999,6 +999,7 @@ where
                     .on_ready(
                         self.node_id,
                         &self.transport,
+                        &self.storage,
                         &mut self.replica_cache,
                         &mut self.node_manager,
                         &mut multi_groups_write,
@@ -1094,13 +1095,15 @@ where
                 }
                 Some(g) => g,
             };
+
             mut_group
                 .do_write_finish(
                     self.node_id,
-                    &mut gwr,
                     &self.transport,
+                    &self.storage,
                     &mut self.replica_cache,
                     &mut self.node_manager,
+                    &mut gwr,
                     &mut multi_groups_apply,
                 )
                 .await;

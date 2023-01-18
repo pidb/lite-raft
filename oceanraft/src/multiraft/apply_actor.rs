@@ -307,12 +307,11 @@ impl ApplyActorInner {
         let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
         // check if the state machine is backword
         if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
-            // FIXME: need load curr_commit_term
-            // panic!(
-            //     "commit state jump backward {:?} -> {:?}",
-            //     (prev_applied_index, prev_applied_term),
-            //     (curr_commit_index, curr_commit_term)
-            // );
+            panic!(
+                "commit state jump backward {:?} -> {:?}",
+                (prev_applied_index, prev_applied_term),
+                (curr_commit_index, curr_commit_term)
+            );
         }
 
         let mut delegate = ApplyDelegate {
