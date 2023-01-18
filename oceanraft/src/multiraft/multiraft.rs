@@ -139,24 +139,27 @@ where
         }
     }
 
-    // TODO: add sync write
+    /// Panic. if multi raft actor stopped.
+    pub async fn write(&self, request: AppWriteRequest) -> Result<(), Error> {
+        let rx = self.async_write(request);
+        rx.await.map_err(|_| {
+            Error::Internal("the sender that result the write was dropped".to_string())
+        })?
+    }
 
-    pub async fn async_write(&self, request: AppWriteRequest) -> Result<(), Error> {
+    /// Panic. if multi raft actor stopped.
+    pub fn async_write(&self, request: AppWriteRequest) -> oneshot::Receiver<Result<(), Error>>  {
         let (tx, rx) = oneshot::channel();
-        self.ctx
+        if let Err(_) = self
+            .ctx
             .multiraft_actor_tx
             .write_propose_tx
-            .send((request, tx))
-            .await
-            .unwrap();
-
-        match rx.await {
-            Ok(v) => v,
-            Err(_) => {
-                error!("the sender dropped");
-                Ok(())
-            }
+            .try_send((request, tx))
+        {
+            panic!("MultiRaftActor stopped")
         }
+
+        rx
     }
 
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {

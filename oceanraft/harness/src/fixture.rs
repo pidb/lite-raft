@@ -1,8 +1,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use oceanraft::multiraft::Error;
+use oceanraft::prelude::AppWriteRequest;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
+use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 
@@ -156,6 +159,22 @@ impl FixtureCluster {
     /// Remove event rx from cluster events.
     pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
         self.events.remove(index)
+    }
+
+    /// Write data to raft. return a onshot::Receiver to recv apply result.
+    pub fn write_command(
+        &mut self,
+        group_id: u64,
+        index: usize,
+        data: Vec<u8>,
+    ) -> oneshot::Receiver<Result<(), Error>> {
+        let request = AppWriteRequest {
+            group_id,
+            term: 0,
+            context: vec![],
+            data,
+        };
+        self.multirafts[index].async_write(request)
     }
 
     pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {

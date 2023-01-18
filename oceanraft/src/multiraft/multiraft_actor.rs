@@ -710,7 +710,7 @@ where
                 "the node({}) campaign group({}) is removed",
                 self.node_id, group_id
             );
-            Err(Error::RaftGroup(RaftGroupError::NotFound(
+            Err(Error::RaftGroup(RaftGroupError::NotExist(
                 group_id,
                 self.node_id,
             )))
@@ -863,13 +863,19 @@ where
         tx: oneshot::Sender<Result<(), Error>>,
     ) {
         let group_id = request.group_id;
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            // TODO: process node deleted, we need remove pending proposals when node not found.
-            group.propose_write(request, tx);
-        } else {
-            panic!("the {} group droped", group_id);
+        match self.groups.get_mut(&group_id) {
+            None => {
+                // TODO: process group deleted, we need remove pending proposals.
+                if let Err(response) = tx.send(Err(Error::RaftGroup(RaftGroupError::NotExist(
+                    self.node_id,
+                    group_id,
+                )))) {
+                    warn!("client dropped before returning the write response, request = {:?}, response = {:?}", request, response);
+                    return;
+                }
+            }
+            Some(group) => group.propose_write(request, tx),
         }
-        // TODO: process group deleted, we need remove pending proposals.
     }
 
     fn handle_read_index_request(
@@ -974,7 +980,7 @@ where
         }
 
         response_tx
-            .send(Err(Error::RaftGroup(RaftGroupError::NotFound(
+            .send(Err(Error::RaftGroup(RaftGroupError::NotExist(
                 self.node_id,
                 group_id,
             ))))

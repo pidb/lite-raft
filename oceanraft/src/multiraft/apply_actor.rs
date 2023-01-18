@@ -1,45 +1,33 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
-use std::pin::Pin;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::vec::IntoIter;
-
-use serde::__private::de::Content;
-use tokio::task::JoinError;
-use tracing::info;
-use tracing::Level;
-
-use futures::Future;
-use raft::prelude::ConfChangeV2;
-use raft::Storage;
-use raft_proto::ConfChangeI;
 
 use prost::Message as ProstMessage;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::oneshot;
-use tokio::sync::watch;
-use tokio::task::JoinHandle;
+
+use raft::prelude::ConfChangeV2;
 
 use raft_proto::prelude::ConfChange;
-use raft_proto::prelude::ConfChangeType;
 use raft_proto::prelude::Entry;
 use raft_proto::prelude::EntryType;
 use raft_proto::prelude::MembershipChangeRequest;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::SingleMembershipChange;
+use raft_proto::ConfChangeI;
+
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
+use tokio::task::JoinError;
+use tokio::task::JoinHandle;
+
+use tracing::info;
 use tracing::trace;
 use tracing::warn;
+use tracing::Level;
 
 use crate::multiraft::config::Config;
-use crate::util::Stopper;
 use crate::util::TaskGroup;
 
-// use super::apply_command::ApplyCommand;
 use super::error::Error;
 use super::error::ProposalError;
 use super::event::ApplyMembershipChangeEvent;
@@ -47,11 +35,8 @@ use super::event::ApplyNormalEvent;
 use super::event::CallbackEvent;
 use super::event::Event;
 use super::event::MembershipChangeView;
-// use super::event::MultiRaftAsyncCb;
-use super::multiraft_actor::MultiRaftActorContext;
 use super::proposal::Proposal;
 use super::raft_group::RaftGroupApplyState;
-use super::storage::MultiRaftStorage;
 
 struct Shard {
     stopped: AtomicBool,
