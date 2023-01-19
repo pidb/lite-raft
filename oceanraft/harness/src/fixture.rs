@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use oceanraft::multiraft::ApplyNormalEvent;
 use oceanraft::multiraft::Error;
 use oceanraft::prelude::AppWriteRequest;
 use tokio::sync::mpsc::channel;
@@ -229,3 +230,43 @@ impl FixtureCluster {
 }
 
 impl FixtureCluster {}
+
+pub async fn wait_for_command_apply<P>(
+    rx: &mut Receiver<Vec<Event>>,
+    mut predicate: P,
+    timeout: Duration,
+) where
+    P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
+{
+    let fut = async {
+        loop {
+            let events = match rx.recv().await {
+                None => panic!("sender dropped"),
+                Some(events) => events,
+            };
+
+            for event in events.into_iter() {
+                match event {
+                    Event::ApplyNormal(apply_event) => match predicate(apply_event) {
+                        Err(err) => panic!("{}", err),
+                        Ok(matched) => {
+                            if !matched {
+                                continue;
+                            } else {
+                                return;
+                            }
+                        }
+                    },
+                    _ => continue,
+                }
+            }
+        }
+    };
+
+    match timeout_at(Instant::now() + timeout, fut).await {
+        Err(_) => {
+            panic!("timeout");
+        }
+        Ok(_) => {}
+    };
+}

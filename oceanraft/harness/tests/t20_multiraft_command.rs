@@ -13,41 +13,12 @@ use tracing::info;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 use harness::fixture::FixtureCluster;
+use harness::fixture;
 
-use oceanraft::util::TaskGroup;
 use oceanraft::util::defer;
+use oceanraft::util::TaskGroup;
 
-async fn wait_for_command_apply<P>(rx: &mut Receiver<Vec<Event>>, mut predicate: P)
-where
-    P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
-{
-    // let loop_fn = async {
-    loop {
-        let events = match rx.recv().await {
-            None => panic!("sender dropped"),
-            Some(events) => events,
-        };
-
-        for event in events.into_iter() {
-            match event {
-                Event::ApplyNormal(apply_event) => match predicate(apply_event) {
-                    Err(err) => panic!("{}", err),
-                    Ok(matched) => {
-                        if !matched {
-                            continue;
-                        } else {
-                            return;
-                        }
-                    }
-                },
-                _ => continue,
-            }
-        }
-    }
-    // };
-}
-
-#[tokio::test(flavor="multi_thread")]
+#[tokio::test(flavor = "multi_thread")]
 async fn test_write_bad_group() {
     // install global collector configured based on RUST_LOG env var.
     // Allows you to pass along context (i.e., trace IDs) across services
@@ -83,10 +54,9 @@ async fn test_write_bad_group() {
     let rx = cluster.write_command(bad_group_id, 0, "data".as_bytes().to_vec());
     let expected_err = Error::RaftGroup(RaftGroupError::NotExist(1, 4));
     match rx.await.unwrap() {
-        Ok(_) => panic!("expected error = {:?}, got Ok", expected_err),
+        Ok(_) => panic!("expected error = {:?}, got Ok(())", expected_err),
         Err(err) => assert_eq!(err, expected_err),
     }
- 
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -130,24 +100,21 @@ async fn test_write() {
     let command2 = command.clone();
     let mut event_rx = cluster.take_event_rx(0);
     tokio::spawn(async move {
-        let fut = wait_for_command_apply(&mut event_rx, |apply_event| {
-            if apply_event.entry.data == command2 {
-                apply_event.done(Ok(()));
-                Ok(true)
-            } else {
-                let err = format!("expected {:?} got {:?}", command2, apply_event.entry.data);
-                apply_event.done(Ok(()));
-                Err(err)
-            }
-        });
-
-        match timeout_at(Instant::now() + Duration::from_millis(100), fut).await {
-            Err(_) => {
-                panic!("timeout");
-            }
-            // Err(_) => panic!("wait commit event for proposed command {:?}", command2),
-            Ok(_) => {}
-        };
+        fixture::wait_for_command_apply(
+            &mut event_rx,
+            |apply_event| {
+                if apply_event.entry.data == command2 {
+                    apply_event.done(Ok(()));
+                    Ok(true)
+                } else {
+                    let err = format!("expected {:?} got {:?}", command2, apply_event.entry.data);
+                    apply_event.done(Ok(()));
+                    Err(err)
+                }
+            },
+            Duration::from_millis(100),
+        )
+        .await;
     });
 
     // wait command apply
