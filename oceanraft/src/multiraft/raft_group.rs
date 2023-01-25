@@ -29,6 +29,8 @@ use super::error::Error;
 use super::error::ProposalError;
 use super::event::LeaderElectionEvent;
 use super::multiraft::NO_NODE;
+use super::multiraft_actor::new_response_error_callback;
+use super::multiraft_actor::ResponseCb;
 use super::node::NodeManager;
 use super::proposal::GroupProposalQueue;
 use super::proposal::Proposal;
@@ -471,10 +473,7 @@ where
 
         if !light_ready.committed_entries().is_empty() {
             // TODO: cache storage in related raft group.
-            let gs = match storage
-                .group_storage(group_id, gwr.replica_id)
-                .await
-            {
+            let gs = match storage.group_storage(group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
                 Err(err) => {
                     error!(
@@ -520,26 +519,32 @@ where
         &mut self,
         request: AppWriteRequest,
         tx: oneshot::Sender<Result<(), Error>>,
-    ) {
+    ) -> Option<ResponseCb> {
         if let Err(err) = self.pre_propose_write(&request) {
-            tx.send(Err(err)).unwrap();
-            return;
+            return Some(new_response_error_callback(tx, err));
+            // tx.send(Err(err)).unwrap();
+            // return;
         }
         let term = self.term();
 
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(request.context, request.data) {
-            tx.send(Err(Error::Proposal(ProposalError::Other(Box::new(err)))))
-                .unwrap();
-            return;
+            return Some(new_response_error_callback(tx, Error::Raft(err)));
+            //tx.send(Err(Error::Proposal(ProposalError::Other(Box::new(err)))))
+            //    .unwrap();
+            //return;
         }
 
         let index = self.last_index() + 1;
         if next_index == index {
-            tx.send(Err(Error::Proposal(ProposalError::Unexpected(index))))
-                .unwrap();
-            return;
+            return Some(new_response_error_callback(
+                tx,
+                Error::Proposal(ProposalError::Unexpected(index)),
+            ));
+            // tx.send(Err(Error::Proposal(ProposalError::Unexpected(index))))
+            //     .unwrap();
+            // return;
         }
 
         let proposal = Proposal {
@@ -549,14 +554,16 @@ where
             tx: Some(tx),
         };
 
+        // FIXME: should return error ResponseCb
         self.proposals.push(proposal).unwrap();
+        None
     }
 
     pub fn read_index_propose(
         &mut self,
         request: AppReadIndexRequest,
         tx: oneshot::Sender<Result<(), Error>>,
-    ) {
+    ) -> Option<ResponseCb>{
         let uuid = uuid::Uuid::new_v4();
         let term = self.term();
         let read_context = match request.context {
@@ -572,5 +579,7 @@ where
             context: None,
             tx: Some(tx),
         };
+
+        None
     }
 }

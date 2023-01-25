@@ -86,6 +86,7 @@ async fn test_write() {
 
     let task_group = TaskGroup::new();
     let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
+    cluster.start();
     let group_id = 1;
     cluster.make_group(group_id, 0, 3).await;
     cluster.trigger_elect(0, group_id).await;
@@ -127,7 +128,9 @@ async fn test_write() {
         Err(_) => panic!("wait propose command {:?} timeouted", command),
         Ok(response) => match response {
             Err(err) => panic!("propose write command {:?} error {}", command, err),
-            Ok(_) => {}
+            Ok(_) => {
+                println!("ok...")
+            }
         },
     };
 }

@@ -22,5 +22,5 @@ pub use error::{
 };
 pub use event::{ApplyNormalEvent, Event, LeaderElectionEvent};
 pub use multiraft::{
-    MultiRaft, Context,RaftMessageDispatchImpl,
+    MultiRaft,RaftMessageDispatchImpl,
 };

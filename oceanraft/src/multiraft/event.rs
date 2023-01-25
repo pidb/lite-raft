@@ -11,7 +11,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 
 use super::error::Error;
-use super::multiraft_actor::MultiRaftActorContext;
 use super::storage::MultiRaftStorage;
 
 // pub type MultiRaftAsyncCb<'r, RS: Storage, MRS: MultiRaftStorage<RS>> = Box<

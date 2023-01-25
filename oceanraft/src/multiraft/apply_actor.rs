@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use prost::Message as ProstMessage;
 
@@ -26,6 +27,7 @@ use tracing::warn;
 use tracing::Level;
 
 use crate::multiraft::config::Config;
+use crate::util::Stopper;
 use crate::util::TaskGroup;
 
 use super::error::Error;
@@ -38,104 +40,109 @@ use super::event::MembershipChangeView;
 use super::proposal::Proposal;
 use super::raft_group::RaftGroupApplyState;
 
-struct Shard {
+/// State is used to safely shard the state
+/// of an actor between threads.
+
+#[derive(Default)]
+struct State {
     stopped: AtomicBool,
 }
 
-impl Shard {
-    fn new() -> Self {
-        Self {
-            stopped: AtomicBool::new(false),
-        }
-    }
-}
+// #[derive(Clone)]
+// pub struct ApplyActorSender {
+//     pub tx: Sender<ApplyTaskRequest>,
+// }
 
-/// ApplyActorContext is used to safely shard the state
-/// of an actor between threads.
-pub struct ApplyActorContext {
-    shard: Arc<Shard>,
-}
-impl ApplyActorContext {
-    pub fn new() -> Self {
-        Self {
-            shard: Arc::new(Shard::new()),
-        }
-    }
-}
-
-impl Clone for ApplyActorContext {
-    fn clone(&self) -> Self {
-        Self {
-            shard: self.shard.clone(),
-        }
-    }
-}
-
-#[derive(Clone)]
-pub struct ApplyActorSender {
-    pub tx: Sender<ApplyTaskRequest>,
-}
-
-pub struct ApplyActorReceiver {
-    pub rx: Receiver<ApplyTaskResponse>,
-}
+// pub struct ApplyActorReceiver {
+//     pub rx: Receiver<ApplyTaskResponse>,
+// }
 
 pub struct ApplyActor {
-    join: JoinHandle<()>,
-    ctx: ApplyActorContext,
+    // cfg: Config,
+    state: Arc<State>,
+    runtime: Mutex<Option<ApplyActorRuntime>>,
+    join: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl ApplyActor {
-    /// clone and return `MultiRaftActorContext`.
-    pub fn context(&self) -> ApplyActorContext {
-        self.ctx.clone()
+    pub fn new(
+        cfg: &Config,
+        request_rx: Receiver<ApplyTaskRequest>,
+        response_tx: Sender<ApplyTaskResponse>,
+        callback_tx: Sender<CallbackEvent>,
+        event_tx: &Sender<Vec<Event>>,
+    ) -> Self {
+        let state = Arc::new(State::default());
+        let runtime = ApplyActorRuntime {
+            state: state.clone(),
+            multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
+            node_id: cfg.node_id,
+            event_tx: event_tx.clone(),
+            cfg: cfg.clone(),
+            // ctx: ctx.clone(),
+            rx: request_rx,
+            tx: response_tx,
+            callback_tx,
+            // task_group: task_group.clone(),
+            group_pending_apply: HashMap::new(),
+        };
+
+        Self {
+            state,
+            runtime: Mutex::new(Some(runtime)),
+            join: Mutex::default(),
+        }
     }
 
-    /// join take onwership to join actor.
-    async fn join(self) -> Result<(), JoinError> {
-        self.join.await
-    }
+    pub fn start(&self, task_group: &TaskGroup) {
+        let runtime =  {
+            let mut wl = self.runtime.lock().unwrap();
+            wl.take().unwrap()
+        };
 
-    /// `true` if actor stop.
-    pub fn stopped(&self) -> bool {
-        self.ctx.shard.stopped.load(Ordering::Acquire)
+        let stopper = task_group.stopper();
+        let jh = task_group.spawn(async move {
+            runtime.main_loop(stopper).await;
+        });
+
+        *self.join.lock().unwrap() = Some(jh);
     }
 }
 
-pub fn spawn(
-    config: Config,
-    event_tx: Sender<Vec<Event>>,
-    callback_event_tx: Sender<CallbackEvent>,
-    task_group: TaskGroup,
-) -> (ApplyActor, ApplyActorSender, ApplyActorReceiver) {
-    let (request_tx, request_rx) = channel(1);
-    let (response_tx, response_rx) = channel(1);
+// pub fn spawn(
+//     config: Config,
+//     event_tx: Sender<Vec<Event>>,
+//     callback_event_tx: Sender<CallbackEvent>,
+//     task_group: TaskGroup,
+// ) -> (ApplyActor, ApplyActorSender, ApplyActorReceiver) {
+//     let (request_tx, request_rx) = channel(1);
+//     let (response_tx, response_rx) = channel(1);
 
-    let ctx = ApplyActorContext::new();
+//     let ctx = ApplyActorContext::new();
 
-    let actor_inner = ApplyActorInner {
-        multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
-        node_id: config.node_id,
-        event_tx,
-        cfg: config,
-        ctx: ctx.clone(),
-        rx: request_rx,
-        tx: response_tx,
-        callback_event_tx,
-        task_group: task_group.clone(),
-        group_pending_apply: HashMap::new(),
-    };
+//     let actor_inner = ApplyActorInner {
+//         multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
+//         node_id: config.node_id,
+//         event_tx,
+//         cfg: config,
+//         ctx: ctx.clone(),
+//         rx: request_rx,
+//         tx: response_tx,
+//         callback_event_tx,
+//         task_group: task_group.clone(),
+//         group_pending_apply: HashMap::new(),
+//     };
 
-    let join = task_group.spawn(async move {
-        actor_inner.start().await;
-    });
+//     let join = task_group.spawn(async move {
+//         actor_inner.start().await;
+//     });
 
-    (
-        ApplyActor { join, ctx },
-        ApplyActorSender { tx: request_tx },
-        ApplyActorReceiver { rx: response_rx },
-    )
-}
+//     (
+//         ApplyActor { join, ctx },
+//         ApplyActorSender { tx: request_tx },
+//         ApplyActorReceiver { rx: response_rx },
+//     )
+// }
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
@@ -195,30 +202,26 @@ pub struct ApplyTaskResponse {
     pub apply_results: HashMap<u64, ApplyResult>,
 }
 
-pub struct ApplyActorInner {
+pub struct ApplyActorRuntime {
     multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
-
     node_id: u64,
     cfg: Config,
-    ctx: ApplyActorContext,
+    state: Arc<State>,
     rx: Receiver<ApplyTaskRequest>,
     tx: Sender<ApplyTaskResponse>,
     event_tx: Sender<Vec<Event>>,
-    callback_event_tx: Sender<CallbackEvent>,
-    // apply_to_tx: Sender<Vec<ApplyCommand>>,
+    callback_tx: Sender<CallbackEvent>,
     group_pending_apply: HashMap<u64, Apply>,
-    task_group: TaskGroup,
 }
 
-impl ApplyActorInner {
+impl ApplyActorRuntime {
     #[tracing::instrument(
         level = Level::TRACE,
         name = "ApplyActorInner::start", 
         fields(node_id=self.node_id)
         skip_all
     )]
-    async fn start(mut self) {
-        let mut stopper = self.task_group.stopper();
+    async fn main_loop(mut self, mut stopper: Stopper) {
         loop {
             tokio::select! {
                 _ = &mut stopper => {
@@ -303,12 +306,12 @@ impl ApplyActorInner {
             group_id: apply.group_id,
             pending_proposals: apply.proposals,
             staging_events: Vec::new(),
-            callback_event_tx: self.callback_event_tx.clone(),
+            callback_event_tx: self.callback_tx.clone(),
         };
 
         delegate.handle_committed_entries(apply.entries, apply_state);
         if !delegate.staging_events.is_empty() {
-            ApplyActorInner::notify_apply(&self.event_tx, delegate.staging_events).await;
+            ApplyActorRuntime::notify_apply(&self.event_tx, delegate.staging_events).await;
         }
 
         let res = ApplyResult {
@@ -338,7 +341,6 @@ impl ApplyActorInner {
 
 pub struct ApplyDelegate {
     group_id: u64,
-    // apply_multiraft_tx: Sender<(MembershipChangeResult, oneshot::Sender<Result<(), Error>>)>,
     callback_event_tx: Sender<CallbackEvent>,
     pending_proposals: VecDeque<Proposal>,
     staging_events: Vec<Event>,

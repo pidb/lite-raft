@@ -72,7 +72,7 @@ impl FixtureCluster {
                 transport.clone(),
                 storage.clone(),
                 task_group.clone(),
-                event_tx,
+                &event_tx,
             );
 
             transport
@@ -94,6 +94,12 @@ impl FixtureCluster {
             multirafts,
             transport,
             groups: HashMap::new(),
+        }
+    }
+
+    pub fn start(&self) {
+        for node in self.multirafts.iter() {
+            node.start();
         }
     }
 
@@ -201,7 +207,7 @@ impl FixtureCluster {
 
     pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
         self.multirafts[node_index as usize]
-            .campaign(group_id)
+            .campaign_group(group_id)
             .await
             .unwrap();
     }

@@ -29,13 +29,3 @@ message AppReadIndexResponse {
 
 }
 
-message SingleMembershipChange {
-    uint64 node_id = 1;
-    uint64 replica_id = 2;
-    eraftpb.ConfChangeType change_type = 3;
-}
-
-message MembershipChangeRequest {
-    uint64 group_id = 1;
-    repeated SingleMembershipChange changes = 2;
-}
