@@ -172,7 +172,7 @@ where
     pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<(), Error> {
         let rx = self.async_membership_change(request);
         rx.await.map_err(|_| {
-            Error::Internal("the sender that result the read_index was dropped".to_string())
+            Error::Internal("the sender that result the membership change was dropped".to_string())
         })?
     }
 
@@ -181,7 +181,7 @@ where
         request: MembershipChangeRequest,
     ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.read_index_propose_tx.try_send((request, tx)) {
+        if let Err(_) = self.actor.membership_change_tx.try_send((request, tx)) {
             panic!("MultiRaftActor stopped")
         }
 

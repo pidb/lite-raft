@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use futures::Future;
+use oceanraft::multiraft::ApplyMembershipChangeEvent;
 use oceanraft::multiraft::ApplyNormalEvent;
 use oceanraft::multiraft::Error;
 use oceanraft::prelude::AppWriteRequest;
@@ -37,7 +39,7 @@ type FixtureMultiRaft =
 pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
     pub multirafts: Vec<FixtureMultiRaft>,
-    pub events: Vec<Receiver<Vec<Event>>>, // FIXME: should hidden this field
+    pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
     groups: HashMap<u64, Vec<u64>>,        // track group which nodes, group_id -> nodes
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
 }
@@ -54,7 +56,8 @@ impl FixtureCluster {
                 node_id,
                 election_tick: 2,
                 heartbeat_tick: 1,
-                tick_interval: 3_600_000, // hour ms
+                // tick_interval: 3_600_000, // hour ms
+                tick_interval: 1000, // hour ms
                 batch_apply: false,
                 batch_size: 0,
             };
@@ -85,7 +88,7 @@ impl FixtureCluster {
                 .unwrap();
 
             multirafts.push(multiraft);
-            events.push(event_rx);
+            events.push(Some(event_rx));
             storages.push(storage);
         }
         Self {
@@ -112,7 +115,7 @@ impl FixtureCluster {
             voters.push(replica_id);
             replicas.push(ReplicaDesc {
                 node_id,
-                replica_id,
+                replica_id, 
             });
         }
 
@@ -130,9 +133,9 @@ impl FixtureCluster {
             gs.set_hardstate(hs).unwrap();
 
             // init confstate
-            let mut cs = ConfState::default();
-            cs.voters = voters.clone();
-            gs.wl().set_conf_state(cs);
+            // let mut cs = ConfState::default();
+            // cs.voters = voters.clone();
+            // gs.wl().set_conf_state(cs);
 
             // apply snapshot
             let mut ss = Snapshot::default();
@@ -165,7 +168,7 @@ impl FixtureCluster {
 
     /// Remove event rx from cluster events.
     pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
-        self.events.remove(index)
+        std::mem::take(&mut self.events[index]).unwrap()
     }
 
     /// Write data to raft. return a onshot::Receiver to recv apply result.
@@ -213,13 +216,13 @@ impl FixtureCluster {
     }
 
     pub async fn wait_for_leader_elect(
-        events: &mut Vec<Receiver<Vec<Event>>>,
+        events: &mut Vec<Option<Receiver<Vec<Event>>>>,
         node_id: u64,
     ) -> Option<LeaderElectionEvent> {
-        let event = &mut events[node_id as usize];
-        match timeout_at(Instant::now() + Duration::from_millis(100), event.recv()).await {
+        let event = events[node_id as usize].as_mut().unwrap();
+        match timeout_at(Instant::now() + Duration::from_millis(1000), event.recv()).await {
             Err(_) => {
-                panic!("")
+                panic!("wait for leader elect timeouted, leader = {}", node_id);
             }
             Ok(events) => {
                 for event in events.unwrap() {
@@ -272,6 +275,47 @@ pub async fn wait_for_command_apply<P>(
     match timeout_at(Instant::now() + timeout, fut).await {
         Err(_) => {
             panic!("timeout");
+        }
+        Ok(_) => {}
+    };
+}
+
+pub async fn wait_for_membership_change_apply<P,F>(
+    rx: &mut Receiver<Vec<Event>>,
+    mut predicate: P,
+    timeout: Duration,
+) where
+    P: FnMut(ApplyMembershipChangeEvent) -> F,
+    F: Future<Output = Result<bool, String>>,
+{
+    let fut = async {
+        loop {
+            let events = match rx.recv().await {
+                None => panic!("sender dropped"),
+                Some(events) => events,
+            };
+
+            for event in events.into_iter() {
+                match event {
+                    Event::ApplyMembershipChange(event) => match predicate(event).await {
+                        Err(err) => panic!("{}", err),
+                        Ok(matched) => {
+                            if !matched {
+                                continue;
+                            } else {
+                                return;
+                            }
+                        }
+                    },
+                    _ => continue,
+                }
+            }
+        }
+    };
+
+    match timeout_at(Instant::now() + timeout, fut).await {
+        Err(_) => {
+            panic!("wait membership change timeout");
         }
         Ok(_) => {}
     };

@@ -44,16 +44,18 @@ pub async fn send_messages<TR, RS, MRS>(
     for msg in msgs {
         match msg.msg_type() {
             MessageType::MsgHeartbeat => {
-                trace!(
-                    "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
-                    from_node_id, group_id, msg.from, msg.to
-                );
+                // trace!(
+                //     "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
+                //     from_node_id, group_id, msg.from, msg.to
+                // );
+                continue;
             }
             MessageType::MsgHeartbeatResponse => {
-                trace!(
-                    "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
-                    from_node_id, group_id, msg.from, msg.to
-                );
+                // trace!(
+                //     "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
+                //     from_node_id, group_id, msg.from, msg.to
+                // );
+                continue;
             }
             _ => {
                 send_message(
@@ -73,7 +75,7 @@ pub async fn send_messages<TR, RS, MRS>(
 #[tracing::instrument(
     level = Level::TRACE,
     name = "transport::send_message",
-    skip(replica_cache, transport, node_mgr, group_id)
+    skip(transport, replica_cache, node_mgr,)
 )]
 async fn send_message<TR, RS, MRS>(
     from_node_id: u64,

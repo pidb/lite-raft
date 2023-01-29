@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use oceanraft::util::Stopper;
 use oceanraft::util::TaskGroup;
+use tracing::warn;
 use tracing::info;
 
 use tokio::sync::mpsc::channel;
@@ -133,11 +134,11 @@ impl<RD> Transport for LocalTransport<RD>
 where
     RD: RaftMessageDispatch,
 {
-    #[tracing::instrument(name = "LocalTransport::send", skip(self, msg))]
+    // #[tracing::instrument(name = "LocalTransport::send", skip(self))]
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         let (from_node, to_node) = (msg.from_node, msg.to_node);
 
-        info!("{} -> {}", from_node, to_node);
+        // info!("{} -> {}", from_node, to_node);
         let servers = self.servers.clone();
 
         // get client
@@ -160,10 +161,10 @@ where
 
             // and receive response
             if let Ok(res) = rx.await {
-                info!("recv response ok()");
+                // info!("recv response ok()");
                 res
             } else {
-                info!("recv response error()");
+                warn!("recv response error()");
                 Err(Error::Transport(TransportError::Server(format!(
                     "server ({}) stopped",
                     to_node

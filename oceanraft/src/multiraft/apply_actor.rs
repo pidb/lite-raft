@@ -24,6 +24,7 @@ use tokio::task::JoinHandle;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
+use tracing::debug;
 use tracing::Level;
 
 use crate::multiraft::config::Config;
@@ -303,6 +304,7 @@ impl ApplyActorRuntime {
         }
 
         let mut delegate = ApplyDelegate {
+            node_id: self.cfg.node_id,
             group_id: apply.group_id,
             pending_proposals: apply.proposals,
             staging_events: Vec::new(),
@@ -341,6 +343,7 @@ impl ApplyActorRuntime {
 
 pub struct ApplyDelegate {
     group_id: u64,
+    node_id: u64,
     callback_event_tx: Sender<CallbackEvent>,
     pending_proposals: VecDeque<Proposal>,
     staging_events: Vec<Event>,
@@ -439,17 +442,18 @@ impl ApplyDelegate {
     #[tracing::instrument(
         level = Level::TRACE,
         name = "ApplyDelegate::handle_committed_conf_change", 
-        skip_all
+        skip_all,
+        fields(node_id = self.node_id),
     )]
     fn handle_committed_conf_change(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         // TODO: empty adta?
+        debug!("node {}: commit cc", self.node_id);
         let entry_index = entry.index;
         let entry_term = entry.term;
 
         let tx = self
             .find_pending(entry.term, entry.index)
             .map_or(None, |p| p.tx);
-        let proposal = self.find_pending(entry.term, entry.index);
         let event = match entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
             EntryType::EntryConfChange => {

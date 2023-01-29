@@ -3,19 +3,25 @@ use std::collections::VecDeque;
 
 use prost::Message;
 use raft::prelude::Entry;
+use raft::prelude::MembershipChangeRequest;
 use raft::LightReady;
 use raft::RawNode;
 use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
 use raft::Storage;
+use raft_proto::ConfChangeI;
 use tokio::sync::oneshot;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::ConfChange;
+use raft_proto::prelude::ConfChangeSingle;
+use raft_proto::prelude::ConfChangeV2;
 use raft_proto::prelude::ConfState;
 use raft_proto::prelude::HardState;
 use raft_proto::prelude::ReplicaDesc;
+use raft_proto::prelude::Snapshot;
 
 use tracing::debug;
 use tracing::error;
@@ -103,12 +109,12 @@ where
         self.raft_group.raft.raft_log.last_index()
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "RaftGroup::on_ready",
-        skip_all,
-        fields(node_id=node_id, group_id=self.group_id)
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "RaftGroup::on_ready",
+    //     skip_all,
+    //     fields(node_id=node_id, group_id=self.group_id)
+    // )]
     pub(crate) async fn on_ready<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
@@ -124,9 +130,18 @@ where
             return;
         }
 
+        let _ = tracing::span!(
+            Level::TRACE,
+            "RaftGroup::on_ready",
+            node_id = node_id,
+            group_id = self.group_id
+        )
+        .enter();
+
         let group_id = self.group_id;
         let mut rd = self.raft_group.ready();
 
+        // debug!("node  {}: group {} now ready snapshot = {:?}", node_id, self.group_id, rd.snapshot());
         // we need to know which replica in raft group is ready.
         let replica_desc = match replica_cache.replica_for_node(group_id, node_id).await {
             Err(err) => {
@@ -192,6 +207,7 @@ where
 
         // make apply task if need to apply commit entries
         if !rd.committed_entries().is_empty() {
+            debug!("node {}: ready has committed entries", node_id);
             // insert_commit_entries will update latest commit term by commit entries.
             self.insert_apply_task(
                 &gs,
@@ -403,20 +419,26 @@ where
         // TODO: cache storage in RaftGroup
 
         let mut ready = gwr.ready.take().unwrap();
-        if *ready.snapshot() != raft::prelude::Snapshot::default() {
+        if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
+            warn!("TODO: should apply snapshit = {:?}", snapshot);
             // TODO: add apply snapshot
-            // if let Err(_error) = gs.apply_snapshot(snapshot) {}
+            // 当添加新的 replica 时, 需要同步成员变更信息
+            gs.apply_snapshot(snapshot).unwrap();
         }
 
         if !ready.entries().is_empty() {
             let entries = ready.take_entries();
-            if let Err(_error) = gs.append_entries(&entries) {}
+            if let Err(_error) = gs.append_entries(&entries) {
+                panic!("node {}: append entries error = {}", node_id, _error);
+            }
         }
 
         if let Some(hs) = ready.hs() {
             let hs = hs.clone();
-            if let Err(_error) = gs.set_hardstate(hs) {}
+            if let Err(_error) = gs.set_hardstate(hs) {
+                panic!("node {}: set hardstate error = {}", node_id, _error);
+            }
         }
 
         if !ready.persisted_messages().is_empty() {
@@ -455,6 +477,7 @@ where
         //     .unwrap();
 
         if let Some(commit) = light_ready.commit_index() {
+            debug!("node {}: set commit = {}", node_id, commit);
             // group_storage.set_commit(commit);
         }
 
@@ -472,6 +495,7 @@ where
         }
 
         if !light_ready.committed_entries().is_empty() {
+            debug!("node {}: light ready has committed entries", node_id);
             // TODO: cache storage in related raft group.
             let gs = match storage.group_storage(group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
@@ -490,6 +514,10 @@ where
                 multi_groups_apply,
             );
         }
+        // FIXME: always advance apply
+        // TODO: move to upper layer
+        tracing::info!("node {}: committed = {}", node_id, self.raft_group.raft.raft_log.committed);
+        self.raft_group.advance_apply();
     }
 
     fn pre_propose_write(&mut self, request: &AppWriteRequest) -> Result<(), Error>
@@ -563,7 +591,7 @@ where
         &mut self,
         request: AppReadIndexRequest,
         tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Option<ResponseCb>{
+    ) -> Option<ResponseCb> {
         let uuid = uuid::Uuid::new_v4();
         let term = self.term();
         let read_context = match request.context {
@@ -582,4 +610,79 @@ where
 
         None
     }
+
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "RaftGroup::propose_membership_change",
+        skip_all)
+    ]
+    pub fn propose_membership_change(
+        &mut self,
+        req: MembershipChangeRequest,
+        tx: oneshot::Sender<Result<(), Error>>,
+    ) -> Option<ResponseCb> {
+        // TODO: add pre propose check
+        let term = self.term();
+
+        // propose to raft group
+        let next_index = self.last_index() + 1;
+
+        let res = if req.changes.len() == 1 {
+            let (ctx, cc) = to_cc(&req);
+            self.raft_group.propose_conf_change(ctx, cc)
+        } else {
+            let (ctx, cc) = to_ccv2(&req);
+            self.raft_group.propose_conf_change(ctx, cc)
+        };
+
+        if let Err(err) = res {
+            error!("propose membership change error = {}", err);
+            return Some(new_response_error_callback(tx, Error::Raft(err)));
+        }
+
+        let index = self.last_index() + 1;
+        if next_index == index {
+            error!("propose_conf_change index invalid");
+            return Some(new_response_error_callback(
+                tx,
+                Error::Proposal(ProposalError::Unexpected(index)),
+            ));
+        }
+
+        let proposal = Proposal {
+            index: next_index,
+            term,
+            is_conf_change: true,
+            tx: Some(tx),
+        };
+
+        // FIXME: should return error ResponseCb
+        self.proposals.push(proposal).unwrap();
+        None
+    }
+}
+
+fn to_cc(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChange) {
+    assert_eq!(req.changes.len(), 1);
+    let mut cc = ConfChange::default();
+    cc.set_change_type(req.changes[0].change_type());
+    // TODO: set membership change id
+    cc.node_id = req.changes[0].replica_id;
+    (req.encode_to_vec(), cc)
+}
+
+fn to_ccv2(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChangeV2) {
+    assert!(req.changes.len() > 1);
+    let mut cc = ConfChangeV2::default();
+    let mut sc = vec![];
+    for change in req.changes.iter() {
+        sc.push(ConfChangeSingle {
+            change_type: change.change_type,
+            node_id: change.replica_id,
+        });
+    }
+
+    // TODO: consider setting transaction type
+    cc.set_changes(sc);
+    (req.encode_to_vec(), cc)
 }

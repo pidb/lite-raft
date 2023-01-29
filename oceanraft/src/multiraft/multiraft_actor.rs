@@ -32,16 +32,17 @@ use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::ConfChangeType;
 use raft_proto::prelude::Entry;
+use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
 use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::MembershipChangeRequest;
 
 use tracing::debug;
 use tracing::error;
 use tracing::trace;
+use tracing::info;
 use tracing::warn;
 use tracing::Level;
 
@@ -280,24 +281,24 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     #[tracing::instrument(
-        name = "MutiRaftActorInner::start"
+        name = "MutiRaftActorInner::main_loop"
         level = Level::INFO,
         skip(self),
         fields(node_id=self.node_id)
     )]
     async fn main_loop(mut self, mut stopper: Stopper) {
+        info!("node {}: start main_loop", self.node_id);
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
-        // let mut ticks = 0;
-        // let mut ticker =
-        //     tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
+        let mut ticks = 0;
+        let mut ticker =
+            tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
         // let mut activity_groups = HashSet::new();
 
-        // let mut ready_ticker = tokio::time::interval_at(
-        //     Instant::now() + Duration::from_millis(10),
-        //     Duration::from_millis(10),
-        // );
-        let mut ticker = tokio::time::interval(Duration::from_millis(1));
+        let mut ready_ticker = tokio::time::interval_at(
+            Instant::now() + Duration::from_millis(1),
+            Duration::from_millis(1),
+        );
 
         self.raft_ticks = 0;
         self.last_tick = Instant::now();
@@ -317,52 +318,88 @@ where
                     break
                 }
 
+                Some((req, tx)) = self.raft_message_rx.recv() => {
+                    let response_cb: ResponseCb = match self.handle_raft_message(req).await {
+                        Ok(res) => Box::new(move || -> Result<(), Error> {
+                            tx.send(Ok(res)).map_err(|_| {
+                                Error::Internal(format!(
+                                    "response RaftMessageReuqest error, receiver dropped"
+                                ))
+                            })
+                        }),
+                        Err(err) => Box::new(move || -> Result<(), Error> {
+                            tx.send(Err(err)).map_err(|_| {
+                                Error::Internal(format!(
+                                    "response RaftMessageReuqest error, receiver dropped"
+                                ))
+                            })
+                        }),
+                    };
+                    self.pending_response_cbs.push(response_cb);
+                },
+
                 _ = ticker.tick() => {
-                    self.campaign().await;
+                    self.groups.iter_mut().for_each(|(_, group)| {
+                        if group.raft_group.tick() {
+                            self.activity_groups.insert(group.group_id);
+                        }
+                    });
+
+                    ticks += 1;
+                    if ticks >= self.cfg.heartbeat_tick {
+                        ticks = 0;
+                        self.coalesced_heratbeat().await;
+                    }
+                },
+
+                Some((req, tx)) = self.write_propose_rx.recv() => {
+                    if let Some(cb) = self.propose_write_request(req, tx) {
+                        self.pending_response_cbs.push(cb)
+                    }
+                },
+
+                Some((req, tx)) = self.membership_change_rx.recv() => {
+                    self.activity_groups.insert(req.group_id);
+                    if let Some(cb) = self.propose_membership_change_request(req, tx) {
+                        self.pending_response_cbs.push(cb)
+                    }
+                },
+
+                Some((req, tx)) = self.read_index_propose_rx.recv() => {
+                    if let Some(cb) = self.propose_read_index_request(req, tx) {
+                        self.pending_response_cbs.push(cb)
+                    }
+                },
+
+                Some(res) = self.apply_response_rx.recv() => {
+                    self.advance_apply(res).await;
+                },
+
+                Some((req, tx)) = self.admin_rx.recv() => {
+                     if let Some(cb) = self.handle_admin_request(req, tx).await {
+                        self.pending_response_cbs.push(cb)
+                    }
+                },
+
+                Some((group_id, tx)) = self.campaign_rx.recv() => {
+                    self.campaign_raft(group_id, tx)
                 }
-            //     _ = ticker.tick() => {
-            //         // tick all groups
-            //         self.groups.iter_mut().for_each(|(_, group)| {
-            //             if group.raft_group.tick() {
-            //                 self.activity_groups.insert(group.group_id);
-            //             }
-            //         });
 
-            //         ticks += 1;
-            //         if ticks >= self.heartbeat_tick {
-            //             ticks = 0;
-            //             self.coalesced_heratbeat().await;
-            //         }
-            //     },
+                Some(msg) = self.callback_rx.recv() => {
+                    self.handle_callback(msg).await;
+                },
 
-            //     Some((msg, tx)) = self.raft_message_rx.recv() => self.handle_raft_message(msg, tx).await,
-
-                Some((group_id, tx)) = self.campaign_rx.recv() => self.campaign_raft(group_id, tx),
-
-            //     // handle application write request
-            //     Some((request, tx)) = self.write_propose_rx.recv() => self.handle_write_request(request, tx),
-
-            //     // handle application read index request.
-            //     Some((request, tx)) = self.read_index_propose_rx.recv() => self.handle_read_index_request(request, tx),
-
-            //     Some((msg, tx)) = self.admin_rx.recv() => self.handle_admin_request(msg, tx).await,
-
-            //     // handle apply actor response.
-            //     Some(response) = self.apply_actor_rx.rx.recv() => self.handle_apply_task_response(response).await,
-
-            //     // handle application callback event.
-            //     Some(msg) = self.callback_event_rx.recv() => {
-            //         self.handle_callback(msg).await;
-            //     },
-
-            //     _ = ready_ticker.tick() => {
-            //         if !self.activity_groups.is_empty() {
-            //             self.on_multi_groups_ready().await;
-            //             self.activity_groups.clear();
-            //             // TODO: shirk_to_fit
-            //         }
-            //     }
+                _ = ready_ticker.tick() => {
+                    if !self.activity_groups.is_empty() {
+                        self.handle_readys().await;
+                        self.activity_groups.clear();
+                        // TODO: shirk_to_fit
+                    }
+                },
+                else => {},
             }
+
+            self.handle_response_callbacks();
         }
     }
 
@@ -371,74 +408,81 @@ where
     //     name = "MultiRaftActorInner::campaign",
     //     skip_all
     // )]
-    async fn campaign(&mut self) {
-        // TODO: We need to process the whole message
-        // loop as soon as possible, and the message
-        // notifications should be put in place.
-        self.recv_raft_msgs().await;
+    // async fn campaign(&mut self) {
+    //     match self.campaign_rx.try_recv() {
+    //         Ok((group_id, tx)) => self.campaign_raft(group_id, tx),
+    //         Err(TryRecvError::Empty) => {}
+    //         Err(TryRecvError::Disconnected) => {
+    //             error!("raft_message sender of channel dropped");
+    //         }
+    //     }
 
-        // tick all groups
-        self.handle_ticks().await;
+    //     // TODO: We need to process the whole message
+    //     // loop as soon as possible, and the message
+    //     // notifications should be put in place.
+    //     self.recv_raft_msgs().await;
 
-        self.recv_proposes().await;
+    //     // tick all groups
+    //     self.handle_ticks().await;
 
-        self.handle_admin().await;
+    //     self.recv_proposes();
 
-        if !self.activity_groups.is_empty() {
-            self.handle_readys().await;
-            self.activity_groups.clear();
-            // TODO: shirk_to_fit
-        }
+    //     self.handle_admin().await;
 
-        self.handle_apply_results().await;
+    //     if !self.activity_groups.is_empty() {
+    //         self.handle_readys().await;
+    //         self.activity_groups.clear();
+    //         // TODO: shirk_to_fit
+    //     }
 
-        if !self.pending_response_cbs.is_empty() {
-            self.handle_response_callbacks();
-        }
-    }
+    //     self.handle_apply_results().await;
 
-    async fn recv_raft_msgs(&mut self) {
-        loop {
-            let (msg, tx) = match self.raft_message_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error!("raft_message sender of channel dropped");
-                    break;
-                }
-            };
-            let response_cb: ResponseCb = match self.step_raft_msg(msg).await {
-                Ok(res) => Box::new(move || -> Result<(), Error> {
-                    tx.send(Ok(res)).map_err(|_| {
-                        Error::Internal(format!(
-                            "response RaftMessageReuqest error, receiver dropped"
-                        ))
-                    })
-                }),
-                Err(err) => Box::new(move || -> Result<(), Error> {
-                    tx.send(Err(err)).map_err(|_| {
-                        Error::Internal(format!(
-                            "response RaftMessageReuqest error, receiver dropped"
-                        ))
-                    })
-                }),
-            };
-            self.pending_response_cbs.push(response_cb);
-        }
-    }
+    //     if !self.pending_response_cbs.is_empty() {
+    //         self.handle_response_callbacks();
+    //     }
+    // }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::step_raft_msg",
-        skip(self)
-    )]
-    async fn step_raft_msg(
+    // async fn recv_raft_msgs(&mut self) {
+    //     loop {
+    //         let (msg, tx) = match self.raft_message_rx.try_recv() {
+    //             Ok(msg) => msg,
+    //             Err(TryRecvError::Empty) => break,
+    //             Err(TryRecvError::Disconnected) => {
+    //                 error!("raft_message sender of channel dropped");
+    //                 break;
+    //             }
+    //         };
+    //         let response_cb: ResponseCb = match self.handle_raft_message(msg).await {
+    //             Ok(res) => Box::new(move || -> Result<(), Error> {
+    //                 tx.send(Ok(res)).map_err(|_| {
+    //                     Error::Internal(format!(
+    //                         "response RaftMessageReuqest error, receiver dropped"
+    //                     ))
+    //                 })
+    //             }),
+    //             Err(err) => Box::new(move || -> Result<(), Error> {
+    //                 tx.send(Err(err)).map_err(|_| {
+    //                     Error::Internal(format!(
+    //                         "response RaftMessageReuqest error, receiver dropped"
+    //                     ))
+    //                 })
+    //             }),
+    //         };
+    //         self.pending_response_cbs.push(response_cb);
+    //     }
+    // }
+
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "MultiRaftActorInner::handle_raft_message",
+    //     skip(self)
+    // )]
+    async fn handle_raft_message(
         &mut self,
         mut msg: RaftMessage,
         // tx: oneshot::Sender<Result<RaftMessageResponse, Error>>,
     ) -> Result<RaftMessageResponse, Error> {
-        let raft_msg = msg.msg.take().expect("invalid message");
-        match raft_msg.msg_type() {
+        match msg.msg.as_ref().unwrap().msg_type() {
             MessageType::MsgHeartbeat => {
                 return self.fanout_heartbeat(msg).await;
             }
@@ -448,6 +492,8 @@ where
             _ => {}
         }
 
+        let _ = tracing::span!(Level::TRACE, "MultiRaftActorInner::handle_raft_message").enter();
+        let raft_msg = msg.msg.take().expect("invalid message");
         // processing messages between replicas from other nodes to self node.
         let group_id = msg.group_id;
 
@@ -485,176 +531,81 @@ where
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,
             None => {
+                trace!(
+                    "node {}: got message for unknow group {}; creating replica {}",
+                    self.node_id,
+                    group_id,
+                    to_replica.replica_id
+                );
                 // if we receive initialization messages from a raft replica
                 // on another node, this means that a member change has occurred
                 // and we should create a new raft replica.
                 // Note. MsgHeartbeat && commit = 0 is not initial message because we
                 // hijacked in fanout_heartbeat.
+                // let _ = self
+                //     .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
+                //     .await
+                //     .map_err(|err| {
+                //         error!("create raft group error {}", err);
+                //         err
+                //     })?;
                 let _ = self
                     .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
                     .await
-                    .map_err(|err| {
-                        error!("create raft group error {}", err);
-                        err
-                    })?;
+                    .unwrap();
 
                 self.groups.get_mut(&group_id).unwrap()
             }
         };
 
-        let _ = group.raft_group.step(raft_msg).map_err(|err| {
-            error!("step raft msg error {}", err);
-            Error::Raft(err)
-        })?;
-
+        // FIXME: t30_membership single_step
+        // let _ = group.raft_group.step(raft_msg).map_err(|err| {
+        //     error!("step raft msg error {}", err);
+        //     Error::Raft(err)
+        // })?;
+        group.raft_group.step(raft_msg).unwrap();
         self.activity_groups.insert(group_id);
         Ok(RaftMessageResponse {})
-
-        // if let Err(err) = self
-        //     .replica_cache
-        //     .cache_replica_desc(group_id, from_replica.clone(), self.sync_replica_cache)
-        //     .await
-        // {
-        //     error!(
-        //         "cache group {} {:?} in node {} occurs error: {}",
-        //         group_id, from_replica, self.node_id, err
-        //     );
-        //     let cb = Box::new(move || -> Result<(), Error> {
-        //         tx.send(Err(err)).map_err(|_| {
-        //             Error::Internal(format!(
-        //                 "response RaftMessageReuqest error, receiver dropped"
-        //             ))
-        //         })
-        //     });
-        //     self.pending_response_cbs.push(cb);
-        //     // tx.send(Err(err)).unwrap();
-        //     return;
-        // }
-
-        // if let Err(err) = self
-        //     .replica_cache
-        //     .cache_replica_desc(group_id, to_replica.clone(), self.sync_replica_cache)
-        //     .await
-        // {
-        //     error!(
-        //         "cache group {} {:?} in node {} occurs error: {}",
-        //         group_id, to_replica, self.node_id, err
-        //     );
-        //     let cb = Box::new(move || -> Result<(), Error> {
-        //         tx.send(Err(err)).map_err(|_| {
-        //             Error::Internal(format!(
-        //                 "response RaftMessageReuqest error, receiver dropped"
-        //             ))
-        //         })
-        //     });
-        //     self.pending_response_cbs.push(cb);
-        //     // tx.send(Err(err)).unwrap();
-        //     return;
-        // }
-
-        // if !self.node_manager.contains_node(&from_replica.node_id) {
-        //     self.node_manager.add_node(from_replica.node_id, group_id);
-        // }
-
-        // // if a group exists, try to maintain groups on the node
-        // if self.groups.contains_key(&group_id)
-        //     && !self.node_manager.contains_node(&to_replica.node_id)
-        // {
-        //     self.node_manager.add_node(to_replica.node_id, group_id);
-        // }
-
-        // let group = match self.groups.get_mut(&group_id) {
-        //     Some(group) => group,
-        //     None => {
-        //         // if we receive initialization messages from a raft replica
-        //         // on another node, this means that a member change has occurred
-        //         // and we should create a new raft replica.
-        //         // Note. MsgHeartbeat && commit = 0 is not initial message because we
-        //         // hijacked in fanout_heartbeat.
-        //         if let Err(err) = self
-        //             .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
-        //             .await
-        //         {
-        //             error!("create raft group error {}", err);
-        //             let cb = Box::new(move || -> Result<(), Error> {
-        //                 tx.send(Err(err)).map_err(|_| {
-        //                     Error::Internal(format!(
-        //                         "response RaftMessageReuqest error, receiver dropped"
-        //                     ))
-        //                 })
-        //             });
-        //             self.pending_response_cbs.push(cb);
-        //             // tx.send(Err(err)).unwrap();
-        //             return;
-        //         }
-        //         self.groups.get_mut(&group_id).unwrap()
-        //     }
-        // };
-
-        // if let Err(err) = group.raft_group.step(raft_msg) {
-        //     error!("step raft msg error {}", err);
-        //     // tx.send(Err(Error::Raft(err))).unwrap();
-        //     let cb = Box::new(move || -> Result<(), Error> {
-        //         tx.send(Err(Error::Raft(err))).map_err(|_| {
-        //             Error::Internal(format!(
-        //                 "response RaftMessageReuqest error, receiver dropped"
-        //             ))
-        //         })
-        //     });
-        //     self.pending_response_cbs.push(cb);
-        //     return;
-        // }
-
-        // self.activity_groups.insert(group_id);
-        // let cb = Box::new(move || -> Result<(), Error> {
-        //     tx.send(Ok(RaftMessageResponse {})).map_err(|_| {
-        //         Error::Internal(format!(
-        //             "response RaftMessageReuqest error, receiver dropped"
-        //         ))
-        //     })
-        // });
-        // self.pending_response_cbs.push(cb);
-        // if let Err(_) = tx.send(Ok(RaftMessageResponse {})) {
-        //     // the server of transport dropped
-        //     error!("failed to reespond to RaftMessageRequest, the receiver dropped");
-        // }
     }
 
-    async fn handle_ticks(&mut self) {
-        if self.last_tick.elapsed() >= self.tick_interval {
-            // tick all groups
-            self.groups.iter_mut().for_each(|(_, group)| {
-                if group.raft_group.tick() {
-                    self.activity_groups.insert(group.group_id);
-                }
-            });
-            self.last_tick = Instant::now();
+    // async fn handle_ticks(&mut self) {
+    //     if self.last_tick.elapsed() >= self.tick_interval {
+    //         // tick all groups
+    //         self.groups.iter_mut().for_each(|(_, group)| {
+    //             if group.raft_group.tick() {
+    //                 trace!("tick group = {}", group.group_id);
+    //                 self.activity_groups.insert(group.group_id);
+    //             }
+    //         });
+    //         self.last_tick = Instant::now();
 
-            self.raft_ticks += 1;
-            if self.raft_ticks >= self.cfg.heartbeat_tick {
-                self.raft_ticks = 0;
-                self.coalesced_heratbeat().await;
-            }
-        }
-    }
+    //         self.raft_ticks += 1;
+    //         if self.raft_ticks >= self.cfg.heartbeat_tick {
+    //             self.raft_ticks = 0;
+    //             self.coalesced_heratbeat().await;
+    //         }
+    //     }
+    // }
 
     /// The node sends heartbeats to other nodes instead
     /// of all raft groups on that node.
+
     async fn coalesced_heratbeat(&self) {
         for (node_id, _) in self.node_manager.iter() {
             if *node_id == self.node_id {
                 continue;
             }
 
-            debug!(
-                "trigger node coalesced heartbeta {} -> {} ",
-                self.node_id, *node_id
-            );
+            // debug!(
+            //     "trigger node coalesced heartbeta {} -> {} ",
+            //     self.node_id, *node_id
+            // );
 
             // coalesced heartbeat to all nodes. the heartbeat message is node
             // level message so from and to set 0 when sending, and the specific
             // value is set by message receiver.
             let mut raft_msg = Message::default();
+            // FIXME: should add commit information...
             raft_msg.set_msg_type(MessageType::MsgHeartbeat);
             let msg = RaftMessage {
                 group_id: NO_GORUP,
@@ -663,40 +614,53 @@ where
                 replicas: vec![],
                 msg: Some(raft_msg),
             };
+            // 1. 遍历节点上的 node
+            //  1.1 如果 no
+
+            debug!("coalesced heratbeat msg = {:?}", msg);
 
             if let Err(_error) = self.transport.send(msg) {}
         }
     }
 
-    async fn recv_proposes(&mut self) {
-        loop {
-            let (msg, tx) = match self.write_propose_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error!("write_propose sender of channel dropped");
-                    break;
-                }
-            };
-            if let Some(cb) = self.propose_write_request(msg, tx) {
-                self.pending_response_cbs.push(cb)
-            }
-        }
+    // fn recv_proposes(&mut self) {
+    //     loop {
+    //         let (msg, tx) = match self.write_propose_rx.try_recv() {
+    //             Ok(msg) => msg,
+    //             Err(TryRecvError::Empty) => break,
+    //             Err(TryRecvError::Disconnected) => {
+    //                 error!("write_propose sender of channel dropped");
+    //                 break;
+    //             }
+    //         };
+    //         if let Some(cb) = self.propose_write_request(msg, tx) {
+    //             self.pending_response_cbs.push(cb)
+    //         }
+    //     }
 
-        loop {
-            let (msg, tx) = match self.read_index_propose_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error!("read_index sender of channel dropped");
-                    break;
-                }
-            };
-            if let Some(cb) = self.propose_read_index_request(msg, tx) {
-                self.pending_response_cbs.push(cb)
-            }
-        }
-    }
+    //     let cb = match self.membership_change_rx.try_recv() {
+    //         Ok((req, tx)) => self.propose_membership_change_request(req, tx),
+    //         Err(TryRecvError::Empty) => None,
+    //         Err(TryRecvError::Disconnected) => {
+    //             error!("read_index sender of channel dropped");
+    //             None
+    //         }
+    //     };
+
+    //     loop {
+    //         let (msg, tx) = match self.read_index_propose_rx.try_recv() {
+    //             Ok(msg) => msg,
+    //             Err(TryRecvError::Empty) => break,
+    //             Err(TryRecvError::Disconnected) => {
+    //                 error!("read_index sender of channel dropped");
+    //                 break;
+    //             }
+    //         };
+    //         if let Some(cb) = self.propose_read_index_request(msg, tx) {
+    //             self.pending_response_cbs.push(cb)
+    //         }
+    //     }
+    // }
 
     /// if `None` is returned, the write request is successfully committed
     /// to raft, otherwise the callback closure of the error response is
@@ -727,6 +691,38 @@ where
                 ));
             }
             Some(group) => group.propose_write(request, tx),
+        }
+    }
+
+    /// if `None` is returned, the membership change request is successfully committed
+    /// to raft, otherwise the callback closure of the error response is
+    /// returned.
+    ///
+    /// Note: Must be called to respond to the client when the loop ends.
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "MultiRaftActor::propose_membership_change_request",
+        skip(self, tx))
+    ]
+    fn propose_membership_change_request(
+        &mut self,
+        request: MembershipChangeRequest,
+        tx: oneshot::Sender<Result<(), Error>>,
+    ) -> Option<ResponseCb> {
+        let group_id = request.group_id;
+        match self.groups.get_mut(&group_id) {
+            None => {
+                // TODO: process group deleted, we need remove pending proposals.
+                warn!(
+                    "client dropped before returning the write response, request = {:?}",
+                    request
+                );
+                return Some(new_response_error_callback(
+                    tx,
+                    Error::RaftGroup(RaftGroupError::NotExist(self.node_id, group_id)),
+                ));
+            }
+            Some(group) => group.propose_membership_change(request, tx),
         }
     }
 
@@ -787,19 +783,19 @@ where
         }
     }
 
-    async fn handle_admin(&mut self) {
-        let (msg, tx) = match self.admin_rx.try_recv() {
-            Ok(msg) => msg,
-            Err(TryRecvError::Empty) => return,
-            Err(TryRecvError::Disconnected) => {
-                error!("write_propose sender of channel dropped");
-                return;
-            }
-        };
-        if let Some(cb) = self.handle_admin_request(msg, tx).await {
-            self.pending_response_cbs.push(cb)
-        }
-    }
+    // async fn handle_admin(&mut self) {
+    //     let (msg, tx) = match self.admin_rx.try_recv() {
+    //         Ok(msg) => msg,
+    //         Err(TryRecvError::Empty) => return,
+    //         Err(TryRecvError::Disconnected) => {
+    //             error!("write_propose sender of channel dropped");
+    //             return;
+    //         }
+    //     };
+    //     if let Some(cb) = self.handle_admin_request(msg, tx).await {
+    //         self.pending_response_cbs.push(cb)
+    //     }
+    // }
 
     #[tracing::instrument(
         name = "MultiRaftActor::handle_admin_request",
@@ -883,8 +879,8 @@ where
             applied,
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
-            max_size_per_msg: 1024 * 1024,
-            max_inflight_msgs: 256,
+            // max_size_per_msg: 1024 * 1024,
+            // max_inflight_msgs: 256,
             ..Default::default()
         };
 
@@ -939,6 +935,7 @@ where
 
     async fn send_pending_events(&mut self) {
         if !self.pending_events.is_empty() {
+            println!("send pending events = {:?}", self.pending_events);
             // updating all valid LederElections is required because the lastest commited_term
             // of the follower cannot be updated until after the leader committed.
             let pending_events = std::mem::take(&mut self.pending_events)
@@ -969,7 +966,9 @@ where
 
     /// Fanout heartbeats from other nodes to all raft groups on this node.
     async fn fanout_heartbeat(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
-        if let Some(from_node) = self.node_manager.get_node(&msg.from_node) {
+        let from_node_id = msg.from_node;
+        let to_node_id = msg.to_node;
+        if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
             let mut fanouted_groups = 0;
             let mut fanouted_followers = 0;
             for (group_id, _) in from_node.group_map.iter() {
@@ -987,17 +986,22 @@ where
                 fanouted_groups += 1;
                 self.activity_groups.insert(*group_id);
 
-                if group.leader.node_id == 0
-                    || group.leader.node_id != msg.from_node
-                    || msg.from_node == self.node_id
-                {
+                // if group.leader.node_id == 0
+                // || group.leader.node_id != msg.from_node
+                if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
+                    trace!("node {}: not fanning out heartbeat to {}, msg is from {} and leader is {:?}", self.node_id, group_id, from_node_id, group.leader);
                     continue;
                 }
 
                 // gets the replica stored in this node.
+                // FIXME: t30_membership single_step
+                // let from_replica = match self
+                //     .storage
+                //     .replica_for_node(*group_id, msg.from_node)
+                //     .await
                 let from_replica = match self
-                    .storage
-                    .replica_for_node(*group_id, msg.from_node)
+                    .replica_cache
+                    .replica_for_node(*group_id, from_node_id)
                     .await
                 {
                     Err(err) => {
@@ -1016,7 +1020,13 @@ where
                     },
                 };
 
-                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                // FIXME: t30_membership single_step
+                // let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                let to_replica = match self
+                    .replica_cache
+                    .replica_for_node(*group_id, to_node_id)
+                    .await
+                {
                     Err(err) => {
                         warn!(
                             "find replcia in group {} on to_node {} in current node {} error: {}",
@@ -1035,11 +1045,36 @@ where
 
                 fanouted_followers += 1;
 
-                let mut msg = raft::prelude::Message::default();
-                msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                msg.from = from_replica.replica_id;
-                msg.to = to_replica.replica_id;
-                group.raft_group.step(msg).unwrap();
+                let mut step_msg = raft::prelude::Message::default();
+                step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
+                group
+                    .raft_group
+                    .raft
+                    .prs()
+                    .iter()
+                    .for_each(|(id, _)| println!("prs = {}", *id));
+                // let (_, pr) = group
+                //     .raft_group
+                //     .raft
+                //     .prs()
+                //     .iter()
+                //     .find(|&(id, _)| {
+                //         println!("id = {}", *id);
+                //         *id == from_replica.replica_id
+                //     })
+                //     .unwrap();
+                // msg.commit = std::cmp::min(group.raft_group.raft.raft_log.committed, pr.matched);
+                debug!("node {}: group.raft_group.raft.raft_log.committed = {}", self.node_id, group.raft_group.raft.raft_log.committed);
+                step_msg.commit = group.raft_group.raft.raft_log.committed;
+                step_msg.from = from_replica.replica_id;
+                step_msg.to = to_replica.replica_id;
+                debug!(
+                    "fanouting {}.{} -> {}.{} msg  = {:?}",
+                    from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
+                );
+                // group.raft_group.step(msg).unwrap();
+                // FIXME: t30_membership single_step
+                group.raft_group.step(step_msg).unwrap();
             }
         } else {
             // In this point, we receive heartbeat message from other nodes,
@@ -1058,7 +1093,9 @@ where
             RaftMessage {
                 group_id: NO_GORUP,
                 from_node: self.node_id,
-                to_node: msg.to_node,
+                // from_node: msg.to_node,
+                // to_node: msg.to_node,
+                to_node: from_node_id,
                 replicas: vec![],
                 msg: Some(raft_msg),
             }
@@ -1094,7 +1131,7 @@ where
                 // };
 
                 // TODO: check leader is valid
-                if group.leader.node_id != msg.from_node || msg.from_node == self.node_id {
+                if group.leader.node_id != self.node_id || msg.from_node == self.node_id {
                     continue;
                 }
 
@@ -1141,6 +1178,10 @@ where
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
                 msg.from = from_replica.replica_id;
                 msg.to = to_replica.replica_id;
+                debug!("step msg = {:?}", msg);
+
+                // group.raft_group.step(msg).unwrap();
+                // FIXME: t30_membership single_step
                 group.raft_group.step(msg).unwrap();
             }
         } else {
@@ -1169,7 +1210,7 @@ where
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActor::handle_apply_task_response",
+        name = "MultiRaftActor::advance_apply",
         skip(self))
     ]
     async fn advance_apply(&mut self, response: ApplyTaskResponse) {
@@ -1190,11 +1231,11 @@ where
                 group_id
             );
             group.raft_group.advance_apply();
-            trace!("advance apply, group = {}", group_id);
         }
     }
 
     async fn handle_callback(&mut self, callback_event: CallbackEvent) {
+        trace!("handle callback = {:?}", callback_event);
         match callback_event {
             CallbackEvent::None => return,
             CallbackEvent::MembershipChange(view, response_tx) => {
@@ -1249,9 +1290,23 @@ where
 
             match group.raft_group.apply_conf_change(&view.conf_change) {
                 Ok(cc) => {
+                    trace!("apply conf change ok");
+                   
+                    let gs = match self.storage.group_storage(group_id, group.replica_id).await {
+                        Ok(gs) => gs,
+                        Err(err) => {
+                            panic!(
+                                "node({}) group({}) ready but got group storage error {}",
+                                self.node_id, group_id, err
+                            );
+                        }
+                    };
+                    gs.set_conf_state(cc);
+        
                     response_tx.send(Ok(())).unwrap();
                 }
                 Err(err) => {
+                    panic!("err = {:?}", err);
                     response_tx.send(Err(Error::Raft(err))).unwrap();
                 }
             }
@@ -1266,11 +1321,11 @@ where
             .unwrap()
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::handle_readys",
-        skip(self)
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "MultiRaftActorInner::handle_readys",
+    //     skip(self)
+    // )]
     pub(crate) async fn handle_readys(&mut self) {
         let mut multi_groups_write = HashMap::new();
         let mut multi_groups_apply = HashMap::new();
@@ -1311,11 +1366,11 @@ where
         self.do_multi_groups_write_finish(gwrs).await;
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::on_multi_groups_write", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "MultiRaftActorInner::do_multi_groups_write",
+    //     skip_all
+    // )]
     async fn do_multi_groups_write(
         &mut self,
         mut ready_write_groups: HashMap<u64, RaftGroupWriteRequest>,
@@ -1358,11 +1413,11 @@ where
         ready_write_groups
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorInner::on_multi_groups_write_finish", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "MultiRaftActorInner::on_multi_groups_write_finish",
+    //     skip_all
+    // )]
     async fn do_multi_groups_write_finish(
         &mut self,
         ready_groups: HashMap<u64, RaftGroupWriteRequest>,
@@ -1406,11 +1461,11 @@ where
             }
         }
     }
-    #[tracing::instrument(
-        name = "MultiRaftActorInner::handle_response_callbacks"
-        level = Level::TRACE,
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     name = "MultiRaftActorInner::handle_response_callbacks"
+    //     level = Level::TRACE,
+    //     skip_all
+    // )]
     fn handle_response_callbacks(&mut self) {
         let drainner = self.pending_response_cbs.drain(..).collect::<Vec<_>>();
         tokio::spawn(async move {

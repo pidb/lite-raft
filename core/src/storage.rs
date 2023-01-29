@@ -168,6 +168,12 @@ pub trait Storage {
 
     /// Saves the current HardState.
     fn set_hardstate(&self, hs: HardState) -> Result<()>;
+
+    /// Save the current confstate when apply membership changed
+    fn set_conf_state(&self, cs: ConfState);
+
+    /// Saves the current HardState.
+    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<()>;
 }
 
 /// The Memory Storage Core instance holds the actual state of the storage struct. To access this
@@ -540,6 +546,14 @@ impl Storage for MemStorage {
         let mut core = self.wl();
         core.set_hardstate(hs);
         Ok(())
+    }
+
+    fn set_conf_state(&self, cs: ConfState) {
+        self.wl().set_conf_state(cs)
+    }
+
+    fn apply_snapshot(&self, snapshot: Snapshot) -> Result<()> {
+        self.wl().apply_snapshot(snapshot)
     }
 }
 

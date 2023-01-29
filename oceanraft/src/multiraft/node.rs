@@ -53,7 +53,7 @@ impl NodeManager {
             Some(node) => node,
         };
 
-        assert_ne!(group_id, 0);
+        // assert_ne!(group_id, 0);
         node.group_map.insert(group_id, ());
     }
 }
