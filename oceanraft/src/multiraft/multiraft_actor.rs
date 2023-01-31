@@ -7,8 +7,8 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
+use std::thread::current;
 use std::time::Duration;
-
 
 use raft::prelude::AdminMessage;
 use raft::prelude::AdminMessageType;
@@ -43,20 +43,23 @@ use raft_proto::prelude::ReplicaDesc;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
+use tracing::span;
 use tracing::trace;
 use tracing::warn;
-use tracing::Level;
 use tracing::Instrument;
+use tracing::Level;
+use tracing::Span;
 
 use crate::multiraft::error::RaftGroupError;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
+use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
 // use super::apply_actor::ApplyActorReceiver;
 // use super::apply_actor::ApplyActorSender;
+use super::apply_actor::ApplyRequest;
 use super::apply_actor::ApplyTask;
-use super::apply_actor::ApplyTaskRequest;
 use super::apply_actor::ApplyTaskResponse;
 use super::config::Config;
 use super::error::Error;
@@ -211,14 +214,13 @@ where
     }
 
     pub fn start(&self, task_group: &TaskGroup) {
-        let span = tracing::trace_span!("MultiRaft");
-        self.apply.start(task_group, span.clone());
+        self.apply.start(task_group);
 
         let runtime = { self.runtime.lock().unwrap().take().unwrap() };
 
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).instrument(span).await;
+            runtime.main_loop(stopper).await;
         });
         *self.join.lock().unwrap() = Some(jh);
     }
@@ -265,7 +267,7 @@ where
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
     callback_rx: Receiver<CallbackEvent>,
-    apply_request_tx: Sender<ApplyTaskRequest>,
+    apply_request_tx: Sender<(Span, ApplyRequest)>,
     apply_response_rx: Receiver<ApplyTaskResponse>,
     // write_actor_address: WriteAddress,
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
@@ -380,7 +382,7 @@ where
                 },
 
                 Some(res) = self.apply_response_rx.recv() => {
-                    self.advance_apply(res).await;
+                    self.handle_apply_response(res).await;
                 },
 
                 Some((req, tx)) = self.admin_rx.recv() => {
@@ -988,6 +990,9 @@ where
             leader: ReplicaDesc::default(), // TODO: init leader from storage
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
+            batch_apply: self.cfg.batch_apply,
+            batch_size: self.cfg.batch_size,
+            pending_apply: None,
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -1055,26 +1060,12 @@ where
         }
     }
 
-    async fn handle_apply_results(&mut self) {
-        loop {
-            let msg = match self.apply_response_rx.try_recv() {
-                Ok(msg) => msg,
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    error!("raft_message sender of channel dropped");
-                    break;
-                }
-            };
-            self.advance_apply(msg).await;
-        }
-    }
-
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActorRuntime::advance_apply",
+        name = "MultiRaftActorRuntime::handle_apply_response",
         skip(self))
     ]
-    async fn advance_apply(&mut self, response: ApplyTaskResponse) {
+    async fn handle_apply_response(&mut self, response: ApplyTaskResponse) {
         for (group_id, apply_result) in response.apply_results {
             let group = match self.groups.get_mut(&group_id) {
                 Some(group) => group,
@@ -1087,7 +1078,7 @@ where
             // set apply state
             group.state.apply_state = apply_result.apply_state;
             trace!(
-                " apply state change = {:?}, group = {}",
+                "apply state change = {:?}, group = {}",
                 group.state.apply_state,
                 group_id
             );
@@ -1184,7 +1175,7 @@ where
 
     async fn handle_readys(&mut self) {
         let mut multi_groups_write = HashMap::new();
-        let mut multi_groups_apply = HashMap::new();
+        let mut applys = HashMap::new();
         for group_id in self.activity_groups.iter() {
             if *group_id == NO_GORUP {
                 continue;
@@ -1202,29 +1193,21 @@ where
                         &mut self.replica_cache,
                         &mut self.node_manager,
                         &mut multi_groups_write,
-                        &mut multi_groups_apply,
+                        &mut applys,
                         &mut self.pending_events,
                     )
                     .await;
             }
         }
-        if !multi_groups_apply.is_empty() {
-            if let Err(_err) = self
-                .apply_request_tx
-                .send(ApplyTaskRequest {
-                    groups: multi_groups_apply,
-                })
-                .await
-            {
-                // FIXME
-                warn!("apply actor stopped");
-            }
+        if !applys.is_empty() {
+            self.send_applys(applys).await;
         }
 
         let gwrs = self.do_multi_groups_write(multi_groups_write).await;
         self.do_multi_groups_write_finish(gwrs).await;
     }
 
+  
     // #[tracing::instrument(
     //     level = Level::TRACE,
     //     name = "MultiRaftActorInner::do_multi_groups_write",
@@ -1251,7 +1234,7 @@ where
             if let Some(group) = self.groups.get_mut(&group_id) {
                 // TODO: return LightRaftGroupWrite
                 group
-                    .do_write(
+                    .handle_ready_write(
                         self.node_id,
                         gwr,
                         &gs,
@@ -1295,7 +1278,7 @@ where
             };
 
             mut_group
-                .do_write_finish(
+                .handle_light_ready(
                     self.node_id,
                     &self.transport,
                     &self.storage,
@@ -1308,16 +1291,7 @@ where
         }
 
         if !multi_groups_apply.is_empty() {
-            if let Err(_err) = self
-                .apply_request_tx
-                .send(ApplyTaskRequest {
-                    groups: multi_groups_apply,
-                })
-                .await
-            {
-                // FIXME
-                warn!("apply actor stopped");
-            }
+            self.send_applys(multi_groups_apply).await;
         }
     }
     // #[tracing::instrument(
@@ -1325,6 +1299,24 @@ where
     //     level = Level::TRACE,
     //     skip_all
     // )]
+
+    #[tracing::instrument(
+        name = "MultiRaftActorRuntime::send_applys",
+        level = Level::TRACE,
+        skip_all,
+    )]
+    async fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
+        let span = tracing::span::Span::current();
+        if let Err(_err) = self
+            .apply_request_tx
+            .send((span.clone(), ApplyRequest { groups: applys }))
+            // .instrument(tracing::trace_span!("multi raft group apply"))
+            .await
+        {
+            // FIXME
+            warn!("apply actor stopped");
+        }
+    }
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::do_stop"

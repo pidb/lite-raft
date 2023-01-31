@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 
+use futures::future::OptionFuture;
 use prost::Message;
 use raft::prelude::Entry;
 use raft::prelude::MembershipChangeRequest;
@@ -83,6 +84,10 @@ pub struct RaftGroup<RS: Storage> {
     pub leader: ReplicaDesc,
     pub committed_term: u64,
     pub state: RaftGroupState,
+
+    pub batch_apply: bool,
+    pub batch_size: usize,
+    pub pending_apply: Option<Apply>,
 }
 
 impl<RS> RaftGroup<RS>
@@ -147,7 +152,6 @@ where
                     // if we can't look up the replica in storage, but the group is ready,
                     // we know that one of the replicas must be ready, so we can repair the
                     // storage to store this replica.
-                    let replica_id = self.raft_group.raft.id;
                     let repaired_replica_desc = ReplicaDesc {
                         node_id,
                         replica_id: self.raft_group.raft.id,
@@ -198,17 +202,16 @@ where
         // make apply task if need to apply commit entries
         if !rd.committed_entries().is_empty() {
             // insert_commit_entries will update latest commit term by commit entries.
-            self.insert_apply_task(
+            self.handle_committed_entries(
                 &gs,
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
                 multi_groups_apply,
-            );
+            ).await;
         }
 
-        // there are dispatch soft state if changed.
         if let Some(ss) = rd.ss() {
-            self.on_soft_state_change(ss, replica_cache, pending_events)
+            self.handle_soft_state_change(ss, replica_cache, pending_events)
                 .await;
         }
 
@@ -223,19 +226,31 @@ where
         );
     }
 
-    fn insert_apply_task(
+   
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "RaftGroup:handle_committed_entries", 
+        skip_all
+    )]
+    async fn handle_committed_entries(
         &mut self,
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
     ) {
+        trace!(
+            "node , committed entries [{}, {}], group = {}, replica = {}",
+            entries[0].index,
+            entries[entries.len() - 1].index,
+            self.group_id,
+            replica_id
+        );
         let group_id = self.group_id;
         let last_term = entries[entries.len() - 1].term;
         self.maybe_update_committed_term(last_term);
 
         let apply = self.create_apply(gs, replica_id, entries);
-
         multi_groups_apply.insert(group_id, ApplyTask::Apply(apply));
     }
 
@@ -248,11 +263,6 @@ where
         }
     }
 
-    #[tracing::instrument(
-        name = "RaftGroup::create_apply",
-        level = Level::TRACE,
-        skip(self, gs),
-    )]
     fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
         let current_term = self.raft_group.raft.term;
         // TODO: min(persistent, committed)
@@ -317,12 +327,7 @@ where
     }
 
     // Dispatch soft state changed related events.
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "RaftGroup::on_soft_state_change", 
-        skip(self, replica_cache, pending_events)
-    )]
-    async fn on_soft_state_change<MRS: MultiRaftStorage<RS>>(
+    async fn handle_soft_state_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
@@ -331,7 +336,7 @@ where
         // if leader change
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
             return self
-                .on_leader_change(ss, replica_cache, pending_events)
+                .handle_leader_change(ss, replica_cache, pending_events)
                 .await;
         }
     }
@@ -339,10 +344,10 @@ where
     // Process soft state changed on leader changed
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "RaftGroup::on_leader_change", 
+        name = "RaftGroup::handle_leader_change", 
         skip_all
     )]
-    async fn on_leader_change<MRS: MultiRaftStorage<RS>>(
+    async fn handle_leader_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
@@ -382,9 +387,9 @@ where
         };
 
         trace!(
-            "replica ({}) of raft group ({}) becomes leader",
-            ss.leader_id,
-            self.group_id
+            "group = {}, replica = {} becomes leader",
+            self.group_id,
+            ss.leader_id
         );
         let replica_id = replica_desc.replica_id;
         self.leader = replica_desc; // always set because node_id maybe NO_NODE.
@@ -396,7 +401,13 @@ where
         }));
     }
 
-    pub async fn do_write<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "RaftGroup::handle_write",
+        skip_all,
+        fields(node_id=node_id, group_id=self.group_id)
+    )]
+    pub(crate) async fn handle_ready_write<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
         gwr: &mut RaftGroupWriteRequest,
@@ -447,7 +458,13 @@ where
         gwr.light_ready = Some(light_ready);
     }
 
-    pub async fn do_write_finish<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "RaftGroup::handle_light_ready",
+        skip_all,
+        fields(node_id=node_id, group_id=self.group_id)
+    )]
+    pub async fn handle_light_ready<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
         transport: &TR,
@@ -497,12 +514,12 @@ where
                     return;
                 }
             };
-            self.insert_apply_task(
+            self.handle_committed_entries(
                 &gs,
                 replica_id,
                 light_ready.take_committed_entries(),
                 multi_groups_apply,
-            );
+            ).await;
         }
         // FIXME: always advance apply
         // TODO: move to upper layer
@@ -511,7 +528,7 @@ where
             node_id,
             self.raft_group.raft.raft_log.committed
         );
-        self.raft_group.advance_apply();
+        // self.raft_group.advance_apply();
     }
 
     fn pre_propose_write(&mut self, request: &AppWriteRequest) -> Result<(), Error>

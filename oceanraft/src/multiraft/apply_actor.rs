@@ -21,13 +21,14 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
-use tracing::Instrument;
-use tracing::Span;
+use tracing::debug;
 use tracing::info;
 use tracing::trace;
+use tracing::trace_span;
 use tracing::warn;
-use tracing::debug;
+use tracing::Instrument;
 use tracing::Level;
+use tracing::Span;
 
 use crate::multiraft::config::Config;
 use crate::util::Stopper;
@@ -70,7 +71,7 @@ pub struct ApplyActor {
 impl ApplyActor {
     pub fn new(
         cfg: &Config,
-        request_rx: Receiver<ApplyTaskRequest>,
+        request_rx: Receiver<(Span, ApplyRequest)>,
         response_tx: Sender<ApplyTaskResponse>,
         callback_tx: Sender<CallbackEvent>,
         event_tx: &Sender<Vec<Event>>,
@@ -86,8 +87,10 @@ impl ApplyActor {
             rx: request_rx,
             tx: response_tx,
             callback_tx,
+            batch_apply: cfg.batch_apply,
+            batch_size: cfg.batch_size, // TODO: per-group
             // task_group: task_group.clone(),
-            group_pending_apply: HashMap::new(),
+            pending_applys: HashMap::new(),
         };
 
         Self {
@@ -97,55 +100,20 @@ impl ApplyActor {
         }
     }
 
-    pub fn start(&self, task_group: &TaskGroup, span: Span) {
-        let runtime =  {
+    pub fn start(&self, task_group: &TaskGroup) {
+        let runtime = {
             let mut wl = self.runtime.lock().unwrap();
             wl.take().unwrap()
         };
 
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).instrument(span).await;
+            runtime.main_loop(stopper).await;
         });
 
         *self.join.lock().unwrap() = Some(jh);
     }
 }
-
-// pub fn spawn(
-//     config: Config,
-//     event_tx: Sender<Vec<Event>>,
-//     callback_event_tx: Sender<CallbackEvent>,
-//     task_group: TaskGroup,
-// ) -> (ApplyActor, ApplyActorSender, ApplyActorReceiver) {
-//     let (request_tx, request_rx) = channel(1);
-//     let (response_tx, response_rx) = channel(1);
-
-//     let ctx = ApplyActorContext::new();
-
-//     let actor_inner = ApplyActorInner {
-//         multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
-//         node_id: config.node_id,
-//         event_tx,
-//         cfg: config,
-//         ctx: ctx.clone(),
-//         rx: request_rx,
-//         tx: response_tx,
-//         callback_event_tx,
-//         task_group: task_group.clone(),
-//         group_pending_apply: HashMap::new(),
-//     };
-
-//     let join = task_group.spawn(async move {
-//         actor_inner.start().await;
-//     });
-
-//     (
-//         ApplyActor { join, ctx },
-//         ApplyActorSender { tx: request_tx },
-//         ApplyActorReceiver { rx: response_rx },
-//     )
-// }
 
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
@@ -162,20 +130,15 @@ pub struct Apply {
 }
 
 impl Apply {
-    fn try_batch(&mut self, that: &mut Apply, config: &Config) -> bool {
+    fn try_batch(&mut self, that: &mut Apply, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
         assert_eq!(self.group_id, that.group_id);
-        if config.batch_size != 0 && self.entries_size + that.entries_size > config.batch_size {
-            return false;
-        }
-
-        if self.entries_size + that.entries_size > MAX_APPLY_BATCH_SIZE {
-            return false;
-        }
-
         assert!(that.term >= self.term);
         assert!(that.commit_index >= self.commit_index);
         assert!(that.commit_term >= self.commit_term);
+        if max_batch_size == 0 || self.entries_size + that.entries_size > max_batch_size {
+            return false;
+        }
         self.term = that.term;
         self.commit_index = that.commit_index;
         self.commit_term = that.commit_term;
@@ -190,14 +153,14 @@ pub enum ApplyTask {
     Apply(Apply),
 }
 
+#[derive(Default)]
+pub struct ApplyRequest {
+    pub groups: HashMap<u64, ApplyTask>,
+}
+
 #[derive(Debug)]
 pub struct ApplyResult {
     pub apply_state: RaftGroupApplyState,
-}
-
-#[derive(Default)]
-pub struct ApplyTaskRequest {
-    pub groups: HashMap<u64, ApplyTask>,
 }
 
 #[derive(Debug)]
@@ -210,17 +173,19 @@ pub struct ApplyActorRuntime {
     node_id: u64,
     cfg: Config,
     state: Arc<State>,
-    rx: Receiver<ApplyTaskRequest>,
+    rx: Receiver<(tracing::span::Span, ApplyRequest)>,
     tx: Sender<ApplyTaskResponse>,
     event_tx: Sender<Vec<Event>>,
     callback_tx: Sender<CallbackEvent>,
-    group_pending_apply: HashMap<u64, Apply>,
+    pending_applys: HashMap<u64, Apply>,
+    batch_apply: bool,
+    batch_size: usize,
 }
 
 impl ApplyActorRuntime {
     // #[tracing::instrument(
     //     level = Level::TRACE,
-    //     name = "ApplyActorInner::start", 
+    //     name = "ApplyActorInner::start",
     //     fields(node_id=self.node_id)
     //     skip_all
     // )]
@@ -230,7 +195,7 @@ impl ApplyActorRuntime {
                 _ = &mut stopper => {
                     break
                 },
-                Some(request) = self.rx.recv() => self.handle_request(request).await,
+                Some((span, request)) = self.rx.recv() => self.handle_request(request).instrument(span).await,
             }
         }
 
@@ -238,36 +203,57 @@ impl ApplyActorRuntime {
         self.do_stop();
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::handle_request", 
-        skip_all
-    )]
-    async fn handle_request(&mut self, request: ApplyTaskRequest) {
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::handle_request",
+    //     skip_all
+    // )]
+    async fn handle_request(&mut self, request: ApplyRequest) {
         let mut apply_results = HashMap::new();
         for (group_id, task) in request.groups.into_iter() {
             match task {
-                ApplyTask::Apply(mut apply) => {
-                    if self.cfg.batch_apply {
-                        match self.group_pending_apply.get_mut(&group_id) {
-                            Some(batch) => {
-                                if batch.try_batch(&mut apply, &self.cfg) {
-                                    continue;
-                                }
-
-                                let take_batch =
-                                    self.group_pending_apply.remove(&group_id).unwrap();
-                                let res = self.handle_apply(group_id, take_batch).await.unwrap();
-                                apply_results.insert(group_id, res);
-                            }
-                            None => {
-                                self.group_pending_apply.insert(group_id, apply);
-                            }
+                ApplyTask::Apply(apply) => {
+                    if let Some(apply) = self.try_batch(group_id, apply) {
+                        match self
+                            .handle_apply(group_id, apply)
+                            .instrument(tracing::span!(
+                                parent: &tracing::span::Span::current(),
+                                Level::TRACE,
+                                "handle_apply",
+                            ))
+                            .await
+                        {
+                            Ok(res) => apply_results.insert(group_id, res),
+                            Err(err) => panic!("apply error = {}", err),
                         };
-                    } else {
-                        let res = self.handle_apply(group_id, apply).await.unwrap();
-                        apply_results.insert(group_id, res);
                     }
+                    // if self.batch_apply {
+                    //     match self.pending_applys.get_mut(&group_id) {
+                    //         Some(batch) => {
+                    //             if batch.try_batch(&mut apply, self.batch_size) {
+                    //                 continue;
+                    //             }
+
+                    //             let take_batch = self.pending_applys.remove(&group_id).unwrap();
+                    //             let res = self.handle_apply(group_id, take_batch).await.unwrap();
+                    //             apply_results.insert(group_id, res);
+                    //         }
+                    //         None => {
+                    //             self.pending_applys.insert(group_id, apply);
+                    //         }
+                    //     };
+                    // } else {
+                    //     let res = self
+                    //         .handle_apply(group_id, apply)
+                    //         .instrument(tracing::span!(
+                    //             parent: &tracing::span::Span::current(),
+                    //             Level::TRACE,
+                    //             "handle_apply",
+                    //         ))
+                    //         .await
+                    //         .unwrap();
+                    //     apply_results.insert(group_id, res);
+                    // }
                 }
             }
         }
@@ -277,11 +263,33 @@ impl ApplyActorRuntime {
         self.tx.send(task_response).await;
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::handle_apply", 
-        skip_all
-    )]
+    /// Return None if the can batched otherwise return Apply that can be applied.
+    fn try_batch(&mut self, group_id: u64, mut new_apply: Apply) -> Option<Apply> {
+        if !self.batch_apply {
+            if let Some(pending_apply) = self.pending_applys.remove(&group_id) {
+                self.pending_applys.insert(group_id, new_apply);
+                return Some(pending_apply);
+            }
+
+            return Some(new_apply);
+        }
+
+        if let Some(batch_apply) = self.pending_applys.get_mut(&group_id) {
+            if batch_apply.try_batch(&mut new_apply, self.batch_size) {
+                None
+            } else {
+                self.pending_applys.remove(&group_id)
+            }
+        } else {
+            self.pending_applys.insert(group_id, new_apply)
+        }
+    }
+
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::handle_apply",
+    //     skip_all
+    // )]
     async fn handle_apply(&mut self, group_id: u64, apply: Apply) -> Result<ApplyResult, Error> {
         let apply_state = match self.multi_groups_apply_state.get_mut(&group_id) {
             Some(state) => state,
@@ -324,11 +332,11 @@ impl ApplyActorRuntime {
         Ok(res)
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::notify_apply", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::notify_apply",
+    //     skip_all
+    // )]
     async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
         if let Err(err) = event_tx.send(events).await {
             warn!("notify apply events {:?}, but receiver dropped", err.0);
@@ -381,11 +389,11 @@ impl ApplyDelegate {
         return None;
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::handle_committed_entries", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::handle_committed_entries",
+    //     skip_all
+    // )]
     fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
         for entry in ents.into_iter() {
             match entry.entry_type() {
@@ -397,11 +405,11 @@ impl ApplyDelegate {
         }
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::handle_committed_normal", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::handle_committed_normal",
+    //     skip_all
+    // )]
     fn handle_committed_normal(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         let entry_index = entry.index;
         let entry_term = entry.term;
@@ -441,12 +449,12 @@ impl ApplyDelegate {
         state.applied_term = entry_term;
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::handle_committed_conf_change", 
-        skip_all,
-        fields(node_id = self.node_id),
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::handle_committed_conf_change",
+    //     skip_all,
+    //     fields(node_id = self.node_id),
+    // )]
     fn handle_committed_conf_change(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         // TODO: empty adta?
         debug!("node {}: commit cc", self.node_id);
@@ -509,11 +517,11 @@ impl ApplyDelegate {
         state.applied_term = entry_term;
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::response_stale_proposals", 
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorRuntime::response_stale_proposals",
+    //     skip_all
+    // )]
     fn response_stale_proposals(&mut self, index: u64, term: u64) {
         while let Some(p) = self.pop_normal(index, term) {
             p.tx.map(|tx| tx.send(Err(Error::Proposal(ProposalError::Stale(p.term)))));
