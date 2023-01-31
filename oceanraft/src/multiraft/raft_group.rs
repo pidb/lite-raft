@@ -109,13 +109,13 @@ where
         self.raft_group.raft.raft_log.last_index()
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "RaftGroup::on_ready",
-    //     skip_all,
-    //     fields(node_id=node_id, group_id=self.group_id)
-    // )]
-    pub(crate) async fn on_ready<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "RaftGroup::handle_ready",
+        skip_all,
+        fields(node_id=node_id, group_id=self.group_id)
+    )]
+    pub(crate) async fn handle_ready<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
         transport: &TR,
@@ -126,33 +126,23 @@ where
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
         pending_events: &mut Vec<Event>,
     ) {
-        if !self.raft_group.has_ready() {
-            return;
-        }
-
-        let _ = tracing::span!(
-            Level::TRACE,
-            "RaftGroup::on_ready",
-            node_id = node_id,
-            group_id = self.group_id
-        )
-        .enter();
-
         let group_id = self.group_id;
         let mut rd = self.raft_group.ready();
 
-        // debug!("node  {}: group {} now ready snapshot = {:?}", node_id, self.group_id, rd.snapshot());
         // we need to know which replica in raft group is ready.
         let replica_desc = match replica_cache.replica_for_node(group_id, node_id).await {
             Err(err) => {
                 error!(
-                    "write is error, got {} group replica  of storage error {}",
-                    group_id, err
+                    "node {}: write is error, got {} group replica  of storage error {}",
+                    node_id, group_id, err
                 );
                 return;
             }
             Ok(replica_desc) => match replica_desc {
-                Some(replica_desc) => replica_desc,
+                Some(replica_desc) => {
+                    assert_eq!(replica_desc.replica_id, self.raft_group.raft.id);
+                    replica_desc
+                }
                 None => {
                     // if we can't look up the replica in storage, but the group is ready,
                     // we know that one of the replicas must be ready, so we can repair the
@@ -207,7 +197,6 @@ where
 
         // make apply task if need to apply commit entries
         if !rd.committed_entries().is_empty() {
-            debug!("node {}: ready has committed entries", node_id);
             // insert_commit_entries will update latest commit term by commit entries.
             self.insert_apply_task(
                 &gs,
@@ -242,10 +231,6 @@ where
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
     ) {
         let group_id = self.group_id;
-        debug!(
-            "replica ({}) of raft group ({}) commit entries {:?}",
-            replica_id, group_id, entries
-        );
         let last_term = entries[entries.len() - 1].term;
         self.maybe_update_committed_term(last_term);
 
@@ -263,7 +248,12 @@ where
         }
     }
 
-    pub fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
+    #[tracing::instrument(
+        name = "RaftGroup::create_apply",
+        level = Level::TRACE,
+        skip(self, gs),
+    )]
+    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
         let current_term = self.raft_group.raft.term;
         // TODO: min(persistent, committed)
         let commit_index = self.raft_group.raft.raft_log.committed;
@@ -516,7 +506,11 @@ where
         }
         // FIXME: always advance apply
         // TODO: move to upper layer
-        tracing::info!("node {}: committed = {}", node_id, self.raft_group.raft.raft_log.committed);
+        tracing::info!(
+            "node {}: committed = {}",
+            node_id,
+            self.raft_group.raft.raft_log.committed
+        );
         self.raft_group.advance_apply();
     }
 
@@ -611,11 +605,6 @@ where
         None
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "RaftGroup::propose_membership_change",
-        skip_all)
-    ]
     pub fn propose_membership_change(
         &mut self,
         req: MembershipChangeRequest,

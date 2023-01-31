@@ -21,6 +21,8 @@ use tokio::sync::mpsc::Sender;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
+use tracing::Instrument;
+use tracing::Span;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -95,7 +97,7 @@ impl ApplyActor {
         }
     }
 
-    pub fn start(&self, task_group: &TaskGroup) {
+    pub fn start(&self, task_group: &TaskGroup, span: Span) {
         let runtime =  {
             let mut wl = self.runtime.lock().unwrap();
             wl.take().unwrap()
@@ -103,7 +105,7 @@ impl ApplyActor {
 
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).await;
+            runtime.main_loop(stopper).instrument(span).await;
         });
 
         *self.join.lock().unwrap() = Some(jh);
@@ -216,12 +218,12 @@ pub struct ApplyActorRuntime {
 }
 
 impl ApplyActorRuntime {
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorInner::start", 
-        fields(node_id=self.node_id)
-        skip_all
-    )]
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "ApplyActorInner::start", 
+    //     fields(node_id=self.node_id)
+    //     skip_all
+    // )]
     async fn main_loop(mut self, mut stopper: Stopper) {
         loop {
             tokio::select! {
@@ -232,13 +234,13 @@ impl ApplyActorRuntime {
             }
         }
 
-        info!("node ({}) apply actor stop", self.node_id);
+        // info!("node ({}) apply actor stop", self.node_id);
         self.do_stop();
     }
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyActorInner::handle_request", 
+        name = "ApplyActorRuntime::handle_request", 
         skip_all
     )]
     async fn handle_request(&mut self, request: ApplyTaskRequest) {
@@ -272,12 +274,12 @@ impl ApplyActorRuntime {
 
         let task_response = ApplyTaskResponse { apply_results };
 
-        self.tx.send(task_response).await.unwrap();
+        self.tx.send(task_response).await;
     }
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyActorInner::handle_apply", 
+        name = "ApplyActorRuntime::handle_apply", 
         skip_all
     )]
     async fn handle_apply(&mut self, group_id: u64, apply: Apply) -> Result<ApplyResult, Error> {
@@ -324,7 +326,7 @@ impl ApplyActorRuntime {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyActorInner::notify_apply", 
+        name = "ApplyActorRuntime::notify_apply", 
         skip_all
     )]
     async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
@@ -335,7 +337,7 @@ impl ApplyActorRuntime {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyActorInner::do_stop", 
+        name = "ApplyActorRuntime::do_stop", 
         skip_all
     )]
     fn do_stop(mut self) {}
@@ -381,7 +383,7 @@ impl ApplyDelegate {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyDelegate::handle_committed_entries", 
+        name = "ApplyActorRuntime::handle_committed_entries", 
         skip_all
     )]
     fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
@@ -397,7 +399,7 @@ impl ApplyDelegate {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyDelegate::handle_committed_normal", 
+        name = "ApplyActorRuntime::handle_committed_normal", 
         skip_all
     )]
     fn handle_committed_normal(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
@@ -441,7 +443,7 @@ impl ApplyDelegate {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyDelegate::handle_committed_conf_change", 
+        name = "ApplyActorRuntime::handle_committed_conf_change", 
         skip_all,
         fields(node_id = self.node_id),
     )]
@@ -509,7 +511,7 @@ impl ApplyDelegate {
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "ApplyDelegate::response_stale_proposals", 
+        name = "ApplyActorRuntime::response_stale_proposals", 
         skip_all
     )]
     fn response_stale_proposals(&mut self, index: u64, term: u64) {

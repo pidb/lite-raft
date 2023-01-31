@@ -9,6 +9,7 @@ use std::sync::Mutex;
 use std::sync::MutexGuard;
 use std::time::Duration;
 
+
 use raft::prelude::AdminMessage;
 use raft::prelude::AdminMessageType;
 use raft::prelude::RaftGroupManagement;
@@ -41,10 +42,11 @@ use raft_proto::prelude::ReplicaDesc;
 
 use tracing::debug;
 use tracing::error;
-use tracing::trace;
 use tracing::info;
+use tracing::trace;
 use tracing::warn;
 use tracing::Level;
+use tracing::Instrument;
 
 use crate::multiraft::error::RaftGroupError;
 use crate::util::Stopper;
@@ -182,7 +184,7 @@ where
             sync_replica_cache: true,
             replica_cache: ReplicaCache::new(storage.clone()),
             pending_events: Vec::new(),
-            pending_response_cbs: Vec::new(),
+            // pending_response_cbs: Vec::new(),
             _m1: PhantomData,
         };
 
@@ -209,13 +211,14 @@ where
     }
 
     pub fn start(&self, task_group: &TaskGroup) {
-        self.apply.start(task_group);
+        let span = tracing::trace_span!("MultiRaft");
+        self.apply.start(task_group, span.clone());
 
         let runtime = { self.runtime.lock().unwrap().take().unwrap() };
 
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).await;
+            runtime.main_loop(stopper).instrument(span).await;
         });
         *self.join.lock().unwrap() = Some(jh);
     }
@@ -268,7 +271,7 @@ where
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
     // proposals: ProposalQueueManager,
     // task_group: TaskGroup,
-    pending_response_cbs: Vec<ResponseCb>,
+    // pending_response_cbs: Vec<ResponseCb>,
     pending_events: Vec<Event>,
 
     _m1: PhantomData<RS>,
@@ -281,8 +284,8 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     #[tracing::instrument(
-        name = "MutiRaftActorInner::main_loop"
-        level = Level::INFO,
+        name = "MultiRaftActorRuntime::main_loop"
+        level = Level::TRACE,
         skip(self),
         fields(node_id=self.node_id)
     )]
@@ -303,8 +306,9 @@ where
         self.raft_ticks = 0;
         self.last_tick = Instant::now();
 
-        // let mut stopper = self.task_group.stopper();
+        // the callback responds to the client at the end of per main_loop.
         loop {
+            let mut pending_response_callbacks = vec![];
             self.send_pending_events().await;
             // 1. if `on_groups_ready` is executed, `activity_groups` is empty until loop,
             //    and if the events treats the contained group as active, the group inserted
@@ -319,7 +323,7 @@ where
                 }
 
                 Some((req, tx)) = self.raft_message_rx.recv() => {
-                    let response_cb: ResponseCb = match self.handle_raft_message(req).await {
+                    let response_cb: ResponseCb = match self.handle_message(req).await {
                         Ok(res) => Box::new(move || -> Result<(), Error> {
                             tx.send(Ok(res)).map_err(|_| {
                                 Error::Internal(format!(
@@ -335,7 +339,8 @@ where
                             })
                         }),
                     };
-                    self.pending_response_cbs.push(response_cb);
+                    pending_response_callbacks.push(response_cb);
+                    // self.pending_response_cbs.push(response_cb);
                 },
 
                 _ = ticker.tick() => {
@@ -354,20 +359,23 @@ where
 
                 Some((req, tx)) = self.write_propose_rx.recv() => {
                     if let Some(cb) = self.propose_write_request(req, tx) {
-                        self.pending_response_cbs.push(cb)
+                        // self.pending_response_cbs.push(cb)
+                        pending_response_callbacks.push(cb);
                     }
                 },
 
                 Some((req, tx)) = self.membership_change_rx.recv() => {
                     self.activity_groups.insert(req.group_id);
                     if let Some(cb) = self.propose_membership_change_request(req, tx) {
-                        self.pending_response_cbs.push(cb)
+                        // self.pending_response_cbs.push(cb)
+                        pending_response_callbacks.push(cb);
                     }
                 },
 
                 Some((req, tx)) = self.read_index_propose_rx.recv() => {
                     if let Some(cb) = self.propose_read_index_request(req, tx) {
-                        self.pending_response_cbs.push(cb)
+                        // self.pending_response_cbs.push(cb)
+                        pending_response_callbacks.push(cb);
                     }
                 },
 
@@ -377,7 +385,8 @@ where
 
                 Some((req, tx)) = self.admin_rx.recv() => {
                      if let Some(cb) = self.handle_admin_request(req, tx).await {
-                        self.pending_response_cbs.push(cb)
+                        // self.pending_response_cbs.push(cb)
+                        pending_response_callbacks.push(cb);
                     }
                 },
 
@@ -399,100 +408,58 @@ where
                 else => {},
             }
 
-            self.handle_response_callbacks();
+            handle_response_callbacks(pending_response_callbacks);
         }
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "MultiRaftActorInner::campaign",
-    //     skip_all
-    // )]
-    // async fn campaign(&mut self) {
-    //     match self.campaign_rx.try_recv() {
-    //         Ok((group_id, tx)) => self.campaign_raft(group_id, tx),
-    //         Err(TryRecvError::Empty) => {}
-    //         Err(TryRecvError::Disconnected) => {
-    //             error!("raft_message sender of channel dropped");
-    //         }
-    //     }
+    /// The node sends heartbeats to other nodes instead
+    /// of all raft groups on that node.
+    async fn coalesced_heratbeat(&self) {
+        for (node_id, _) in self.node_manager.iter() {
+            if *node_id == self.node_id {
+                continue;
+            }
 
-    //     // TODO: We need to process the whole message
-    //     // loop as soon as possible, and the message
-    //     // notifications should be put in place.
-    //     self.recv_raft_msgs().await;
+            // debug!(
+            //     "trigger node coalesced heartbeta {} -> {} ",
+            //     self.node_id, *node_id
+            // );
 
-    //     // tick all groups
-    //     self.handle_ticks().await;
+            // coalesced heartbeat to all nodes. the heartbeat message is node
+            // level message so from and to set 0 when sending, and the specific
+            // value is set by message receiver.
+            let mut raft_msg = Message::default();
+            // FIXME: should add commit information...
+            raft_msg.set_msg_type(MessageType::MsgHeartbeat);
+            let msg = RaftMessage {
+                group_id: NO_GORUP,
+                from_node: self.node_id,
+                to_node: *node_id,
+                replicas: vec![],
+                msg: Some(raft_msg),
+            };
 
-    //     self.recv_proposes();
+            if let Err(_error) = self.transport.send(msg) {}
+        }
+    }
 
-    //     self.handle_admin().await;
+    async fn handle_message(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
+        match msg.msg.as_ref().unwrap().msg_type() {
+            MessageType::MsgHeartbeat => self.fanout_heartbeat(msg).await,
+            MessageType::MsgHeartbeatResponse => self.fanout_heartbeat_response(msg).await,
+            _ => self.handle_raft_message(msg).await,
+        }
+    }
 
-    //     if !self.activity_groups.is_empty() {
-    //         self.handle_readys().await;
-    //         self.activity_groups.clear();
-    //         // TODO: shirk_to_fit
-    //     }
-
-    //     self.handle_apply_results().await;
-
-    //     if !self.pending_response_cbs.is_empty() {
-    //         self.handle_response_callbacks();
-    //     }
-    // }
-
-    // async fn recv_raft_msgs(&mut self) {
-    //     loop {
-    //         let (msg, tx) = match self.raft_message_rx.try_recv() {
-    //             Ok(msg) => msg,
-    //             Err(TryRecvError::Empty) => break,
-    //             Err(TryRecvError::Disconnected) => {
-    //                 error!("raft_message sender of channel dropped");
-    //                 break;
-    //             }
-    //         };
-    //         let response_cb: ResponseCb = match self.handle_raft_message(msg).await {
-    //             Ok(res) => Box::new(move || -> Result<(), Error> {
-    //                 tx.send(Ok(res)).map_err(|_| {
-    //                     Error::Internal(format!(
-    //                         "response RaftMessageReuqest error, receiver dropped"
-    //                     ))
-    //                 })
-    //             }),
-    //             Err(err) => Box::new(move || -> Result<(), Error> {
-    //                 tx.send(Err(err)).map_err(|_| {
-    //                     Error::Internal(format!(
-    //                         "response RaftMessageReuqest error, receiver dropped"
-    //                     ))
-    //                 })
-    //             }),
-    //         };
-    //         self.pending_response_cbs.push(response_cb);
-    //     }
-    // }
-
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "MultiRaftActorInner::handle_raft_message",
-    //     skip(self)
-    // )]
+    #[tracing::instrument(
+        name = "MultiRaftActorRuntime::handle_raft_message",
+        level = Level::TRACE,
+        skip(self),
+    )]
     async fn handle_raft_message(
         &mut self,
         mut msg: RaftMessage,
-        // tx: oneshot::Sender<Result<RaftMessageResponse, Error>>,
     ) -> Result<RaftMessageResponse, Error> {
-        match msg.msg.as_ref().unwrap().msg_type() {
-            MessageType::MsgHeartbeat => {
-                return self.fanout_heartbeat(msg).await;
-            }
-            MessageType::MsgHeartbeatResponse => {
-                return self.fanout_heartbeat_response(msg).await;
-            }
-            _ => {}
-        }
-
-        let _ = tracing::span!(Level::TRACE, "MultiRaftActorInner::handle_raft_message").enter();
         let raft_msg = msg.msg.take().expect("invalid message");
         // processing messages between replicas from other nodes to self node.
         let group_id = msg.group_id;
@@ -542,125 +509,249 @@ where
                 // and we should create a new raft replica.
                 // Note. MsgHeartbeat && commit = 0 is not initial message because we
                 // hijacked in fanout_heartbeat.
-                // let _ = self
-                //     .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
-                //     .await
-                //     .map_err(|err| {
-                //         error!("create raft group error {}", err);
-                //         err
-                //     })?;
                 let _ = self
                     .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
                     .await
-                    .unwrap();
+                    .map_err(|err| {
+                        error!("create raft group error {}", err);
+                        err
+                    })?;
 
                 self.groups.get_mut(&group_id).unwrap()
             }
         };
 
         // FIXME: t30_membership single_step
-        // let _ = group.raft_group.step(raft_msg).map_err(|err| {
-        //     error!("step raft msg error {}", err);
-        //     Error::Raft(err)
-        // })?;
         group.raft_group.step(raft_msg).unwrap();
         self.activity_groups.insert(group_id);
         Ok(RaftMessageResponse {})
     }
 
-    // async fn handle_ticks(&mut self) {
-    //     if self.last_tick.elapsed() >= self.tick_interval {
-    //         // tick all groups
-    //         self.groups.iter_mut().for_each(|(_, group)| {
-    //             if group.raft_group.tick() {
-    //                 trace!("tick group = {}", group.group_id);
-    //                 self.activity_groups.insert(group.group_id);
-    //             }
-    //         });
-    //         self.last_tick = Instant::now();
+    /// Fanout heartbeats from other nodes to all raft groups on this node.
+    async fn fanout_heartbeat(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
+        let from_node_id = msg.from_node;
+        let to_node_id = msg.to_node;
+        if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
+            let mut fanouted_groups = 0;
+            let mut fanouted_followers = 0;
+            for (group_id, _) in from_node.group_map.iter() {
+                let group = match self.groups.get_mut(group_id) {
+                    None => {
+                        warn!(
+                            "missing group {} at from_node {} fanout heartbeat",
+                            *group_id, msg.from_node
+                        );
+                        continue;
+                    }
+                    Some(group) => group,
+                };
 
-    //         self.raft_ticks += 1;
-    //         if self.raft_ticks >= self.cfg.heartbeat_tick {
-    //             self.raft_ticks = 0;
-    //             self.coalesced_heratbeat().await;
-    //         }
-    //     }
-    // }
+                fanouted_groups += 1;
+                self.activity_groups.insert(*group_id);
 
-    /// The node sends heartbeats to other nodes instead
-    /// of all raft groups on that node.
+                // if group.leader.node_id == 0
+                // || group.leader.node_id != msg.from_node
+                if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
+                    trace!("node {}: not fanning out heartbeat to {}, msg is from {} and leader is {:?}", self.node_id, group_id, from_node_id, group.leader);
+                    continue;
+                }
 
-    async fn coalesced_heratbeat(&self) {
-        for (node_id, _) in self.node_manager.iter() {
-            if *node_id == self.node_id {
-                continue;
+                // gets the replica stored in this node.
+                // FIXME: t30_membership single_step
+                // let from_replica = match self
+                //     .storage
+                //     .replica_for_node(*group_id, msg.from_node)
+                //     .await
+                let from_replica = match self
+                    .replica_cache
+                    .replica_for_node(*group_id, from_node_id)
+                    .await
+                {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on from_node {} in current node {} error: {}",
+                            group_id, msg.from_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
+
+                // FIXME: t30_membership single_step
+                // let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                let to_replica = match self
+                    .replica_cache
+                    .replica_for_node(*group_id, to_node_id)
+                    .await
+                {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on to_node {} in current node {} error: {}",
+                            group_id, msg.to_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
+
+                fanouted_followers += 1;
+
+                let mut step_msg = raft::prelude::Message::default();
+                step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
+                group
+                    .raft_group
+                    .raft
+                    .prs()
+                    .iter()
+                    .for_each(|(id, _)| println!("prs = {}", *id));
+                // let (_, pr) = group
+                //     .raft_group
+                //     .raft
+                //     .prs()
+                //     .iter()
+                //     .find(|&(id, _)| {
+                //         println!("id = {}", *id);
+                //         *id == from_replica.replica_id
+                //     })
+                //     .unwrap();
+                // msg.commit = std::cmp::min(group.raft_group.raft.raft_log.committed, pr.matched);
+                debug!(
+                    "node {}: group.raft_group.raft.raft_log.committed = {}",
+                    self.node_id, group.raft_group.raft.raft_log.committed
+                );
+                step_msg.commit = group.raft_group.raft.raft_log.committed;
+                step_msg.from = from_replica.replica_id;
+                step_msg.to = to_replica.replica_id;
+                debug!(
+                    "fanouting {}.{} -> {}.{} msg  = {:?}",
+                    from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
+                );
+                // group.raft_group.step(msg).unwrap();
+                // FIXME: t30_membership single_step
+                group.raft_group.step(step_msg).unwrap();
             }
+        } else {
+            // In this point, we receive heartbeat message from other nodes,
+            // but we don't have the from_node raft group information, so we
+            // don't know which raft group's replica we should fanout to.
+            warn!(
+                "missing raft groups at from_node {} fanout heartbeat",
+                msg.from_node
+            );
+            self.node_manager.add_node(msg.from_node, NO_GORUP);
+        }
 
-            // debug!(
-            //     "trigger node coalesced heartbeta {} -> {} ",
-            //     self.node_id, *node_id
-            // );
-
-            // coalesced heartbeat to all nodes. the heartbeat message is node
-            // level message so from and to set 0 when sending, and the specific
-            // value is set by message receiver.
+        let response_msg = {
             let mut raft_msg = Message::default();
-            // FIXME: should add commit information...
-            raft_msg.set_msg_type(MessageType::MsgHeartbeat);
-            let msg = RaftMessage {
+            raft_msg.set_msg_type(MessageType::MsgHeartbeatResponse);
+            RaftMessage {
                 group_id: NO_GORUP,
                 from_node: self.node_id,
-                to_node: *node_id,
+                to_node: from_node_id,
                 replicas: vec![],
                 msg: Some(raft_msg),
-            };
-            // 1. 遍历节点上的 node
-            //  1.1 如果 no
+            }
+        };
 
-            debug!("coalesced heratbeat msg = {:?}", msg);
-
-            if let Err(_error) = self.transport.send(msg) {}
-        }
+        self.transport.send(response_msg).unwrap();
+        Ok(RaftMessageResponse {})
     }
 
-    // fn recv_proposes(&mut self) {
-    //     loop {
-    //         let (msg, tx) = match self.write_propose_rx.try_recv() {
-    //             Ok(msg) => msg,
-    //             Err(TryRecvError::Empty) => break,
-    //             Err(TryRecvError::Disconnected) => {
-    //                 error!("write_propose sender of channel dropped");
-    //                 break;
-    //             }
-    //         };
-    //         if let Some(cb) = self.propose_write_request(msg, tx) {
-    //             self.pending_response_cbs.push(cb)
-    //         }
-    //     }
+    /// Fanout heartbeats response from other nodes to all raft groups on this node.
+    async fn fanout_heartbeat_response(
+        &mut self,
+        msg: RaftMessage,
+    ) -> Result<RaftMessageResponse, Error> {
+        if let Some(node) = self.node_manager.get_node(&msg.from_node) {
+            for (group_id, _) in node.group_map.iter() {
+                let group = match self.groups.get_mut(group_id) {
+                    None => {
+                        warn!(
+                            "missing group {} at from_node {} fanout heartbeat response",
+                            *group_id, msg.from_node
+                        );
+                        continue;
+                    }
+                    Some(group) => group,
+                };
 
-    //     let cb = match self.membership_change_rx.try_recv() {
-    //         Ok((req, tx)) => self.propose_membership_change_request(req, tx),
-    //         Err(TryRecvError::Empty) => None,
-    //         Err(TryRecvError::Disconnected) => {
-    //             error!("read_index sender of channel dropped");
-    //             None
-    //         }
-    //     };
+                self.activity_groups.insert(*group_id);
 
-    //     loop {
-    //         let (msg, tx) = match self.read_index_propose_rx.try_recv() {
-    //             Ok(msg) => msg,
-    //             Err(TryRecvError::Empty) => break,
-    //             Err(TryRecvError::Disconnected) => {
-    //                 error!("read_index sender of channel dropped");
-    //                 break;
-    //             }
-    //         };
-    //         if let Some(cb) = self.propose_read_index_request(msg, tx) {
-    //             self.pending_response_cbs.push(cb)
-    //         }
-    //     }
-    // }
+                // TODO: check leader is valid
+                if group.leader.node_id != self.node_id || msg.from_node == self.node_id {
+                    continue;
+                }
+
+                // gets the replica stored in this node.
+                let from_replica = match self
+                    .storage
+                    .replica_for_node(*group_id, msg.from_node)
+                    .await
+                {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on from_node {} in current node {} error: {}",
+                            group_id, msg.from_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
+
+                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
+                    Err(err) => {
+                        warn!(
+                            "find replcia in group {} on to_node {} in current node {} error: {}",
+                            group_id, msg.to_node, self.node_id, err
+                        );
+                        continue;
+                    }
+                    Ok(val) => match val {
+                        None => {
+                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            continue;
+                        }
+                        Some(val) => val,
+                    },
+                };
+
+                let mut msg = raft::prelude::Message::default();
+                msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
+                msg.from = from_replica.replica_id;
+                msg.to = to_replica.replica_id;
+                debug!("step msg = {:?}", msg);
+
+                // group.raft_group.step(msg).unwrap();
+                // FIXME: t30_membership single_step
+                group.raft_group.step(msg).unwrap();
+            }
+        } else {
+            warn!(
+                "missing raft groups at from_node {} fanout heartbeat response",
+                msg.from_node
+            );
+            self.node_manager.add_node(msg.from_node, NO_GORUP);
+        }
+        Ok(RaftMessageResponse {})
+    }
 
     /// if `None` is returned, the write request is successfully committed
     /// to raft, otherwise the callback closure of the error response is
@@ -669,7 +760,7 @@ where
     /// Note: Must be called to respond to the client when the loop ends.
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActor::propose_write_request",
+        name = "MultiRaftActorRuntime::propose_write_request",
         skip(self, tx))
     ]
     fn propose_write_request(
@@ -701,7 +792,7 @@ where
     /// Note: Must be called to respond to the client when the loop ends.
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActor::propose_membership_change_request",
+        name = "MultiRaftActorRuntime::propose_membership_change_request",
         skip(self, tx))
     ]
     fn propose_membership_change_request(
@@ -733,7 +824,7 @@ where
     /// Note: Must be called to respond to the client when the loop ends.
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActor::propose_read_index_request",
+        name = "MultiRaftActorRuntime::propose_read_index_request",
         skip(self, tx))
     ]
     fn propose_read_index_request(
@@ -760,7 +851,7 @@ where
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActorInner::campagin_raft", 
+        name = "MultiRaftActorRuntime::campagin_raft", 
         skip(self, tx)
     )]
     fn campaign_raft(&mut self, group_id: u64, tx: oneshot::Sender<Result<(), Error>>) {
@@ -798,7 +889,7 @@ where
     // }
 
     #[tracing::instrument(
-        name = "MultiRaftActor::handle_admin_request",
+        name = "MultiRaftActorRuntime::handle_admin_request",
         level = Level::INFO,
         skip(self, tx)
     )]
@@ -819,7 +910,7 @@ where
     }
 
     #[tracing::instrument(
-        name = "MultiRaftActor::raft_group_management",
+        name = "MultiRaftActorRuntime::raft_group_management",
         level = Level::INFO,
         skip(self)
     )]
@@ -838,7 +929,7 @@ where
     }
 
     #[tracing::instrument(
-        name = "MultiRaftActor::create_raft_group", 
+        name = "MultiRaftActorRuntime::create_raft_group", 
         level = Level::INFO,
         skip(self))
     ]
@@ -964,236 +1055,6 @@ where
         }
     }
 
-    /// Fanout heartbeats from other nodes to all raft groups on this node.
-    async fn fanout_heartbeat(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
-        let from_node_id = msg.from_node;
-        let to_node_id = msg.to_node;
-        if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
-            let mut fanouted_groups = 0;
-            let mut fanouted_followers = 0;
-            for (group_id, _) in from_node.group_map.iter() {
-                let group = match self.groups.get_mut(group_id) {
-                    None => {
-                        warn!(
-                            "missing group {} at from_node {} fanout heartbeat",
-                            *group_id, msg.from_node
-                        );
-                        continue;
-                    }
-                    Some(group) => group,
-                };
-
-                fanouted_groups += 1;
-                self.activity_groups.insert(*group_id);
-
-                // if group.leader.node_id == 0
-                // || group.leader.node_id != msg.from_node
-                if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
-                    trace!("node {}: not fanning out heartbeat to {}, msg is from {} and leader is {:?}", self.node_id, group_id, from_node_id, group.leader);
-                    continue;
-                }
-
-                // gets the replica stored in this node.
-                // FIXME: t30_membership single_step
-                // let from_replica = match self
-                //     .storage
-                //     .replica_for_node(*group_id, msg.from_node)
-                //     .await
-                let from_replica = match self
-                    .replica_cache
-                    .replica_for_node(*group_id, from_node_id)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on from_node {} in current node {} error: {}",
-                            group_id, msg.from_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                // FIXME: t30_membership single_step
-                // let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
-                let to_replica = match self
-                    .replica_cache
-                    .replica_for_node(*group_id, to_node_id)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on to_node {} in current node {} error: {}",
-                            group_id, msg.to_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                fanouted_followers += 1;
-
-                let mut step_msg = raft::prelude::Message::default();
-                step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                group
-                    .raft_group
-                    .raft
-                    .prs()
-                    .iter()
-                    .for_each(|(id, _)| println!("prs = {}", *id));
-                // let (_, pr) = group
-                //     .raft_group
-                //     .raft
-                //     .prs()
-                //     .iter()
-                //     .find(|&(id, _)| {
-                //         println!("id = {}", *id);
-                //         *id == from_replica.replica_id
-                //     })
-                //     .unwrap();
-                // msg.commit = std::cmp::min(group.raft_group.raft.raft_log.committed, pr.matched);
-                debug!("node {}: group.raft_group.raft.raft_log.committed = {}", self.node_id, group.raft_group.raft.raft_log.committed);
-                step_msg.commit = group.raft_group.raft.raft_log.committed;
-                step_msg.from = from_replica.replica_id;
-                step_msg.to = to_replica.replica_id;
-                debug!(
-                    "fanouting {}.{} -> {}.{} msg  = {:?}",
-                    from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
-                );
-                // group.raft_group.step(msg).unwrap();
-                // FIXME: t30_membership single_step
-                group.raft_group.step(step_msg).unwrap();
-            }
-        } else {
-            // In this point, we receive heartbeat message from other nodes,
-            // but we don't have the from_node raft group information, so we
-            // don't know which raft group's replica we should fanout to.
-            warn!(
-                "missing raft groups at from_node {} fanout heartbeat",
-                msg.from_node
-            );
-            self.node_manager.add_node(msg.from_node, NO_GORUP);
-        }
-
-        let response_msg = {
-            let mut raft_msg = Message::default();
-            raft_msg.set_msg_type(MessageType::MsgHeartbeatResponse);
-            RaftMessage {
-                group_id: NO_GORUP,
-                from_node: self.node_id,
-                // from_node: msg.to_node,
-                // to_node: msg.to_node,
-                to_node: from_node_id,
-                replicas: vec![],
-                msg: Some(raft_msg),
-            }
-        };
-
-        self.transport.send(response_msg).unwrap();
-        Ok(RaftMessageResponse {})
-    }
-
-    /// Fanout heartbeats response from other nodes to all raft groups on this node.
-    async fn fanout_heartbeat_response(
-        &mut self,
-        msg: RaftMessage,
-    ) -> Result<RaftMessageResponse, Error> {
-        if let Some(node) = self.node_manager.get_node(&msg.from_node) {
-            for (group_id, _) in node.group_map.iter() {
-                let group = match self.groups.get_mut(group_id) {
-                    None => {
-                        warn!(
-                            "missing group {} at from_node {} fanout heartbeat response",
-                            *group_id, msg.from_node
-                        );
-                        continue;
-                    }
-                    Some(group) => group,
-                };
-
-                self.activity_groups.insert(*group_id);
-
-                // let leader = match group.leader.as_ref() {
-                //     None => continue,
-                //     Some(leader) => leader,
-                // };
-
-                // TODO: check leader is valid
-                if group.leader.node_id != self.node_id || msg.from_node == self.node_id {
-                    continue;
-                }
-
-                // gets the replica stored in this node.
-                let from_replica = match self
-                    .storage
-                    .replica_for_node(*group_id, msg.from_node)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on from_node {} in current node {} error: {}",
-                            group_id, msg.from_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on to_node {} in current node {} error: {}",
-                            group_id, msg.to_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                let mut msg = raft::prelude::Message::default();
-                msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
-                msg.from = from_replica.replica_id;
-                msg.to = to_replica.replica_id;
-                debug!("step msg = {:?}", msg);
-
-                // group.raft_group.step(msg).unwrap();
-                // FIXME: t30_membership single_step
-                group.raft_group.step(msg).unwrap();
-            }
-        } else {
-            warn!(
-                "missing raft groups at from_node {} fanout heartbeat response",
-                msg.from_node
-            );
-            self.node_manager.add_node(msg.from_node, NO_GORUP);
-        }
-        Ok(RaftMessageResponse {})
-    }
-
     async fn handle_apply_results(&mut self) {
         loop {
             let msg = match self.apply_response_rx.try_recv() {
@@ -1210,7 +1071,7 @@ where
 
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "MultiRaftActor::advance_apply",
+        name = "MultiRaftActorRuntime::advance_apply",
         skip(self))
     ]
     async fn advance_apply(&mut self, response: ApplyTaskResponse) {
@@ -1291,7 +1152,7 @@ where
             match group.raft_group.apply_conf_change(&view.conf_change) {
                 Ok(cc) => {
                     trace!("apply conf change ok");
-                   
+
                     let gs = match self.storage.group_storage(group_id, group.replica_id).await {
                         Ok(gs) => gs,
                         Err(err) => {
@@ -1302,7 +1163,7 @@ where
                         }
                     };
                     gs.set_conf_state(cc);
-        
+
                     response_tx.send(Ok(())).unwrap();
                 }
                 Err(err) => {
@@ -1321,12 +1182,7 @@ where
             .unwrap()
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "MultiRaftActorInner::handle_readys",
-    //     skip(self)
-    // )]
-    pub(crate) async fn handle_readys(&mut self) {
+    async fn handle_readys(&mut self) {
         let mut multi_groups_write = HashMap::new();
         let mut multi_groups_apply = HashMap::new();
         for group_id in self.activity_groups.iter() {
@@ -1335,8 +1191,11 @@ where
             }
 
             if let Some(group) = self.groups.get_mut(group_id) {
+                if !group.raft_group.has_ready() {
+                    continue;
+                }
                 group
-                    .on_ready(
+                    .handle_ready(
                         self.node_id,
                         &self.transport,
                         &self.storage,
@@ -1466,28 +1325,29 @@ where
     //     level = Level::TRACE,
     //     skip_all
     // )]
-    fn handle_response_callbacks(&mut self) {
-        let drainner = self.pending_response_cbs.drain(..).collect::<Vec<_>>();
-        tokio::spawn(async move {
-            drainner.into_iter().for_each(|cb| {
-                if let Err(err) = cb() {
-                    warn!("{}", err)
-                }
-            });
-        });
-        // self.pending_response_cbs.drain(..).for_each(|cb| {
-        //     if let Err(err) = cb() {
-        //         error!("{}", err)
-        //     }
-        // });
-    }
 
     #[tracing::instrument(
-        name = "MultiRaftActorInner::do_stop"
+        name = "MultiRaftActorRuntime::do_stop"
         level = Level::TRACE,
         skip_all
     )]
     fn do_stop(mut self) {
         self.state.stopped.store(true, Ordering::Release);
     }
+}
+
+fn handle_response_callbacks(mut cbs: Vec<ResponseCb>) {
+    let drainner = cbs.drain(..).collect::<Vec<_>>();
+    tokio::spawn(async move {
+        drainner.into_iter().for_each(|cb| {
+            if let Err(err) = cb() {
+                warn!("{}", err)
+            }
+        });
+    });
+    // self.pending_response_cbs.drain(..).for_each(|cb| {
+    //     if let Err(err) = cb() {
+    //         error!("{}", err)
+    //     }
+    // });
 }

@@ -2,7 +2,6 @@ use futures::Future;
 
 use raft::Storage;
 use tracing::error;
-use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
@@ -75,7 +74,7 @@ pub async fn send_messages<TR, RS, MRS>(
 #[tracing::instrument(
     level = Level::TRACE,
     name = "transport::send_message",
-    skip(transport, replica_cache, node_mgr,)
+    skip(from_node_id, group_id, transport, replica_cache, node_mgr)
 )]
 async fn send_message<TR, RS, MRS>(
     from_node_id: u64,
