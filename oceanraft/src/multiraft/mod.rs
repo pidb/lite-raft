@@ -20,7 +20,7 @@ pub use config::Config;
 pub use error::{
     Error, MultiRaftStorageError, ProposalError, RaftCoreError, RaftGroupError, TransportError,
 };
-pub use event::{ApplyNormalEvent, ApplyMembershipChangeEvent, Event, LeaderElectionEvent};
-pub use multiraft::{
-    MultiRaft,RaftMessageDispatchImpl,
-};
+pub use event::{ApplyMembershipChangeEvent, ApplyNormalEvent, Event, LeaderElectionEvent};
+pub use multiraft::{MultiRaft, RaftMessageDispatchImpl};
+
+pub use util::{ManualTick, Ticker};

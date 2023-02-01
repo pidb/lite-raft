@@ -5,6 +5,8 @@ use futures::Future;
 use oceanraft::multiraft::ApplyMembershipChangeEvent;
 use oceanraft::multiraft::ApplyNormalEvent;
 use oceanraft::multiraft::Error;
+use oceanraft::multiraft::ManualTick;
+use oceanraft::multiraft::Ticker;
 use oceanraft::prelude::AppWriteRequest;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -40,8 +42,9 @@ pub struct FixtureCluster {
     storages: Vec<MultiRaftMemoryStorage>,
     pub multirafts: Vec<FixtureMultiRaft>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
-    groups: HashMap<u64, Vec<u64>>,        // track group which nodes, group_id -> nodes
+    groups: HashMap<u64, Vec<u64>>,                // track group which nodes, group_id -> nodes
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
+    pub tickers: Vec<ManualTick>,
 }
 
 impl FixtureCluster {
@@ -49,6 +52,7 @@ impl FixtureCluster {
         let mut multirafts = vec![];
         let mut storages = vec![];
         let mut events = vec![];
+        let mut tickers = vec![];
         let transport = LocalTransport::new();
         for n in 0..num {
             let node_id = n + 1;
@@ -56,8 +60,8 @@ impl FixtureCluster {
                 node_id,
                 election_tick: 2,
                 heartbeat_tick: 1,
-                // tick_interval: 3_600_000, // hour ms
-                tick_interval: 1000, // hour ms
+                tick_interval: 3_600_000, // hour ms
+                // tick_interval: 1000, // hour ms
                 batch_apply: false,
                 batch_size: 0,
             };
@@ -90,19 +94,21 @@ impl FixtureCluster {
             multirafts.push(multiraft);
             events.push(Some(event_rx));
             storages.push(storage);
+            tickers.push(ManualTick::new());
         }
         Self {
             events,
             storages,
             multirafts,
             transport,
+            tickers,
             groups: HashMap::new(),
         }
     }
 
     pub fn start(&self) {
-        for node in self.multirafts.iter() {
-            node.start();
+        for (i, node) in self.multirafts.iter().enumerate() {
+            node.start(Some(Box::new(self.tickers[i].clone())));
         }
     }
 
@@ -115,7 +121,7 @@ impl FixtureCluster {
             voters.push(replica_id);
             replicas.push(ReplicaDesc {
                 node_id,
-                replica_id, 
+                replica_id,
             });
         }
 
@@ -280,7 +286,7 @@ pub async fn wait_for_command_apply<P>(
     };
 }
 
-pub async fn wait_for_membership_change_apply<P,F>(
+pub async fn wait_for_membership_change_apply<P, F>(
     rx: &mut Receiver<Vec<Event>>,
     mut predicate: P,
     timeout: Duration,

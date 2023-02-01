@@ -40,6 +40,7 @@ use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
 use raft_proto::prelude::ReplicaDesc;
 
+use tokio::time::interval_at;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -78,6 +79,7 @@ use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::transport::Transport;
+use super::util::Ticker;
 
 pub(crate) type ResponseCb = Box<dyn FnOnce() -> Result<(), Error> + Send + Sync + 'static>;
 
@@ -213,14 +215,13 @@ where
         }
     }
 
-    pub fn start(&self, task_group: &TaskGroup) {
+    pub fn start(&self, task_group: &TaskGroup, ticker: Option<Box<dyn Ticker>>) {
         self.apply.start(task_group);
-
         let runtime = { self.runtime.lock().unwrap().take().unwrap() };
 
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).await;
+            runtime.main_loop(stopper, ticker).await;
         });
         *self.join.lock().unwrap() = Some(jh);
     }
@@ -288,17 +289,29 @@ where
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::main_loop"
         level = Level::TRACE,
-        skip(self),
+        skip_all,
         fields(node_id=self.node_id)
     )]
-    async fn main_loop(mut self, mut stopper: Stopper) {
+    async fn main_loop(mut self, mut stopper: Stopper, ticker: Option<Box<dyn Ticker>>) {
         info!("node {}: start main_loop", self.node_id);
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
+        // tokio::time::Interval::interval_at(std::time::Instant::now() + self.tick_interval, self.tick_interval)
+        let mut ticker: Box<dyn Ticker> = ticker.map_or(
+            Box::new(interval_at(
+                tokio::time::Instant::now() + self.tick_interval,
+                self.tick_interval,
+            )),
+            |t| t,
+        );
+
+
         let mut ticks = 0;
-        let mut ticker =
-            tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
+        // let mut ticker =
+        //     tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
         // let mut activity_groups = HashSet::new();
+
+        // let ticker: Ticker = ticker.map_or(interval_at(Instant::now() + self.tick_interval, self.tick_interval), |ticker| ticker);
 
         let mut ready_ticker = tokio::time::interval_at(
             Instant::now() + Duration::from_millis(1),
@@ -345,7 +358,7 @@ where
                     // self.pending_response_cbs.push(response_cb);
                 },
 
-                _ = ticker.tick() => {
+                _ = ticker.recv() => {
                     self.groups.iter_mut().for_each(|(_, group)| {
                         if group.raft_group.tick() {
                             self.activity_groups.insert(group.group_id);
@@ -1207,7 +1220,6 @@ where
         self.do_multi_groups_write_finish(gwrs).await;
     }
 
-  
     // #[tracing::instrument(
     //     level = Level::TRACE,
     //     name = "MultiRaftActorInner::do_multi_groups_write",

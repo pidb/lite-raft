@@ -14,6 +14,7 @@ use super::multiraft_actor::MultiRaftActor;
 use super::multiraft_actor::ShardState;
 use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
+use super::util::Ticker;
 
 use raft_proto::prelude::AdminMessage;
 use raft_proto::prelude::AppReadIndexRequest;
@@ -119,7 +120,7 @@ where
         }
     }
 
-    pub fn start(&self) {
+    pub fn start(&self, ticker: Option<Box<dyn Ticker>>) {
         // let (callback_event_tx, callback_event_rx) = channel(1);
 
         // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
@@ -129,7 +130,7 @@ where
         //     task_group.clone(),
         // );
 
-        self.actor.start(&self.task_group);
+        self.actor.start(&self.task_group, ticker);
         // TODO: start apply and multiraft actor
     }
 
