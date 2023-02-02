@@ -2,12 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use futures::Future;
-use oceanraft::multiraft::ApplyMembershipChangeEvent;
-use oceanraft::multiraft::ApplyNormalEvent;
-use oceanraft::multiraft::Error;
-use oceanraft::multiraft::ManualTick;
-use oceanraft::multiraft::Ticker;
-use oceanraft::prelude::AppWriteRequest;
+
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
@@ -18,12 +13,17 @@ use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::memstore::RaftMemStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
+use oceanraft::multiraft::ApplyMembershipChangeEvent;
+use oceanraft::multiraft::ApplyNormalEvent;
 use oceanraft::multiraft::Config;
+use oceanraft::multiraft::Error;
 use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
+use oceanraft::multiraft::ManualTick;
 use oceanraft::multiraft::RaftMessageDispatchImpl;
 use oceanraft::prelude::AdminMessage;
 use oceanraft::prelude::AdminMessageType;
+use oceanraft::prelude::AppWriteRequest;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::HardState;
 use oceanraft::prelude::MultiRaft;
@@ -39,41 +39,69 @@ type FixtureMultiRaft =
     MultiRaft<LocalTransport<RaftMessageDispatchImpl>, RaftMemStorage, MultiRaftMemoryStorage>;
 
 pub struct FixtureCluster {
-    storages: Vec<MultiRaftMemoryStorage>,
-    pub multirafts: Vec<FixtureMultiRaft>,
+    pub election_ticks: usize,
+    pub nodes: Vec<FixtureMultiRaft>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
-    groups: HashMap<u64, Vec<u64>>,                // track group which nodes, group_id -> nodes
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
     pub tickers: Vec<ManualTick>,
+    pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
+    storages: Vec<MultiRaftMemoryStorage>,
+}
+
+#[derive(Default)]
+pub struct MakeGroupPlan {
+    pub group_id: u64,
+    pub first_node_id: u64,
+    pub replica_nums: usize,
+}
+
+#[derive(Default)]
+pub struct MakeGroupPlanStatus {
+    group_id: u64,
+    first_node_id: u64,
+    replica_nums: usize,
+    replicas: Vec<ReplicaDesc>,
+    conf_states: Vec<ConfState>,
+}
+
+impl std::fmt::Display for MakeGroupPlanStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "plan status\n    group_id: {}\n", self.group_id)?;
+        for i in 0..self.replica_nums {
+            write!(
+                f,
+                "       node {}: {:?}, {:?}\n",
+                self.first_node_id as usize + i,
+                self.replicas[i],
+                self.conf_states[i]
+            )?
+        }
+
+        write!(f, "")
+    }
 }
 
 impl FixtureCluster {
-    pub async fn make(num: u64, task_group: TaskGroup) -> FixtureCluster {
+    /// Make a `FixtureCluster` with `n` nodes and nodes ids starting at 1.
+    pub async fn make(n: u64, task_group: TaskGroup) -> FixtureCluster {
         let mut multirafts = vec![];
         let mut storages = vec![];
         let mut events = vec![];
         let mut tickers = vec![];
         let transport = LocalTransport::new();
-        for n in 0..num {
-            let node_id = n + 1;
+        for i in 0..n {
+            let node_id = i + 1;
             let config = Config {
                 node_id,
                 election_tick: 2,
                 heartbeat_tick: 1,
                 tick_interval: 3_600_000, // hour ms
-                // tick_interval: 1000, // hour ms
                 batch_apply: false,
                 batch_size: 0,
             };
 
             let (event_tx, event_rx) = channel(1);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
-
-            // info!(
-            //     "start multiraft in node {}, config for {:?}",
-            //     config.node_id, config
-            // );
-
             let multiraft = FixtureMultiRaft::new(
                 config,
                 transport.clone(),
@@ -99,25 +127,52 @@ impl FixtureCluster {
         Self {
             events,
             storages,
-            multirafts,
+            nodes: multirafts,
             transport,
             tickers,
+            election_ticks: 2,
             groups: HashMap::new(),
         }
     }
 
-    pub fn start(&self) {
-        for (i, node) in self.multirafts.iter().enumerate() {
-            node.start(Some(Box::new(self.tickers[i].clone())));
-        }
-    }
+    /// Provide a plan to create a consensus group with a number of `replica_nums` starting from `first_node_id`.
+    ///
+    /// the plan files explains follows:
+    /// - `group_id` is self-explanatory.
+    /// - `first_node_id` indicates the start node where the replica is placed in the consensus group.
+    /// The current constraints on `fist_node_id` are that it cannot be `0` and must be less than the
+    /// number of `FixtureCluster` nodes.
+    /// - replica_nums specifies the number of consensus groups. The replica_nums limit the number
+    /// of nodes to `FixtureCluster` nodes.
+    pub async fn make_group(
+        &mut self,
+        plan: &mut MakeGroupPlan,
+    ) -> Result<MakeGroupPlanStatus, Error> {
+        assert!(
+            plan.first_node_id != 0 && plan.first_node_id - 1 < self.nodes.len() as u64,
+            "first_node_id violates the current constraint"
+        );
 
-    pub async fn make_group(&mut self, group_id: u64, first_node: u64, replica_num: usize) {
+        assert!(
+            plan.replica_nums != 0
+                && plan.replica_nums <= (self.nodes.len() - (plan.first_node_id as usize - 1)),
+            "replica_nums violates the current constraint"
+        );
+
+        let mut status = MakeGroupPlanStatus {
+            group_id: plan.group_id,
+            first_node_id: plan.first_node_id,
+            replica_nums: plan.replica_nums,
+            ..Default::default()
+        };
+
         let mut voters = vec![];
         let mut replicas = vec![];
-        for i in 0..replica_num {
+
+        // create replica descs
+        for i in 0..plan.replica_nums {
             let replica_id = (i + 1) as u64;
-            let node_id = first_node + i as u64 + 1 as u64;
+            let node_id = (plan.first_node_id - 1) + (i + 1) as u64;
             voters.push(replica_id);
             replicas.push(ReplicaDesc {
                 node_id,
@@ -125,56 +180,84 @@ impl FixtureCluster {
             });
         }
 
-        for i in 0..replica_num {
-            let node_index = first_node as usize + i;
-            let node_id = first_node + i as u64 + 1 as u64;
+        status.replicas = replicas.clone();
+
+        for i in 0..plan.replica_nums {
+            let place_node_index = (plan.first_node_id - 1) as usize + i;
+            let place_node_id = plan.first_node_id + i as u64;
             let replica_id = (i + 1) as u64;
-            let storage = &self.storages[node_index];
-            let gs = storage.group_storage(group_id, replica_id).await.unwrap();
+            let storage = &self.storages[place_node_index];
+            let gs = storage.group_storage(plan.group_id, replica_id).await?;
 
             // init hardstate
             let mut hs = HardState::default();
             hs.commit = 1;
             hs.term = 1;
             gs.set_hardstate(hs).unwrap();
-
-            // init confstate
-            // let mut cs = ConfState::default();
-            // cs.voters = voters.clone();
-            // gs.wl().set_conf_state(cs);
-
             // apply snapshot
             let mut ss = Snapshot::default();
             ss.mut_metadata().mut_conf_state().voters = voters.clone();
             ss.mut_metadata().index = 1;
             ss.mut_metadata().term = 1;
+
+            // record cc
+            status
+                .conf_states
+                .push(ss.get_metadata().get_conf_state().clone());
+
+            // apply cc
             gs.wl().apply_snapshot(ss).unwrap();
 
-            let multiraft = &self.multirafts[node_index];
+            let node = &self.nodes[place_node_index];
 
             // create admin message for create raft grop
             let mut admin_msg = AdminMessage::default();
             admin_msg.set_msg_type(AdminMessageType::RaftGroup);
             let mut msg = RaftGroupManagement::default();
             msg.set_msg_type(RaftGroupManagementType::MsgCreateGroup);
-            msg.group_id = group_id;
+            msg.group_id = plan.group_id;
             msg.replica_id = replica_id;
             msg.replicas = replicas.clone();
             admin_msg.raft_group = Some(msg);
-            multiraft.admin(admin_msg).await.unwrap();
+            let _ = node.admin(admin_msg).await?;
 
-            match self.groups.get_mut(&group_id) {
+            match self.groups.get_mut(&plan.group_id) {
                 None => {
-                    self.groups.insert(group_id, vec![node_id as u64]);
+                    self.groups
+                        .insert(plan.group_id, vec![place_node_id as u64]);
                 }
-                Some(nodes) => nodes.push(node_id as u64),
+                Some(nodes) => nodes.push(place_node_id as u64),
             };
         }
+
+        Ok(status)
+    }
+
+    /// Start all nodes of the `FixtureCluster`.
+    pub fn start(&self) {
+        for (i, node) in self.nodes.iter().enumerate() {
+            node.start(Some(Box::new(self.tickers[i].clone())));
+        }
+    }
+
+    /// Get mutable event receiver by given `node_id`.
+    pub fn mut_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Event>> {
+        self.events[to_index(node_id)].as_mut().unwrap()
     }
 
     /// Remove event rx from cluster events.
     pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
         std::mem::take(&mut self.events[index]).unwrap()
+    }
+
+    /// Gets a `ReplicaDesc` of the consensus group on the node by given `node_id` and `group_id`.
+    pub async fn replica_desc(&self, node_id: u64, group_id: u64) -> ReplicaDesc {
+        let storage = &self.storages[to_index(node_id)];
+        storage
+            .replica_for_node(group_id, node_id)
+            .await
+            .unwrap()
+            .unwrap()
     }
 
     /// Write data to raft. return a onshot::Receiver to recv apply result.
@@ -190,58 +273,51 @@ impl FixtureCluster {
             context: vec![],
             data,
         };
-        self.multirafts[index].async_write(request)
+        self.nodes[index].async_write(request)
     }
 
-    pub async fn check_elect(&mut self, node_index: u64, should_leaeder_id: u64, group_id: u64) {
-        // trigger an election for the replica in the group of the node where leader nodes.
-        self.trigger_elect(node_index, group_id).await;
-
-        for node_id in self.groups.get(&group_id).unwrap().iter() {
-            let election = FixtureCluster::wait_for_leader_elect(&mut self.events, *node_id - 1)
-                .await
-                .unwrap();
-            assert_ne!(election.leader_id, 0);
-            assert_eq!(election.group_id, group_id);
-            assert_eq!(election.leader_id, should_leaeder_id);
-            let storage = &self.storages[node_index as usize];
-            let replica_desc = storage
-                .replica_for_node(group_id, *node_id)
-                .await
-                .unwrap()
-                .unwrap();
-            // assert_eq!(election.replica_id, replica_desc.replica_id);
-        }
-    }
-
-    pub async fn trigger_elect(&self, node_index: u64, group_id: u64) {
-        self.multirafts[node_index as usize]
+    /// Campaigns the consensus group by the given `node_id` and `group_id`.
+    ///
+    /// This method is used, for example, to trigger an election.
+    pub async fn campaign_group(&mut self, node_id: u64, group_id: u64) {
+        self.nodes[to_index(node_id)]
             .campaign_group(group_id)
             .await
             .unwrap();
     }
 
-    pub async fn wait_for_leader_elect(
-        events: &mut Vec<Option<Receiver<Vec<Event>>>>,
+    /// Wait elected.
+    pub async fn wait_leader_elect_event(
+        cluster: &mut FixtureCluster,
         node_id: u64,
-    ) -> Option<LeaderElectionEvent> {
-        let event = events[node_id as usize].as_mut().unwrap();
-        match timeout_at(Instant::now() + Duration::from_millis(1000), event.recv()).await {
-            Err(_) => {
-                panic!("wait for leader elect timeouted, leader = {}", node_id);
-            }
-            Ok(events) => {
-                for event in events.unwrap() {
+        // rx: &mut Option<Receiver<Vec<Event>>>,
+    ) -> Result<LeaderElectionEvent, String> {
+        let rx = cluster.mut_event_rx(node_id);
+        let wait_loop_fut = async {
+            loop {
+                let events = match rx.recv().await {
+                    None => return Err(String::from("the event sender dropped")),
+                    Some(evs) => evs,
+                };
+
+                for event in events {
                     match event {
-                        Event::LederElection(leader_elect) => return Some(leader_elect),
+                        Event::LederElection(leader_elect) => return Ok(leader_elect),
                         _ => {}
                     }
                 }
-
-                return None;
             }
+        };
+        match timeout_at(Instant::now() + Duration::from_millis(100), wait_loop_fut).await {
+            Err(_) => Err(format!("wait for leader elect event timeouted")),
+            Ok(res) => res,
         }
     }
+}
+
+#[inline]
+fn to_index(node_id: u64) -> usize {
+    node_id as usize - 1
 }
 
 impl FixtureCluster {}
