@@ -8,6 +8,7 @@ use raft_proto::prelude::Entry;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 #[allow(unused)]
 use tokio::time::Instant;
@@ -33,8 +34,8 @@ impl Ticker for Interval {
 
 #[derive(Clone)]
 pub struct ManualTick {
-    tx: Sender<()>,
-    rx: Arc<Mutex<Receiver<()>>>,
+    tx: Sender<(oneshot::Sender<()>)>,
+    rx: Arc<Mutex<Receiver<oneshot::Sender<()>>>>,
 }
 
 impl ManualTick {
@@ -47,13 +48,17 @@ impl ManualTick {
     }
 
     pub async fn tick(&mut self) {
-        self.tx.send(()).await.unwrap()
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(tx).await.unwrap();
+        rx.await.unwrap();
     }
 
     pub fn non_blocking_tick(&mut self) {
         let tx = self.tx.clone();
         let _ = tokio::spawn(async move {
-            tx.send(()).await.unwrap();
+            let (res_tx, res_rx) = oneshot::channel();
+            tx.send(res_tx).await.unwrap();
+            res_rx.await.unwrap();
         });
     }
 }
@@ -62,7 +67,8 @@ impl Ticker for ManualTick {
     fn recv(&mut self) -> BoxFuture<'_, std::time::Instant> {
         Box::pin(async {
             let mut rx = { self.rx.lock().await };
-            rx.recv().await.unwrap();
+            let res_tx = rx.recv().await.unwrap();
+            res_tx.send(()).unwrap();
             std::time::Instant::now()
         })
     }

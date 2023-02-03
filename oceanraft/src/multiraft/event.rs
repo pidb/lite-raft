@@ -44,12 +44,16 @@ impl Default for CallbackEvent {
     }
 }
 
-#[derive(Debug)]
+/// A LeaderElectionEvent is send when leader changed.
+#[derive(Debug, Clone)]
 pub struct LeaderElectionEvent {
+    /// The id of the group where the leader belongs.
     pub group_id: u64,
+    /// Current replica id. If current replica is the
+    /// leader, then `replica_id` equal to `leader_id`.
     pub replica_id: u64,
+    /// Current leader id.
     pub leader_id: u64,
-    pub committed_term: u64,
 }
 
 #[derive(Debug)]
@@ -78,7 +82,7 @@ pub struct ApplyMembershipChangeEvent {
 }
 
 impl ApplyMembershipChangeEvent {
-    pub async fn commit_to_multiraft(&mut self) -> Result<(), Error> {
+    pub async fn done(&mut self) -> Result<(), Error> {
         if let Some(change_view) = self.change_view.take() {
             let (tx, rx) = oneshot::channel();
             self.callback_event_tx

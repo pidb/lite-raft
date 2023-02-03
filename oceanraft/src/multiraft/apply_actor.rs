@@ -190,6 +190,7 @@ impl ApplyActorRuntime {
     //     skip_all
     // )]
     async fn main_loop(mut self, mut stopper: Stopper) {
+        info!("node {}: start apply main_loop", self.node_id);
         loop {
             tokio::select! {
                 _ = &mut stopper => {

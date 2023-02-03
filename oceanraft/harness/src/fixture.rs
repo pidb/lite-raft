@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures::Future;
@@ -40,7 +41,7 @@ type FixtureMultiRaft =
 
 pub struct FixtureCluster {
     pub election_ticks: usize,
-    pub nodes: Vec<FixtureMultiRaft>,
+    pub nodes: Vec<Arc<FixtureMultiRaft>>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
     pub tickers: Vec<ManualTick>,
@@ -84,7 +85,7 @@ impl std::fmt::Display for MakeGroupPlanStatus {
 impl FixtureCluster {
     /// Make a `FixtureCluster` with `n` nodes and nodes ids starting at 1.
     pub async fn make(n: u64, task_group: TaskGroup) -> FixtureCluster {
-        let mut multirafts = vec![];
+        let mut nodes = vec![];
         let mut storages = vec![];
         let mut events = vec![];
         let mut tickers = vec![];
@@ -102,7 +103,7 @@ impl FixtureCluster {
 
             let (event_tx, event_rx) = channel(1);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
-            let multiraft = FixtureMultiRaft::new(
+            let node = FixtureMultiRaft::new(
                 config,
                 transport.clone(),
                 storage.clone(),
@@ -114,12 +115,12 @@ impl FixtureCluster {
                 .listen(
                     node_id,
                     format!("test://node/{}", node_id).as_str(),
-                    multiraft.dispatch_impl(),
+                    node.dispatch_impl(),
                 )
                 .await
                 .unwrap();
 
-            multirafts.push(multiraft);
+            nodes.push(Arc::new(node));
             events.push(Some(event_rx));
             storages.push(storage);
             tickers.push(ManualTick::new());
@@ -127,7 +128,7 @@ impl FixtureCluster {
         Self {
             events,
             storages,
-            nodes: multirafts,
+            nodes,
             transport,
             tickers,
             election_ticks: 2,
@@ -310,6 +311,34 @@ impl FixtureCluster {
         };
         match timeout_at(Instant::now() + Duration::from_millis(100), wait_loop_fut).await {
             Err(_) => Err(format!("wait for leader elect event timeouted")),
+            Ok(res) => res,
+        }
+    }
+
+    /// Wait elected.
+    pub async fn wait_membership_change_apply_event(
+        cluster: &mut FixtureCluster,
+        node_id: u64,
+        timeout: Duration,
+    ) -> Result<ApplyMembershipChangeEvent, String> {
+        let rx = cluster.mut_event_rx(node_id);
+        let wait_loop_fut = async {
+            loop {
+                let events = match rx.recv().await {
+                    None => return Err(String::from("the event sender dropped")),
+                    Some(evs) => evs,
+                };
+
+                for event in events {
+                    match event {
+                        Event::ApplyMembershipChange(event) => return Ok(event),
+                        _ => {}
+                    }
+                }
+            }
+        };
+        match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+            Err(_) => Err(format!("wait for apply change event timeouted")),
             Ok(res) => res,
         }
     }

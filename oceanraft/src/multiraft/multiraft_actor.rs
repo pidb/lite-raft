@@ -359,10 +359,12 @@ where
                 },
 
                 _ = ticker.recv() => {
-                    self.groups.iter_mut().for_each(|(_, group)| {
+                    self.groups.iter_mut().for_each(|(id, group)| {
                         if group.raft_group.tick() {
-                            self.activity_groups.insert(group.group_id);
+                            // self.activity_groups.insert(group.group_id);
                         }
+                        self.activity_groups.insert(group.group_id);
+                        println!("node {}: tick group = {}", self.node_id, *id);
                     });
 
                     ticks += 1;
@@ -413,14 +415,21 @@ where
                     self.handle_callback(msg).await;
                 },
 
-                _ = ready_ticker.tick() => {
-                    if !self.activity_groups.is_empty() {
-                        self.handle_readys().await;
-                        self.activity_groups.clear();
-                        // TODO: shirk_to_fit
-                    }
-                },
+                // _ = ready_ticker.tick() => {
+                //     if !self.activity_groups.is_empty() {
+                //         self.handle_readys().await;
+                //         self.activity_groups.clear();
+                //         // TODO: shirk_to_fit
+                //     }
+                // },
                 else => {},
+            }
+
+
+            if !self.activity_groups.is_empty() {
+                self.handle_readys().await;
+                self.activity_groups.clear();
+                // TODO: shirk_to_fit
             }
 
             handle_response_callbacks(pending_response_callbacks);
@@ -1047,27 +1056,28 @@ where
             println!("send pending events = {:?}", self.pending_events);
             // updating all valid LederElections is required because the lastest commited_term
             // of the follower cannot be updated until after the leader committed.
-            let pending_events = std::mem::take(&mut self.pending_events)
-                .into_iter()
-                .filter_map(|mut pending_event| {
-                    match pending_event {
-                        Event::LederElection(ref mut leader_elect) => {
-                            if let Some(group) = self.groups.get(&leader_elect.group_id) {
-                                if leader_elect.committed_term != group.committed_term
-                                    && group.committed_term != 0
-                                {
-                                    leader_elect.committed_term = group.committed_term;
-                                }
-                                Some(pending_event)
-                            } else {
-                                // group is removed, but event incoming, so ignore it.
-                                None
-                            }
-                        }
-                        _ => Some(pending_event),
-                    }
-                })
-                .collect::<Vec<_>>();
+            let pending_events = std::mem::take(&mut self.pending_events);
+            // TODO: move to leader committed event
+            //     .into_iter()
+            //     .filter_map(|mut pending_event| {
+            //         match pending_event {
+            //             Event::LederElection(ref mut leader_elect) => {
+            //                 if let Some(group) = self.groups.get(&leader_elect.group_id) {
+            //                     if leader_elect.committed_term != group.committed_term
+            //                         && group.committed_term != 0
+            //                     {
+            //                         leader_elect.committed_term = group.committed_term;
+            //                     }
+            //                     Some(pending_event)
+            //                 } else {
+            //                     // group is removed, but event incoming, so ignore it.
+            //                     None
+            //                 }
+            //             }
+            //             _ => Some(pending_event),
+            //         }
+            //     })
+            //     .collect::<Vec<_>>();
 
             self.event_tx.send(pending_events).await.unwrap();
         }

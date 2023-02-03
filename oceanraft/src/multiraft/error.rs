@@ -57,10 +57,16 @@ pub enum RaftGroupError {
 }
 
 
+
 #[derive(thiserror::Error, Debug)]
 pub enum ProposalError {
-    #[error("the proposal need leader role, the current leader at {0}")]
-    NotLeader(u64, u64, u64),
+    #[error("not leader")] // TODO: more error info
+    NotLeader {
+        // node_id: u64, TODO: support node id
+        group_id: u64,
+        replica_id: u64,
+        // reditect_node: Option<> TODO: support redirect hint
+    },
 
     #[error("unexpected at index = {0}")]
     Unexpected(u64),
@@ -76,7 +82,7 @@ impl PartialEq for ProposalError {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (ProposalError::NotLeader(..), ProposalError::NotLeader(..))
+            (ProposalError::NotLeader{..}, ProposalError::NotLeader{..})
                 | (ProposalError::Unexpected(..), ProposalError::Unexpected(..))
                 | (ProposalError::Stale(..), ProposalError::Stale(..))
                 | (ProposalError::Other(..), ProposalError::Other(..)),

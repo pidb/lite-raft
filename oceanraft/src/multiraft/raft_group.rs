@@ -199,6 +199,11 @@ where
             .await;
         }
 
+        if let Some(ss) = rd.ss() {
+            self.handle_soft_state_change(ss, replica_cache, pending_events)
+                .await;
+        }
+
         // make apply task if need to apply commit entries
         if !rd.committed_entries().is_empty() {
             // insert_commit_entries will update latest commit term by commit entries.
@@ -210,10 +215,7 @@ where
             ).await;
         }
 
-        if let Some(ss) = rd.ss() {
-            self.handle_soft_state_change(ss, replica_cache, pending_events)
-                .await;
-        }
+      
 
         // make write task if need to write disk.
         multi_groups_write.insert(
@@ -397,7 +399,7 @@ where
             group_id: self.group_id,
             leader_id: ss.leader_id,
             replica_id,
-            committed_term: self.committed_term,
+            // committed_term: self.committed_term,
         }));
     }
 
@@ -540,11 +542,10 @@ where
         }
 
         if !self.is_leader() {
-            return Err(Error::Proposal(ProposalError::NotLeader(
-                self.group_id,
-                self.replica_id,
-                self.raft_group.raft.leader_id,
-            )));
+            return Err(Error::Proposal(ProposalError::NotLeader{
+                group_id: self.group_id,
+                replica_id: self.replica_id,
+            }));
         }
 
         if request.term != 0 && self.term() > request.term {
