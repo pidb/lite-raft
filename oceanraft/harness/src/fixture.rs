@@ -46,7 +46,7 @@ pub struct FixtureCluster {
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
-    storages: Vec<MultiRaftMemoryStorage>,
+    pub storages: Vec<MultiRaftMemoryStorage>,
 }
 
 #[derive(Default)]

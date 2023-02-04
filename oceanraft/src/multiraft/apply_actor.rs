@@ -261,7 +261,7 @@ impl ApplyActorRuntime {
 
         let task_response = ApplyTaskResponse { apply_results };
 
-        self.tx.send(task_response).await;
+        self.tx.send(task_response).await.unwrap();
     }
 
     /// Return None if the can batched otherwise return Apply that can be applied.
@@ -419,7 +419,7 @@ impl ApplyDelegate {
             // When the new leader online, a no-op log will be send and commit.
             // we will skip this log for the application and set index and term after
             // apply.
-            info!("skip no-op index = {}, term = {}", entry_index, entry_term);
+            println!("node {}: skip no-op index = {}, term = {}", self.node_id, entry_index, entry_term);
             if !self.pending_proposals.is_empty() {
                 info!(
                     "skip no-op log index = {}, term = {}, remove stale proposals = {:?}",
@@ -458,7 +458,6 @@ impl ApplyDelegate {
     // )]
     fn handle_committed_conf_change(&mut self, entry: Entry, state: &mut RaftGroupApplyState) {
         // TODO: empty adta?
-        debug!("node {}: commit cc", self.node_id);
         let entry_index = entry.index;
         let entry_term = entry.term;
 

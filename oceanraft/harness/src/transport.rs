@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use oceanraft::util::Stopper;
 use oceanraft::util::TaskGroup;
-use tracing::warn;
 use tracing::info;
+use tracing::warn;
 
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -55,12 +55,11 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
                         tx.send(res).unwrap();
                     },
                     _ = &mut stopper => {
-                        
+
                         break
                     },
                 }
             }
-            
         };
 
         task_group.spawn(main_loop)
@@ -149,15 +148,14 @@ where
                 return Err(Error::Transport(TransportError::ServerNodeFound(to_node)));
             }
 
-
             // send reqeust
             let local_server = rl.get(&to_node).unwrap();
             if local_server.stopped {
                 // FIXME: should return some error
-                return Ok(RaftMessageResponse{})
+                return Ok(RaftMessageResponse {});
             }
             let (tx, rx) = oneshot::channel();
-            local_server.tx.send((msg, tx)).await.unwrap();
+            local_server.tx.send((msg, tx)).await; // FIXME: handle error
 
             // and receive response
             if let Ok(res) = rx.await {

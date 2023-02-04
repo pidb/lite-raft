@@ -208,6 +208,7 @@ where
         if !rd.committed_entries().is_empty() {
             // insert_commit_entries will update latest commit term by commit entries.
             self.handle_committed_entries(
+                node_id,
                 &gs,
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
@@ -236,13 +237,15 @@ where
     )]
     async fn handle_committed_entries(
         &mut self,
+        node_id: u64,
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
     ) {
-        trace!(
-            "node , committed entries [{}, {}], group = {}, replica = {}",
+        println!(
+            "node {}, committed entries [{}, {}], group = {}, replica = {}",
+            node_id,
             entries[0].index,
             entries[entries.len() - 1].index,
             self.group_id,
@@ -517,6 +520,7 @@ where
                 }
             };
             self.handle_committed_entries(
+                node_id,
                 &gs,
                 replica_id,
                 light_ready.take_committed_entries(),

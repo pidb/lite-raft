@@ -275,7 +275,6 @@ impl<T: Storage> RaftLog<T> {
             self.commit_to(cmp::min(committed, last_new_index));
             return Some((conflict_idx, last_new_index));
         }
-        println!("no match term");
         None
     }
 

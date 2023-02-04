@@ -305,7 +305,6 @@ where
             |t| t,
         );
 
-
         let mut ticks = 0;
         // let mut ticker =
         //     tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
@@ -364,7 +363,6 @@ where
                             // self.activity_groups.insert(group.group_id);
                         }
                         self.activity_groups.insert(group.group_id);
-                        println!("node {}: tick group = {}", self.node_id, *id);
                     });
 
                     ticks += 1;
@@ -424,7 +422,6 @@ where
                 // },
                 else => {},
             }
-
 
             if !self.activity_groups.is_empty() {
                 self.handle_readys().await;
@@ -1003,6 +1000,10 @@ where
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
             .map_err(|err| Error::Raft(err))?;
 
+        println!(
+            "node {}: create raft group_id = {}, replica_id = {}",
+            self.node_id, group_id, replica_id
+        );
         let mut group = RaftGroup {
             group_id,
             replica_id,
@@ -1079,7 +1080,7 @@ where
             //     })
             //     .collect::<Vec<_>>();
 
-            self.event_tx.send(pending_events).await.unwrap();
+            self.event_tx.send(pending_events).await; // FIXME: handle error
         }
     }
 
@@ -1100,10 +1101,9 @@ where
 
             // set apply state
             group.state.apply_state = apply_result.apply_state;
-            trace!(
-                "apply state change = {:?}, group = {}",
-                group.state.apply_state,
-                group_id
+            println!(
+                "node {}: apply state change = {:?}, group = {}",
+                self.node_id, group.state.apply_state, group_id
             );
             group.raft_group.advance_apply();
         }
@@ -1147,6 +1147,7 @@ where
                             replica_id: single_change_req.replica_id,
                         };
 
+                        println!("add node = {}", single_change_req.node_id);
                         self.node_manager
                             .add_node(single_change_req.node_id, group_id);
                         if let Err(err) = self
