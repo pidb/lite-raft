@@ -1,26 +1,12 @@
-use std::time::Duration;
-
-use harness::fixture::MakeGroupPlan;
-use oceanraft::multiraft::ApplyNormalEvent;
-use oceanraft::multiraft::Error;
-use oceanraft::multiraft::Event;
-use oceanraft::multiraft::ProposalError;
-use oceanraft::multiraft::RaftGroupError;
-use oceanraft::prelude::AppWriteRequest;
-use opentelemetry::global;
-use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
-use tokio::time::timeout_at;
-use tokio::time::Instant;
-use tracing::info;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
-
-use harness::fixture;
-use harness::fixture::FixtureCluster;
-
-use oceanraft::util::defer;
 use oceanraft::util::TaskGroup;
+use oceanraft::multiraft::Error;
+use oceanraft::multiraft::ProposalError;
+use oceanraft::prelude::AppWriteRequest;
 
+use crate::fixtures::FixtureCluster;
+use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::init_default_ut_tracing;
 /// Write data to raft. return a onshot::Receiver to recv apply result.
 pub fn write_command(
     cluster: &mut FixtureCluster,
@@ -39,31 +25,8 @@ pub fn write_command(
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
-#[tokio::test(flavor = "multi_thread")]
+#[async_entry::test(flavor = "multi_thread", init = "init_default_ut_tracing()", tracing_span = "debug")]
 async fn test_no_leader() {
-    // // install global collector configured based on RUST_LOG env var.
-    // // Allows you to pass along context (i.e., trace IDs) across services
-    // global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    // // Sets up the machinery needed to export data to Jaeger
-    // // There are other OTel crates that provide pipelines for the vendors
-    // // mentioned earlier.
-    // let tracer = opentelemetry_jaeger::new_agent_pipeline()
-    //     .with_service_name("test_initial_leader_elect")
-    //     .install_simple()
-    //     .unwrap();
-
-    // // Create a tracing layer with the configured tracer
-    // let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // // The SubscriberExt and SubscriberInitExt traits are needed to extend the
-    // // Registry to accept `opentelemetry (the OpenTelemetryLayer type).
-    // tracing_subscriber::registry()
-    //     .with(opentelemetry)
-    //     // Continue logging to stdout
-    //     .with(fmt::Layer::default())
-    //     .try_init()
-    //     .unwrap();
-
     let task_group = TaskGroup::new();
     // defer! {
     //     task_group.stop();
@@ -120,7 +83,7 @@ async fn test_no_leader() {
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
-#[tokio::test(flavor = "multi_thread")]
+#[async_entry::test(flavor = "multi_thread", init = "init_default_ut_tracing()", tracing_span = "debug")]
 async fn test_bad_group() {
     let task_group = TaskGroup::new();
 

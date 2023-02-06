@@ -34,7 +34,7 @@ use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
 
-use crate::transport::LocalTransport;
+use crate::fixtures::transport::LocalTransport;
 
 type FixtureMultiRaft =
     MultiRaft<LocalTransport<RaftMessageDispatchImpl>, RaftMemStorage, MultiRaftMemoryStorage>;

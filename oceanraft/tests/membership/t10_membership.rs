@@ -1,9 +1,5 @@
 use std::time::Duration;
 
-use harness::fixture;
-use harness::fixture::FixtureCluster;
-use harness::fixture::MakeGroupPlan;
-
 use oceanraft::multiraft::ApplyMembershipChangeEvent;
 use oceanraft::prelude::ConfChange;
 use oceanraft::prelude::ConfChangeType;
@@ -11,46 +7,15 @@ use oceanraft::prelude::ConfChangeV2;
 use oceanraft::prelude::MembershipChangeRequest;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::util::TaskGroup;
-use opentelemetry::global;
-
 use protobuf::Message;
-
 use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
-
 use tracing::info;
-use tracing_subscriber::fmt;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
-pub fn enable_jager(enable: bool) {
-    if !enable {
-        return;
-    }
-    // install global collector configured based on RUST_LOG env var.
-    // Allows you to pass along context (i.e., trace IDs) across services
-    global::set_text_map_propagator(opentelemetry_jaeger::Propagator::new());
-    // Sets up the machinery needed to export data to Jaeger
-    // There are other OTel crates that provide pipelines for the vendors
-    // mentioned earlier.
-    let tracer = opentelemetry_jaeger::new_agent_pipeline()
-        .with_service_name("test_initial_leader_elect")
-        .install_simple()
-        .unwrap();
-
-    // Create a tracing layer with the configured tracer
-    let opentelemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    // The SubscriberExt and SubscriberInitExt traits are needed to extend the
-    // Registry to accept `opentelemetry (the OpenTelemetryLayer type).
-    tracing_subscriber::registry()
-        .with(opentelemetry)
-        // Continue logging to stdout
-        .with(fmt::Layer::default())
-        .try_init()
-        .unwrap();
-}
+use crate::fixtures::init_default_ut_tracing;
+use crate::fixtures::FixtureCluster;
+use crate::fixtures::MakeGroupPlan;
 
 async fn check_cc<F>(
     cluster: &mut FixtureCluster,
@@ -76,10 +41,12 @@ async fn check_cc<F>(
     event.tx.map(|tx| tx.send(Ok(())));
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[async_entry::test(
+    flavor = "multi_thread",
+    init = "init_default_ut_tracing()",
+    tracing_span = "debug"
+)]
 async fn test_single_step() {
-    enable_jager(false);
-
     let task_group = TaskGroup::new();
     // defer! {
     //     task_group.stop();
@@ -173,9 +140,13 @@ async fn test_single_step() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[async_entry::test(
+    flavor = "multi_thread",
+    init = "init_default_ut_tracing()",
+    tracing_span = "debug"
+)]
 async fn test_joint_consensus() {
-    enable_jager(false);
+    init_default_ut_tracing();
 
     let task_group = TaskGroup::new();
     // defer! {
@@ -259,10 +230,12 @@ async fn test_joint_consensus() {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[async_entry::test(
+    flavor = "multi_thread",
+    init = "init_default_ut_tracing()",
+    tracing_span = "debug"
+)]
 async fn test_remove() {
-    enable_jager(false);
-
     let task_group = TaskGroup::new();
     let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
     cluster.start();
@@ -276,21 +249,19 @@ async fn test_remove() {
     };
     let _ = cluster.make_group(&plan).await.unwrap();
 
-  
     // triger group to leader election.
     cluster.campaign_group(node_id, plan.group_id).await;
     let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 
-
-      // Let's submit some commands
+    // Let's submit some commands
     //   let node = cluster.nodes[0].clone();
     //   tokio::spawn(async move {
     //       let rx = FixtureCluster::write_command(&node, plan.group_id, "data".as_bytes().to_vec());
     //       let _ = rx.await.unwrap();
     //   });
-  
+
     // let res = FixtureCluster::wait_for_command_apply(&mut cluster, node_id, Duration::from_millis(100)).await;
     // println!("res = {:?}", res);
 

@@ -187,8 +187,8 @@ where
             apply_request_tx,
             apply_response_rx,
             callback_rx,
-            last_tick: Instant::now(),
-            raft_ticks: 0,
+            // last_tick: Instant::now(),
+            // raft_ticks: 0,
             sync_replica_cache: true,
             replica_cache: ReplicaCache::new(storage.clone()),
             pending_events: Vec::new(),
@@ -255,9 +255,9 @@ where
     sync_replica_cache: bool,
     groups: HashMap<u64, RaftGroup<RS>>,
     activity_groups: HashSet<u64>,
-    last_tick: Instant,
+    // last_tick: Instant,
     tick_interval: Duration,
-    raft_ticks: usize,
+    // raft_ticks: usize,
     // election_tick: usize,
     // heartbeat_tick: usize,
     raft_message_rx: Receiver<(
@@ -309,19 +309,14 @@ where
         );
 
         let mut ticks = 0;
-        // let mut ticker =
-        //     tokio::time::interval_at(Instant::now() + self.tick_interval, self.tick_interval);
-        // let mut activity_groups = HashSet::new();
+      
+        // let mut ready_ticker = tokio::time::interval_at(
+        //     Instant::now() + Duration::from_millis(1),
+        //     Duration::from_millis(1),
+        // );
 
-        // let ticker: Ticker = ticker.map_or(interval_at(Instant::now() + self.tick_interval, self.tick_interval), |ticker| ticker);
-
-        let mut ready_ticker = tokio::time::interval_at(
-            Instant::now() + Duration::from_millis(1),
-            Duration::from_millis(1),
-        );
-
-        self.raft_ticks = 0;
-        self.last_tick = Instant::now();
+        // self.raft_ticks = 0;
+        // self.last_tick = Instant::now();
 
         // the callback responds to the client at the end of per main_loop.
         loop {

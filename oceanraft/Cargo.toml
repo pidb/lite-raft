@@ -31,3 +31,11 @@ smallvec = { version = "1" }
 # [dependencies.rocksdb]
 # default-features = false
 # features = ["lz4"]
+[dev-dependencies]
+protobuf = "2"
+opentelemetry = "0.18"
+tracing-opentelemetry = "0.18" 
+tracing-appender = "0.2"
+opentelemetry-jaeger = "0.17"
+lazy_static = { version = "1" }
+async-entry = { version = "0.3" }
