@@ -1,9 +1,10 @@
+use std::collections::vec_deque::Drain;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
-use tracing::info;
 use tokio::sync::oneshot;
+use tracing::info;
 use uuid::Uuid;
 
 use super::error::Error;
@@ -64,9 +65,17 @@ impl GroupProposalQueue {
         Ok(())
     }
 
-    /// Find proposal from the queue front according to the term and index. 
-    /// If the proposal (term, ndex) of the queue front is greater than the 
-    /// (term, index) parameter, None is returned. 
+    #[inline]
+    pub fn drain<R>(&mut self, range: R) -> Drain<'_, Proposal>
+    where
+        R: std::ops::RangeBounds<usize>,
+    {
+        self.queue.drain(range)
+    }
+
+    /// Find proposal from the queue front according to the term and index.
+    /// If the proposal (term, ndex) of the queue front is greater than the
+    /// (term, index) parameter, None is returned.
     fn pop(&mut self, term: u64, index: u64) -> Option<Proposal> {
         self.queue.pop_front().and_then(|p| {
             // Comparing the term first then the index, because the term is
@@ -83,10 +92,10 @@ impl GroupProposalQueue {
         })
     }
 
-    /// Find proposal from the queue front according to the term and index. 
-    /// If the proposal (term, ndex) of the queue front is greater than the 
-    /// (term, index) parameter, None is returned. 
-    /// If term is less than the proposal's term, the stale response is returned 
+    /// Find proposal from the queue front according to the term and index.
+    /// If the proposal (term, ndex) of the queue front is greater than the
+    /// (term, index) parameter, None is returned.
+    /// If term is less than the proposal's term, the stale response is returned
     /// and if index is less than the proposal's index, unexpected is returned
     pub fn find_proposal(
         &mut self,

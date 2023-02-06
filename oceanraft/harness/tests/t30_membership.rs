@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use harness::fixture;
 use harness::fixture::FixtureCluster;
 use harness::fixture::MakeGroupPlan;
 
@@ -251,6 +252,101 @@ async fn test_joint_consensus() {
             cluster.tickers[i].tick().await;
         }
     }
+
+    match timeout_at(Instant::now() + Duration::from_millis(2000), done_rx).await {
+        Err(_) => panic!("timeouted for wait all membership change complte"),
+        Ok(_) => {}
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_remove() {
+    enable_jager(false);
+
+    let task_group = TaskGroup::new();
+    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    cluster.start();
+
+    let group_id = 1;
+    let node_id = 1;
+    let plan = MakeGroupPlan {
+        group_id,
+        first_node_id: 1,
+        replica_nums: 5,
+    };
+    let _ = cluster.make_group(&plan).await.unwrap();
+
+  
+    // triger group to leader election.
+    cluster.campaign_group(node_id, plan.group_id).await;
+    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
+        .await
+        .unwrap();
+
+
+      // Let's submit some commands
+    //   let node = cluster.nodes[0].clone();
+    //   tokio::spawn(async move {
+    //       let rx = FixtureCluster::write_command(&node, plan.group_id, "data".as_bytes().to_vec());
+    //       let _ = rx.await.unwrap();
+    //   });
+  
+    // let res = FixtureCluster::wait_for_command_apply(&mut cluster, node_id, Duration::from_millis(100)).await;
+    // println!("res = {:?}", res);
+
+    let (done_tx, done_rx) = oneshot::channel();
+    let node = cluster.nodes[0].clone();
+    // remove 4, 5 nodes
+    tokio::spawn(async move {
+        let mut changes = vec![];
+        for i in 3..5 {
+            let mut change = SingleMembershipChange::default();
+            change.set_change_type(ConfChangeType::RemoveNode);
+            change.node_id = (i + 1) as u64;
+            change.replica_id = (i + 1) as u64;
+            changes.push(change);
+        }
+        let req = MembershipChangeRequest {
+            group_id,
+            changes,
+            replicas: vec![],
+        };
+
+        println!("start membership change request = {:?}", req);
+        node.membership_change(req.clone()).await.unwrap();
+        println!("membership change request done, request = {:?}", req);
+        done_tx.send(()).unwrap();
+    });
+
+    let check_fn = |event: &ApplyMembershipChangeEvent| {
+        let mut cc = ConfChangeV2::default();
+        cc.merge_from_bytes(&event.entry.data).unwrap();
+        let changes = cc
+            .changes
+            .iter()
+            .map(|change| (change.node_id, change.get_change_type()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            changes,
+            vec![
+                (4, ConfChangeType::RemoveNode),
+                (5, ConfChangeType::RemoveNode),
+            ]
+        );
+    };
+
+    check_cc(&mut cluster, 1, 1, Duration::from_millis(100), check_fn).await;
+    check_cc(&mut cluster, 2, 2, Duration::from_millis(100), check_fn).await;
+    check_cc(&mut cluster, 3, 3, Duration::from_millis(100), check_fn).await;
+
+    // TODO: check all replicas inner states
+    for i in 0..3 {
+        for _ in 0..10 {
+            cluster.tickers[i].tick().await;
+        }
+    }
+
+    // TODO: submmit command to bad node
 
     match timeout_at(Instant::now() + Duration::from_millis(2000), done_rx).await {
         Err(_) => panic!("timeouted for wait all membership change complte"),

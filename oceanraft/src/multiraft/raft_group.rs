@@ -1,5 +1,7 @@
+use std::collections::vec_deque::Drain;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::ops::RangeBounds;
 
 use futures::future::OptionFuture;
 use prost::Message;
@@ -213,10 +215,9 @@ where
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
                 multi_groups_apply,
-            ).await;
+            )
+            .await;
         }
-
-      
 
         // make write task if need to write disk.
         multi_groups_write.insert(
@@ -229,7 +230,6 @@ where
         );
     }
 
-   
     #[tracing::instrument(
         level = Level::TRACE,
         name = "RaftGroup:handle_committed_entries", 
@@ -525,7 +525,8 @@ where
                 replica_id,
                 light_ready.take_committed_entries(),
                 multi_groups_apply,
-            ).await;
+            )
+            .await;
         }
         // FIXME: always advance apply
         // TODO: move to upper layer
@@ -546,7 +547,7 @@ where
         }
 
         if !self.is_leader() {
-            return Err(Error::Proposal(ProposalError::NotLeader{
+            return Err(Error::Proposal(ProposalError::NotLeader {
                 group_id: self.group_id,
                 replica_id: self.replica_id,
             }));
@@ -670,6 +671,33 @@ where
         // FIXME: should return error ResponseCb
         self.proposals.push(proposal).unwrap();
         None
+    }
+
+    /// Remove pending proposals.
+    pub(crate) fn remove_pending_proposals(&mut self) {
+        let proposals = self.proposals.drain(..);
+        for proposal in proposals.into_iter() {
+            let err = Err(Error::Proposal(super::ProposalError::GroupRemoved(
+                self.group_id,
+                self.replica_id,
+            )));
+            // TODO: move to event queue
+            proposal.tx.map(|tx| tx.send(err));
+        }
+    }
+
+    /// Remove the node in the group where the replica is located in the tracing nodes.
+    /// return `false` if the nodes traced cannot find the given `node_id`, `true` otherwise.
+    pub(crate) fn remove_track_node(&mut self, node_id: u64) -> bool {
+        let len = self.node_ids.len();
+        self.node_ids
+            .iter()
+            .position(|id| node_id == *id)
+            .map_or(false, |idx| {
+                self.node_ids.swap(idx, len - 1);
+                self.node_ids.truncate(len - 1);
+                true
+            })
     }
 }
 

@@ -50,8 +50,14 @@ impl RaftMessageDispatch for RaftMessageDispatchImpl {
                 return Err(Error::Stop);
             }
             let (tx, rx) = oneshot::channel();
-            self.tx.send((msg, tx)).await.unwrap();
-            rx.await.unwrap()
+            self.tx.send((msg, tx)).await.unwrap(); // FIXME: handle error
+            match rx.await {
+                Err(_err) => {
+                    // FIXME: handle error
+                    Ok(RaftMessageResponse {  })
+                },
+                Ok(res) => res,
+            }
         }
     }
 }

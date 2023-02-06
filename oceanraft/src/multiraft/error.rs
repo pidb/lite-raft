@@ -74,6 +74,9 @@ pub enum ProposalError {
     #[error("stale at term = {0}")]
     Stale(u64),
 
+    #[error("group = {0}, replcia = {1} removed")]
+    GroupRemoved(u64, u64),
+
     #[error("{0}")]
     Other(#[from] Box<dyn std::error::Error + Sync + Send>),
 }

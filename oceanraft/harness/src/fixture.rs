@@ -147,7 +147,7 @@ impl FixtureCluster {
     /// of nodes to `FixtureCluster` nodes.
     pub async fn make_group(
         &mut self,
-        plan: &mut MakeGroupPlan,
+        plan: &MakeGroupPlan,
     ) -> Result<MakeGroupPlanStatus, Error> {
         assert!(
             plan.first_node_id != 0 && plan.first_node_id - 1 < self.nodes.len() as u64,
@@ -261,21 +261,6 @@ impl FixtureCluster {
             .unwrap()
     }
 
-    /// Write data to raft. return a onshot::Receiver to recv apply result.
-    pub fn write_command(
-        &mut self,
-        group_id: u64,
-        index: usize,
-        data: Vec<u8>,
-    ) -> oneshot::Receiver<Result<(), Error>> {
-        let request = AppWriteRequest {
-            group_id,
-            term: 0,
-            context: vec![],
-            data,
-        };
-        self.nodes[index].async_write(request)
-    }
 
     /// Campaigns the consensus group by the given `node_id` and `group_id`.
     ///
@@ -339,6 +324,50 @@ impl FixtureCluster {
         };
         match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
             Err(_) => Err(format!("wait for apply change event timeouted")),
+            Ok(res) => res,
+        }
+    }
+
+    /// Write data to raft. return a onshot::Receiver to recv apply result.
+    pub fn write_command(
+        node: &FixtureMultiRaft,
+        group_id: u64,
+        data: Vec<u8>,
+    ) -> oneshot::Receiver<Result<(), Error>> {
+        let request = AppWriteRequest {
+            group_id,
+            term: 0,
+            context: vec![],
+            data,
+        };
+        node.async_write(request)
+    }
+
+
+    // Wait normal apply.
+    pub async fn wait_for_command_apply(
+        cluster: &mut FixtureCluster,
+        node_id: u64,
+        timeout: Duration,
+    ) -> Result<ApplyNormalEvent, String> {
+        let rx = cluster.mut_event_rx(node_id);
+        let wait_loop_fut = async {
+            loop {
+                let events = match rx.recv().await {
+                    None => return Err(String::from("the event sender dropped")),
+                    Some(evs) => evs,
+                };
+
+                for event in events {
+                    match event {
+                        Event::ApplyNormal(event) => return Ok(event),
+                        _ => {}
+                    }
+                }
+            }
+        };
+        match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+            Err(_) => Err(format!("wait for apply normal event timeouted")),
             Ok(res) => res,
         }
     }
@@ -431,3 +460,5 @@ pub async fn wait_for_membership_change_apply<P, F>(
         Ok(_) => {}
     };
 }
+
+

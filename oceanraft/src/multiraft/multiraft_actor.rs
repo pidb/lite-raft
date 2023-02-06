@@ -31,7 +31,9 @@ use tokio::time::Instant;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::ConfChangeSingle;
 use raft_proto::prelude::ConfChangeType;
+use raft_proto::prelude::ConfChangeV2;
 use raft_proto::prelude::Entry;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::Message;
@@ -39,6 +41,7 @@ use raft_proto::prelude::MessageType;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
 use raft_proto::prelude::ReplicaDesc;
+use raft_proto::prelude::SingleMembershipChange;
 
 use tokio::time::interval_at;
 use tracing::debug;
@@ -631,12 +634,12 @@ where
 
                 let mut step_msg = raft::prelude::Message::default();
                 step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                group
-                    .raft_group
-                    .raft
-                    .prs()
-                    .iter()
-                    .for_each(|(id, _)| println!("prs = {}", *id));
+                // group
+                //     .raft_group
+                //     .raft
+                //     .prs()
+                //     .iter()
+                //     .for_each(|(id, _)| println!("prs = {}", *id));
                 // let (_, pr) = group
                 //     .raft_group
                 //     .raft
@@ -652,6 +655,7 @@ where
                     "node {}: group.raft_group.raft.raft_log.committed = {}",
                     self.node_id, group.raft_group.raft.raft_log.committed
                 );
+                step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
                 step_msg.commit = group.raft_group.raft.raft_log.committed;
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
@@ -1114,87 +1118,130 @@ where
         match callback_event {
             CallbackEvent::None => return,
             CallbackEvent::MembershipChange(view, response_tx) => {
-                self.apply_membership_change(view, response_tx).await
+                let res = self.apply_membership_change_view(view).await;
+                response_tx.send(res).unwrap();
             }
         }
     }
 
-    async fn apply_membership_change(
+    async fn apply_membership_change_view(
         &mut self,
         view: MembershipChangeView,
-        response_tx: oneshot::Sender<Result<(), Error>>,
-    ) {
+    ) -> Result<(), Error> {
         assert_eq!(
             view.change_request.changes.len(),
             view.conf_change.changes.len()
         );
 
         let group_id = view.change_request.group_id;
-        if let Some(group) = self.groups.get_mut(&group_id) {
-            // write storage
-            for (i, conf_change) in view.conf_change.changes.iter().enumerate() {
-                match conf_change.change_type() {
-                    ConfChangeType::AddNode => {
-                        let single_change_req = &view.change_request.changes[i];
 
-                        // TODO: this call need transfer to user call, and if user call return errored,
-                        // the membership change should failed and user need to retry.
-                        // we need a channel to provider user notify actor it need call these code.
-                        // and we recv the notify can executing these code, if executed failed, we
-                        // response to user and membership change is failed.
-                        let replica_desc = ReplicaDesc {
-                            node_id: single_change_req.node_id,
-                            replica_id: single_change_req.replica_id,
-                        };
-
-                        println!("add node = {}", single_change_req.node_id);
-                        self.node_manager
-                            .add_node(single_change_req.node_id, group_id);
-                        if let Err(err) = self
-                            .replica_cache
-                            .cache_replica_desc(group_id, replica_desc, self.sync_replica_cache)
-                            .await
-                        {
-                            response_tx.send(Err(err)).unwrap();
-                            return;
-                        }
-                    }
-                    ConfChangeType::RemoveNode => unimplemented!(),
-                    ConfChangeType::AddLearnerNode => unimplemented!(),
-                }
-            }
-
-            match group.raft_group.apply_conf_change(&view.conf_change) {
-                Ok(cc) => {
-                    trace!("apply conf change ok");
-
-                    let gs = match self.storage.group_storage(group_id, group.replica_id).await {
-                        Ok(gs) => gs,
-                        Err(err) => {
-                            panic!(
-                                "node({}) group({}) ready but got group storage error {}",
-                                self.node_id, group_id, err
-                            );
-                        }
-                    };
-                    gs.set_conf_state(cc);
-
-                    response_tx.send(Ok(())).unwrap();
-                }
-                Err(err) => {
-                    panic!("err = {:?}", err);
-                    response_tx.send(Err(Error::Raft(err))).unwrap();
-                }
-            }
-            return;
-        }
-
-        response_tx
-            .send(Err(Error::RaftGroup(RaftGroupError::NotExist(
+        let group = self.groups.get_mut(&group_id).map_or(
+            Err(Error::RaftGroup(RaftGroupError::NotExist(
                 self.node_id,
                 group_id,
-            ))))
-            .unwrap()
+            ))),
+            |group| Ok(group),
+        )?;
+
+        for (conf_change, change_request) in view
+            .conf_change
+            .changes
+            .iter()
+            .zip(view.change_request.changes.iter())
+        {
+            match conf_change.change_type() {
+                ConfChangeType::AddNode => {
+                    MultiRaftActorRuntime::<T, RS, MRS>::membership_add(
+                        self.node_id,
+                        group_id,
+                        change_request,
+                        &mut self.node_manager,
+                        &mut self.replica_cache,
+                    )
+                    .await?
+                }
+                ConfChangeType::RemoveNode => {
+                    MultiRaftActorRuntime::<T, RS, MRS>::membership_remove(
+                        self.node_id,
+                        group,
+                        change_request,
+                        &mut self.node_manager,
+                        &mut self.replica_cache,
+                    )
+                    .await?
+                }
+                ConfChangeType::AddLearnerNode => unimplemented!(),
+            }
+        }
+
+        // apply to raft
+        let conf_state = group
+            .raft_group
+            .apply_conf_change(&view.conf_change)
+            .map_err(|raft_err| Error::Raft(raft_err))?;
+
+        let gs = &self
+            .storage
+            .group_storage(group_id, group.replica_id)
+            .await?;
+        gs.set_conf_state(conf_state);
+
+        return Ok(());
+    }
+
+    async fn membership_add(
+        node_id: u64,
+        group_id: u64,
+        change: &SingleMembershipChange,
+        node_manager: &mut NodeManager,
+        replica_cache: &mut ReplicaCache<RS, MRS>,
+    ) -> Result<(), Error> {
+        let (node_id, replica_id) = (change.node_id, change.replica_id);
+        node_manager.add_group(node_id, group_id);
+
+        // TODO: this call need transfer to user call, and if user call return errored,
+        // the membership change should failed and user need to retry.
+        // we need a channel to provider user notify actor it need call these code.
+        // and we recv the notify can executing these code, if executed failed, we
+        // response to user and membership change is failed.
+        let replica_desc = ReplicaDesc {
+            node_id,
+            replica_id,
+        };
+        if let Err(err) = replica_cache
+            .cache_replica_desc(group_id, replica_desc, true)
+            .await
+        {
+            warn!(
+                "node {}: the membership change request to add replica desc error: {} ",
+                node_id, err
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn membership_remove(
+        node_id: u64,
+        group: &mut RaftGroup<RS>,
+        change_request: &SingleMembershipChange,
+        node_manager: &mut NodeManager,
+        _replica_cache: &mut ReplicaCache<RS, MRS>,
+    ) -> Result<(), Error> {
+        let _ = group.remove_pending_proposals();
+        let _ = group.remove_track_node(change_request.node_id);
+        println!(
+            "node {}: remove group = {} tracked node = {}",
+            node_id, group.group_id, change_request.node_id
+        );
+        let _ = node_manager.remove_group(change_request.node_id, group.group_id);
+        println!(
+            "node {}: remove node = {} of group = {} on node manager",
+            node_id, change_request.node_id, group.group_id,
+        );
+
+        // TODO: remove replica desc cache
+        Ok(())
     }
 
     async fn handle_readys(&mut self) {
