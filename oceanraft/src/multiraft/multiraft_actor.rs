@@ -320,7 +320,12 @@ where
         // the callback responds to the client at the end of per main_loop.
         loop {
             let mut pending_response_callbacks = vec![];
-            self.send_pending_events().await;
+            spawn_handle_response_events(
+                self.node_id,
+                &self.event_tx,
+                std::mem::take(&mut self.pending_events),
+            );
+            // self.send_pending_events().await;
             // 1. if `on_groups_ready` is executed, `activity_groups` is empty until loop,
             //    and if the events treats the contained group as active, the group inserted
             //    into `activity_group`.
@@ -426,7 +431,7 @@ where
                 // TODO: shirk_to_fit
             }
 
-            handle_response_callbacks(pending_response_callbacks);
+            spawn_handle_response_callbacks(pending_response_callbacks);
         }
     }
 
@@ -1050,38 +1055,6 @@ where
         Ok(())
     }
 
-    async fn send_pending_events(&mut self) {
-        if !self.pending_events.is_empty() {
-            // println!("send pending events = {:?}", self.pending_events);
-            // updating all valid LederElections is required because the lastest commited_term
-            // of the follower cannot be updated until after the leader committed.
-            let pending_events = std::mem::take(&mut self.pending_events);
-            // TODO: move to leader committed event
-            //     .into_iter()
-            //     .filter_map(|mut pending_event| {
-            //         match pending_event {
-            //             Event::LederElection(ref mut leader_elect) => {
-            //                 if let Some(group) = self.groups.get(&leader_elect.group_id) {
-            //                     if leader_elect.committed_term != group.committed_term
-            //                         && group.committed_term != 0
-            //                     {
-            //                         leader_elect.committed_term = group.committed_term;
-            //                     }
-            //                     Some(pending_event)
-            //                 } else {
-            //                     // group is removed, but event incoming, so ignore it.
-            //                     None
-            //                 }
-            //             }
-            //             _ => Some(pending_event),
-            //         }
-            //     })
-            //     .collect::<Vec<_>>();
-
-            self.event_tx.send(pending_events).await; // FIXME: handle error
-        }
-    }
-
     #[tracing::instrument(
         level = Level::TRACE,
         name = "MultiRaftActorRuntime::handle_apply_response",
@@ -1101,7 +1074,7 @@ where
             group.state.apply_state = apply_result.apply_state;
             info!(
                 "node {}: group = {} apply state change = {:?}",
-                self.node_id,group_id, group.state.apply_state
+                self.node_id, group_id, group.state.apply_state
             );
             group.raft_group.advance_apply();
         }
@@ -1392,7 +1365,7 @@ where
     }
 }
 
-fn handle_response_callbacks(mut cbs: Vec<ResponseCb>) {
+fn spawn_handle_response_callbacks(mut cbs: Vec<ResponseCb>) {
     let drainner = cbs.drain(..).collect::<Vec<_>>();
     tokio::spawn(async move {
         drainner.into_iter().for_each(|cb| {
@@ -1406,4 +1379,17 @@ fn handle_response_callbacks(mut cbs: Vec<ResponseCb>) {
     //         error!("{}", err)
     //     }
     // });
+}
+
+fn spawn_handle_response_events(node_id: u64, tx: &Sender<Vec<Event>>, events: Vec<Event>) {
+    let tx = tx.clone();
+    // TODO: add timeout
+    let _ = tokio::spawn(async move {
+        if let Err(_) = tx.send(events).await {
+            error!(
+                "node {}: send pending events error, the event receiver dropped",
+                node_id
+            );
+        }
+    });
 }

@@ -132,13 +132,15 @@ where
 {
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         let (from_node, to_node) = (msg.from_node, msg.to_node);
-
-        // info!("{} -> {}", from_node, to_node);
+        let (from_rep, to_rep) = (msg.msg.as_ref().unwrap().from, msg.msg.as_ref().unwrap().to);
         debug!(
-            "node {}: send {:?} to {}",
+            "node {}: group = {}, send {:?} to {} and forward replica {} -> {}",
             from_node,
+            msg.group_id,
             msg.get_msg().msg_type(),
-            to_node
+            to_node,
+            from_rep,
+            to_rep,
         );
         let servers = self.servers.clone();
 

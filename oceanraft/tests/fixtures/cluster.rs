@@ -98,7 +98,7 @@ impl FixtureCluster {
                 heartbeat_tick: 1,
                 tick_interval: 3_600_000, // hour ms
                 batch_apply: false,
-                batch_size: 0,
+                batch_size: 0, 
             };
 
             let (event_tx, event_rx) = channel(1);
