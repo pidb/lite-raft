@@ -296,10 +296,9 @@ where
         fields(node_id=self.node_id)
     )]
     async fn main_loop(mut self, mut stopper: Stopper, ticker: Option<Box<dyn Ticker>>) {
-        info!("node {}: start main_loop", self.node_id);
+        info!("node {}: start multiraft main_loop", self.node_id);
         // Each time ticker expires, the ticks increments,
         // when ticks >= heartbeat_tick triggers the merged heartbeat.
-        // tokio::time::Interval::interval_at(std::time::Instant::now() + self.tick_interval, self.tick_interval)
         let mut ticker: Box<dyn Ticker> = ticker.map_or(
             Box::new(interval_at(
                 tokio::time::Instant::now() + self.tick_interval,
@@ -309,7 +308,7 @@ where
         );
 
         let mut ticks = 0;
-      
+
         // let mut ready_ticker = tokio::time::interval_at(
         //     Instant::now() + Duration::from_millis(1),
         //     Duration::from_millis(1),
@@ -910,8 +909,8 @@ where
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::handle_admin_request",
-        level = Level::INFO,
-        skip(self, tx)
+        level = Level::TRACE,
+        skip_all,
     )]
     async fn handle_admin_request(
         &mut self,
@@ -931,8 +930,8 @@ where
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::raft_group_management",
-        level = Level::INFO,
-        skip(self)
+        level = Level::TRACE,
+        skip_all
     )]
     async fn handle_raft_group_management(
         &mut self,
@@ -950,7 +949,7 @@ where
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::create_raft_group", 
-        level = Level::INFO,
+        level = Level::TRACE,
         skip(self))
     ]
     async fn create_raft_group(
@@ -999,8 +998,8 @@ where
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
             .map_err(|err| Error::Raft(err))?;
 
-        println!(
-            "node {}: create raft group_id = {}, replica_id = {}",
+        info!(
+            "node {}: raft group_id = {}, replica_id = {} created",
             self.node_id, group_id, replica_id
         );
         let mut group = RaftGroup {
@@ -1053,7 +1052,7 @@ where
 
     async fn send_pending_events(&mut self) {
         if !self.pending_events.is_empty() {
-            println!("send pending events = {:?}", self.pending_events);
+            // println!("send pending events = {:?}", self.pending_events);
             // updating all valid LederElections is required because the lastest commited_term
             // of the follower cannot be updated until after the leader committed.
             let pending_events = std::mem::take(&mut self.pending_events);
@@ -1100,9 +1099,9 @@ where
 
             // set apply state
             group.state.apply_state = apply_result.apply_state;
-            println!(
-                "node {}: apply state change = {:?}, group = {}",
-                self.node_id, group.state.apply_state, group_id
+            info!(
+                "node {}: group = {} apply state change = {:?}",
+                self.node_id,group_id, group.state.apply_state
             );
             group.raft_group.advance_apply();
         }

@@ -28,6 +28,7 @@ use raft_proto::prelude::Snapshot;
 
 use tracing::debug;
 use tracing::error;
+use tracing::info;
 use tracing::trace;
 use tracing::warn;
 use tracing::Level;
@@ -133,6 +134,7 @@ where
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
         pending_events: &mut Vec<Event>,
     ) {
+        debug!("node {}: group = {} is now ready for processing", node_id, self.group_id);
         let group_id = self.group_id;
         let mut rd = self.raft_group.ready();
 
@@ -202,7 +204,7 @@ where
         }
 
         if let Some(ss) = rd.ss() {
-            self.handle_soft_state_change(ss, replica_cache, pending_events)
+            self.handle_soft_state_change(node_id, ss, replica_cache, pending_events)
                 .await;
         }
 
@@ -243,8 +245,8 @@ where
         entries: Vec<Entry>,
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
     ) {
-        println!(
-            "node {}, committed entries [{}, {}], group = {}, replica = {}",
+        debug!(
+            "node {}: create apply entries [{}, {}], group = {}, replica = {}",
             node_id,
             entries[0].index,
             entries[entries.len() - 1].index,
@@ -334,14 +336,14 @@ where
     // Dispatch soft state changed related events.
     async fn handle_soft_state_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
+        node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         pending_events: &mut Vec<Event>,
     ) {
-        // if leader change
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
             return self
-                .handle_leader_change(ss, replica_cache, pending_events)
+                .handle_leader_change(node_id, ss, replica_cache, pending_events)
                 .await;
         }
     }
@@ -354,6 +356,7 @@ where
     )]
     async fn handle_leader_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
+        node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         pending_events: &mut Vec<Event>,
@@ -391,10 +394,9 @@ where
             }
         };
 
-        trace!(
-            "group = {}, replica = {} becomes leader",
-            self.group_id,
-            ss.leader_id
+        info!(
+            "node {}: group = {}, replica = {} became leader",
+            node_id, self.group_id, ss.leader_id
         );
         let replica_id = replica_desc.replica_id;
         self.leader = replica_desc; // always set because node_id maybe NO_NODE.
@@ -402,7 +404,6 @@ where
             group_id: self.group_id,
             leader_id: ss.leader_id,
             replica_id,
-            // committed_term: self.committed_term,
         }));
     }
 
@@ -530,11 +531,6 @@ where
         }
         // FIXME: always advance apply
         // TODO: move to upper layer
-        tracing::info!(
-            "node {}: committed = {}",
-            node_id,
-            self.raft_group.raft.raft_log.committed
-        );
         // self.raft_group.advance_apply();
     }
 

@@ -116,3 +116,38 @@ async fn test_bad_group() {
         }
     }
 }
+
+#[async_entry::test(flavor = "multi_thread", init = "init_default_ut_tracing()", tracing_span = "debug")]
+async fn test_write() {
+    let task_group = TaskGroup::new();
+
+    let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
+    cluster.start();
+
+    let mut plan = MakeGroupPlan {
+        group_id: 1,
+        first_node_id: 1,
+        replica_nums: 3,
+    };
+    let _ = cluster.make_group(&mut plan).await.unwrap();
+
+    cluster.campaign_group(1, plan.group_id).await;
+    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, 1).await.unwrap();
+
+    for i in 1..3 {
+        let node_id = i + 1;
+        let data = "data".as_bytes().to_vec();
+        let res = write_command(&mut cluster, plan.group_id, node_id, data)
+            .await
+            .unwrap();
+        let expected_err = Error::Proposal(ProposalError::NotLeader {
+            group_id: plan.group_id,
+            replica_id: i + 1,
+        });
+        println!("{:?}", res);
+        match res {
+            Ok(_) => panic!("expected {:?}, got {:?}", expected_err, res),
+            Err(err) => assert_eq!(expected_err, err),
+        }
+    } 
+}

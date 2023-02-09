@@ -419,11 +419,14 @@ impl ApplyDelegate {
             // When the new leader online, a no-op log will be send and commit.
             // we will skip this log for the application and set index and term after
             // apply.
-            println!("node {}: skip no-op index = {}, term = {}", self.node_id, entry_index, entry_term);
+            info!(
+                "node {}: group = {} skip no-op entry index = {}, term = {}",
+                self.node_id, self.group_id, entry_index, entry_term
+            );
             if !self.pending_proposals.is_empty() {
-                info!(
-                    "skip no-op log index = {}, term = {}, remove stale proposals = {:?}",
-                    entry_index, entry_term, self.pending_proposals
+                warn!(
+                    "node {}: group = {} remove stale proposals because there was a leadership change at term = {}",
+                    self.node_id,  self.group_id, entry_term
                 );
                 self.response_stale_proposals(entry_index, entry_term);
             }

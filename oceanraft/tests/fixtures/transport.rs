@@ -2,25 +2,22 @@ use std::collections::hash_map::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use oceanraft::util::Stopper;
-use oceanraft::util::TaskGroup;
-use tracing::info;
-use tracing::warn;
-
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::oneshot;
-use tokio::sync::watch;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
-
 use oceanraft::multiraft::transport::RaftMessageDispatch;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::TransportError;
 use oceanraft::prelude::RaftMessage;
 use oceanraft::prelude::RaftMessageResponse;
+use oceanraft::util::TaskGroup;
+use tokio::sync::mpsc::channel;
+use tokio::sync::mpsc::Receiver;
+use tokio::sync::mpsc::Sender;
+use tokio::sync::oneshot;
+use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
+use tracing::debug;
+use tracing::info;
+use tracing::warn;
 
 struct LocalServer<M: RaftMessageDispatch> {
     tx: Sender<(
@@ -47,12 +44,12 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
         let addr = addr.to_string().clone();
         let mut stopper = task_group.stopper();
         let main_loop = async move {
-            info!("the node ({}) of server listen at {}", node_id, addr);
+            info!("node {}: start server listen at {}", node_id, addr);
             loop {
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
                         let res = dispatcher.dispatch(msg).await;
-                        tx.send(res).unwrap();
+                        tx.send(res).unwrap(); // FIXME: handle error
                     },
                     _ = &mut stopper => {
 
@@ -133,11 +130,16 @@ impl<RD> Transport for LocalTransport<RD>
 where
     RD: RaftMessageDispatch,
 {
-    // #[tracing::instrument(name = "LocalTransport::send", skip(self))]
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         let (from_node, to_node) = (msg.from_node, msg.to_node);
 
         // info!("{} -> {}", from_node, to_node);
+        debug!(
+            "node {}: send {:?} to {}",
+            from_node,
+            msg.get_msg().msg_type(),
+            to_node
+        );
         let servers = self.servers.clone();
 
         // get client
@@ -155,14 +157,20 @@ where
                 return Ok(RaftMessageResponse {});
             }
             let (tx, rx) = oneshot::channel();
-            local_server.tx.send((msg, tx)).await; // FIXME: handle error
+            if let Err(_) = local_server.tx.send((msg, tx)).await {
+                warn!(
+                    "node {}: send msg failed, the {} node server stopped",
+                    from_node, to_node
+                );
+                return Ok(RaftMessageResponse {}); // FIXME: should return error
+            }
 
             // and receive response
             if let Ok(res) = rx.await {
                 // info!("recv response ok()");
                 res
             } else {
-                warn!("recv response error()");
+                warn!("node {}: receive response failed, the {} node server stopped or discard the request", from_node, to_node);
                 Err(Error::Transport(TransportError::Server(format!(
                     "server ({}) stopped",
                     to_node
