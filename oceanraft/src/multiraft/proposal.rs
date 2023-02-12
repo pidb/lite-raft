@@ -35,14 +35,14 @@ pub struct Proposal {
 }
 
 #[derive(Debug)]
-pub struct GroupProposalQueue {
+pub struct ProposalQueue {
     pub replica_id: u64,
     pub queue: VecDeque<Proposal>,
 }
 
-impl GroupProposalQueue {
+impl ProposalQueue {
     pub fn new(replica_id: u64) -> Self {
-        GroupProposalQueue {
+        ProposalQueue {
             replica_id,
             queue: VecDeque::new(),
         }
@@ -137,7 +137,7 @@ impl GroupProposalQueue {
 
 #[derive(Default, Debug)]
 pub struct ProposalQueueManager {
-    groups: HashMap<u64, GroupProposalQueue>,
+    groups: HashMap<u64, ProposalQueue>,
 }
 
 impl ProposalQueueManager {
@@ -145,10 +145,10 @@ impl ProposalQueueManager {
         &'a mut self,
         group_id: u64,
         replica_id: u64,
-    ) -> &'a mut GroupProposalQueue {
+    ) -> &'a mut ProposalQueue {
         match self
             .groups
-            .insert(group_id, GroupProposalQueue::new(replica_id))
+            .insert(group_id, ProposalQueue::new(replica_id))
         {
             None => {}
             Some(_) => panic!(
@@ -160,7 +160,7 @@ impl ProposalQueueManager {
     }
 
     #[inline]
-    pub fn group_proposal_queue<'a>(&'a self, group_id: &u64) -> Option<&'a GroupProposalQueue> {
+    pub fn group_proposal_queue<'a>(&'a self, group_id: &u64) -> Option<&'a ProposalQueue> {
         self.groups.get(group_id)
     }
 
@@ -168,7 +168,7 @@ impl ProposalQueueManager {
     pub fn mut_group_proposal_queue<'a>(
         &'a mut self,
         group_id: &u64,
-    ) -> Option<&'a mut GroupProposalQueue> {
+    ) -> Option<&'a mut ProposalQueue> {
         self.groups.get_mut(group_id)
     }
 
@@ -176,7 +176,7 @@ impl ProposalQueueManager {
     pub fn remove_group_proposal_queue<'a>(
         &'a mut self,
         group_id: &u64,
-    ) -> Option<GroupProposalQueue> {
+    ) -> Option<ProposalQueue> {
         self.groups.remove(group_id)
     }
 }

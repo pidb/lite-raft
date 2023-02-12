@@ -20,10 +20,13 @@ use raft::SoftState;
 use raft::StateRole;
 use raft::Storage;
 
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::oneshot;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
@@ -74,7 +77,7 @@ use super::event::MembershipChangeView;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
-use super::proposal::GroupProposalQueue;
+use super::proposal::ProposalQueue;
 use super::raft_group::RaftGroup;
 use super::raft_group::RaftGroupState;
 use super::raft_group::RaftGroupWriteRequest;
@@ -133,6 +136,7 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     pub shard: ShardState,
+    // FIXME: queue should have one per-group.
     pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
     pub membership_change_tx: Sender<(MembershipChangeRequest, oneshot::Sender<Result<(), Error>>)>,
@@ -156,16 +160,17 @@ where
     pub fn new(cfg: &Config, transport: &T, storage: &MRS, event_tx: &Sender<Vec<Event>>) -> Self {
         let state = Arc::new(State::default());
 
-        let (write_propose_tx, write_propose_rx) = channel(1);
+        let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
         let (read_index_propose_tx, read_index_propose_rx) = channel(1);
         let (membership_change_tx, membership_change_rx) = channel(1);
         let (admin_tx, admin_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
-        let (raft_message_tx, raft_message_rx) = channel(1);
+        let (raft_message_tx, raft_message_rx) = channel(10);
 
         let (callback_tx, callback_rx) = channel(1);
-        let (apply_request_tx, apply_request_rx) = channel(1);
-        let (apply_response_tx, apply_response_rx) = channel(1);
+        
+        let (apply_request_tx, apply_request_rx) = unbounded_channel();
+        let (apply_response_tx, apply_response_rx) = unbounded_channel();
 
         let runtime = MultiRaftActorRuntime {
             cfg: cfg.clone(),
@@ -271,8 +276,8 @@ where
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
     callback_rx: Receiver<CallbackEvent>,
-    apply_request_tx: Sender<(Span, ApplyRequest)>,
-    apply_response_rx: Receiver<ApplyTaskResponse>,
+    apply_request_tx: UnboundedSender<(Span, ApplyRequest)>,
+    apply_response_rx: UnboundedReceiver<ApplyTaskResponse>,
     // write_actor_address: WriteAddress,
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
     // proposals: ProposalQueueManager,
@@ -1012,7 +1017,7 @@ where
             replica_id,
             raft_group,
             node_ids: Vec::new(),
-            proposals: GroupProposalQueue::new(replica_id),
+            proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
@@ -1070,7 +1075,7 @@ where
                 }
             };
 
-            // set apply state
+            // TODO: save apply state
             group.state.apply_state = apply_result.apply_state;
             info!(
                 "node {}: group = {} apply state change = {:?}",
@@ -1238,7 +1243,7 @@ where
             }
         }
         if !applys.is_empty() {
-            self.send_applys(applys).await;
+            self.send_applys(applys);
         }
 
         let gwrs = self.do_multi_groups_write(multi_groups_write).await;
@@ -1328,7 +1333,7 @@ where
         }
 
         if !multi_groups_apply.is_empty() {
-            self.send_applys(multi_groups_apply).await;
+            self.send_applys(multi_groups_apply);
         }
     }
     // #[tracing::instrument(
@@ -1337,18 +1342,11 @@ where
     //     skip_all
     // )]
 
-    #[tracing::instrument(
-        name = "MultiRaftActorRuntime::send_applys",
-        level = Level::TRACE,
-        skip_all,
-    )]
-    async fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
+     fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
         let span = tracing::span::Span::current();
         if let Err(_err) = self
             .apply_request_tx
             .send((span.clone(), ApplyRequest { groups: applys }))
-            // .instrument(tracing::trace_span!("multi raft group apply"))
-            .await
         {
             // FIXME
             warn!("apply actor stopped");

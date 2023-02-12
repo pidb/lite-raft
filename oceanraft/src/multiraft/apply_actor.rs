@@ -15,6 +15,8 @@ use raft_proto::prelude::EntryType;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::ConfChangeI;
 
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
@@ -24,6 +26,7 @@ use tokio::task::JoinHandle;
 use tracing::debug;
 use tracing::info;
 use tracing::trace;
+use tracing::error;
 use tracing::trace_span;
 use tracing::warn;
 use tracing::Instrument;
@@ -71,8 +74,8 @@ pub struct ApplyActor {
 impl ApplyActor {
     pub fn new(
         cfg: &Config,
-        request_rx: Receiver<(Span, ApplyRequest)>,
-        response_tx: Sender<ApplyTaskResponse>,
+        request_rx: UnboundedReceiver<(Span, ApplyRequest)>,
+        response_tx: UnboundedSender<ApplyTaskResponse>,
         callback_tx: Sender<CallbackEvent>,
         event_tx: &Sender<Vec<Event>>,
     ) -> Self {
@@ -173,8 +176,8 @@ pub struct ApplyActorRuntime {
     node_id: u64,
     cfg: Config,
     state: Arc<State>,
-    rx: Receiver<(tracing::span::Span, ApplyRequest)>,
-    tx: Sender<ApplyTaskResponse>,
+    rx: UnboundedReceiver<(tracing::span::Span, ApplyRequest)>,
+    tx: UnboundedSender<ApplyTaskResponse>,
     event_tx: Sender<Vec<Event>>,
     callback_tx: Sender<CallbackEvent>,
     pending_applys: HashMap<u64, Apply>,
@@ -261,7 +264,9 @@ impl ApplyActorRuntime {
 
         let task_response = ApplyTaskResponse { apply_results };
 
-        self.tx.send(task_response).await.unwrap();
+        if let Err(err) = self.tx.send(task_response) {
+            error!("node {}:send apply response {:?} error, the receiver on multiraft actor dropped", self.node_id, err.0);
+        }
     }
 
     /// Return None if the can batched otherwise return Apply that can be applied.

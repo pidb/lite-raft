@@ -1,5 +1,4 @@
 #![feature(type_alias_impl_trait)]
-
 pub mod memstore;
 pub mod multiraft;
 pub mod util;

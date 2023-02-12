@@ -1,5 +1,6 @@
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
+use tokio::sync::mpsc::error::TrySendError;
 
 use futures::Future;
 
@@ -150,11 +151,12 @@ where
 
     pub fn async_write(&self, request: AppWriteRequest) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.write_propose_tx.try_send((request, tx)) {
-            panic!("MultiRaftActor stopped")
+        match self.actor.write_propose_tx.try_send((request, tx)) {
+            // FIXME: handle write queue full case
+            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"), 
+            Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
+            Ok(_) => rx,
         }
-
-        rx
     }
 
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {

@@ -99,6 +99,7 @@ impl FixtureCluster {
                 tick_interval: 3_600_000, // hour ms
                 batch_apply: false,
                 batch_size: 0, 
+                write_proposal_queue_size: 1000,
             };
 
             let (event_tx, event_rx) = channel(1);
@@ -329,8 +330,8 @@ impl FixtureCluster {
     }
 
     /// Write data to raft. return a onshot::Receiver to recv apply result.
-    pub fn write_command(
-        node: &FixtureMultiRaft,
+    pub fn write_command(&self,
+        node_id: u64,
         group_id: u64,
         data: Vec<u8>,
     ) -> oneshot::Receiver<Result<(), Error>> {
@@ -340,17 +341,15 @@ impl FixtureCluster {
             context: vec![],
             data,
         };
-        node.async_write(request)
+        self.nodes[to_index(node_id)].async_write(request)
     }
 
 
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        cluster: &mut FixtureCluster,
-        node_id: u64,
+        rx:  &mut Receiver<Vec<Event>>,
         timeout: Duration,
     ) -> Result<ApplyNormalEvent, String> {
-        let rx = cluster.mut_event_rx(node_id);
         let wait_loop_fut = async {
             loop {
                 let events = match rx.recv().await {

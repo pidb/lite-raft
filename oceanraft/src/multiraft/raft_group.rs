@@ -42,7 +42,7 @@ use super::multiraft::NO_NODE;
 use super::multiraft_actor::new_response_error_callback;
 use super::multiraft_actor::ResponseCb;
 use super::node::NodeManager;
-use super::proposal::GroupProposalQueue;
+use super::proposal::ProposalQueue;
 use super::proposal::Proposal;
 use super::proposal::ReadIndexProposal;
 use super::replica_cache::ReplicaCache;
@@ -83,7 +83,7 @@ pub struct RaftGroup<RS: Storage> {
     pub raft_group: RawNode<RS>,
     // track the nodes which members ofq the raft consensus group
     pub node_ids: Vec<u64>,
-    pub proposals: GroupProposalQueue,
+    pub proposals: ProposalQueue,
     pub leader: ReplicaDesc,
     pub committed_term: u64,
     pub state: RaftGroupState,
@@ -273,7 +273,11 @@ where
     fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
         let current_term = self.raft_group.raft.term;
         // TODO: min(persistent, committed)
-        let commit_index = self.raft_group.raft.raft_log.committed;
+        // let commit_index = self.raft_group.raft.raft_log.committed;
+        let commit_index = std::cmp::min(
+            self.raft_group.raft.raft_log.committed,
+            self.raft_group.raft.raft_log.persisted,
+        );
         let commit_term = gs.term(commit_index).unwrap();
         let mut proposals = VecDeque::new();
         if !self.proposals.is_empty() {

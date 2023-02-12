@@ -1,12 +1,82 @@
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::time::Duration;
+
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::ProposalError;
 use oceanraft::prelude::AppWriteRequest;
 use oceanraft::util::TaskGroup;
+use tokio::sync::mpsc::channel;
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
+
+#[derive(Default)]
+struct WriteCollection {
+    data: HashMap<u64, Vec<Vec<u8>>>,
+}
+
+impl WriteCollection {
+    fn new(group_size: usize) -> Self {
+        let mut writes = HashMap::new();
+        for g in 0..group_size {
+            writes.insert(g as u64 + 1, vec![]);
+        }
+
+        Self { data: writes }
+    }
+}
+
+impl Debug for WriteCollection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let _ = write!(f, "group_size = {}, [", self.data.len())?;
+        for (group_id, commands) in self.data.iter() {
+            let _ = write!(f, "{}: commands = {}, ", *group_id, commands.len())?;
+        }
+        write!(f, "]")
+    }
+}
+
+impl PartialEq for WriteCollection {
+    fn eq(&self, other: &Self) -> bool {
+        if self.data.len() != other.data.len() {
+            return false;
+        }
+
+        for (group_id, commands) in self.data.iter() {
+            if let Some(other_commands) = other.data.get(group_id) {
+                if commands.len() != other_commands.len() {
+                    return false;
+                }
+
+                for (c1, c2) in commands.iter().zip(other_commands) {
+                    if c1 != c2 {
+                        unsafe {
+                            println!(
+                                "commands not equal {:?} != {:?}",
+                                std::str::from_utf8_unchecked(c1),
+                                std::str::from_utf8_unchecked(c2)
+                            );
+                        }
+                        return false;
+                    }
+                }
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        !self.eq(other)
+    }
+}
+
 /// Write data to raft. return a onshot::Receiver to recv apply result.
 pub fn write_command(
     cluster: &mut FixtureCluster,
@@ -128,10 +198,12 @@ async fn test_basic_write() {
     let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
     cluster.start();
 
+    let group_size = 3;
+    let command_size_per_group = 100;
     // create multi groups
-    for group_id in 0..3 {
+    for group_id in 1..group_size + 1 {
         let plan = MakeGroupPlan {
-            group_id: group_id + 1,
+            group_id,
             first_node_id: 1,
             replica_nums: 3,
         };
@@ -142,20 +214,59 @@ async fn test_basic_write() {
             .unwrap();
     }
 
-    // for i in 1..3 {
-    //     let node_id = i + 1;
-    //     let data = "data".as_bytes().to_vec();
-    //     let res = write_command(&mut cluster, plan.group_id, node_id, data)
-    //         .await
-    //         .unwrap();
-    //     let expected_err = Error::Proposal(ProposalError::NotLeader {
-    //         group_id: plan.group_id,
-    //         replica_id: i + 1,
-    //     });
-    //     println!("{:?}", res);
-    //     match res {
-    //         Ok(_) => panic!("expected {:?}, got {:?}", expected_err, res),
-    //         Err(err) => assert_eq!(expected_err, err),
-    //     }
-    // }
+    // and then write commands to theses leader of groups
+    let mut recvs = vec![];
+    let mut writes = WriteCollection::new(3);
+    for group_id in 1..group_size + 1 {
+        for command_id in 1..command_size_per_group + 1 {
+            let data = format!("{}: data on group_id = {}", command_id, group_id)
+                .as_bytes()
+                .to_vec();
+
+            let rx = cluster.write_command(1, group_id, data.clone());
+            recvs.push(rx);
+            writes.data.get_mut(&group_id).unwrap().push(data);
+        }
+    }
+
+    // check all command apply
+    let (done_tx, mut done_rx) = channel(1);
+    tokio::spawn(async move {
+        for rx in recvs.iter_mut() {
+            // TODO: add response generic
+            let _ = rx.await;
+        }
+        done_tx.send(()).await.unwrap();
+    });
+
+    for _ in 0..1000 {
+        cluster.tickers[0].tick().await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+
+    let mut applys = WriteCollection::default();
+    for _ in 0..group_size {
+        for _ in 0..command_size_per_group {
+            let apply = FixtureCluster::wait_for_command_apply(
+                cluster.mut_event_rx(1),
+                Duration::from_millis(1000),
+            ).await
+            .unwrap();
+
+            match applys.data.get_mut(&apply.group_id) {
+                None => {
+                    applys.data.insert(apply.group_id, vec![apply.entry.data.clone()]);
+                },
+                Some(cmds) => cmds.push(apply.entry.data.clone()),
+            };
+            apply.tx.map(|tx| tx.send(Ok(())));
+        }
+    }
+
+    assert_eq!(writes, applys);
+
+    match timeout(Duration::from_millis(100), done_rx.recv()).await {
+        Err(_) => panic!("wait apply timeouted"),
+        Ok(_) => {}
+    }
 }
