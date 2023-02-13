@@ -1,0 +1,89 @@
+syntax = "proto3";
+package multiraft;
+
+import "eraftpb.proto";
+
+message ReplicaDesc {
+    uint64 node_id = 1;
+    uint64 replica_id = 2;
+    // uint64 store_id = 3;
+}
+
+message RaftGroupDesc {
+    uint64 group_id = 1;
+    repeated uint64 nodes = 2;
+    repeated ReplicaDesc replicas = 3;
+}
+
+// RaftGroupMessage wraps eraft.Message and includes the node information.
+// 1. `group_id` is the raft group identifier. it must define that 0 is invalid.
+// 2. `from_node` represents which node the message came from, so `msg.from` represents 
+//    which replica id came from the node.
+// 3. `to_node` represents the node to which the message is sent, so `msg.to` represents 
+//    the replica id sent to the node.
+// 4. `replica` contains the location information of the raft group replica. It can be empty. 
+//     Note: This field is used to configure new replicas to learn this information when the 
+//     raft group sends initialization messages to other nodes after a membership change.
+// 5. `msg` is eraft.Message.
+message RaftMessage {
+    uint64 group_id = 1;
+    uint64 from_node = 2;
+    uint64 to_node = 3;
+    repeated ReplicaDesc replicas = 4;
+    // ReplicaMetadata from_replica = 2;
+    // ReplicaMetadata to_replica = 3;
+    eraftpb.Message msg = 5;
+}
+
+// RaftMessageResponse is an empty message returned by raft RPCs. If a
+// response is needed it will be sent as a separate message.
+message RaftMessageResponse {
+}
+
+
+// enum RaftGroupManagementMessageType {
+//     MsgInitialGroup = 0;
+//     MsgCreateGroup = 1;
+//     MsgRemoveGoup = 2;
+// }
+
+// message RaftGroupManagementMessage {
+//     RaftGroupManagementMessageType msg_type = 1;
+//     uint64 group_id = 2;
+//     uint64 replica_id = 3;
+//     repeated ReplicaDesc replicas = 4;
+// }
+
+enum RaftGroupManagementType {
+    MsgCreateGroup = 0;
+    MsgRemoveGoup = 1;
+}
+
+message RaftGroupManagement {
+    uint64 group_id = 1;
+    uint64 replica_id = 2;
+    repeated ReplicaDesc replicas = 3;
+    RaftGroupManagementType msg_type = 4;
+}
+
+
+message SingleMembershipChange {
+    uint64 node_id = 1;
+    uint64 replica_id = 2;
+    eraftpb.ConfChangeType change_type = 3;
+}
+
+message MembershipChangeRequest {
+    uint64 group_id = 1;
+    repeated SingleMembershipChange changes = 2;
+    repeated ReplicaDesc replicas = 3;
+}
+
+enum AdminMessageType {
+    RaftGroup = 0;
+}
+
+message AdminMessage {
+    RaftGroupManagement raft_group = 1;
+    AdminMessageType msg_type = 2;
+}
