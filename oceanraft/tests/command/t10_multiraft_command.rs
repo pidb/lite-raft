@@ -239,28 +239,30 @@ async fn test_basic_write() {
         done_tx.send(()).await.unwrap();
     });
 
+    // ticks
     for _ in 0..1000 {
-        cluster.tickers[0].tick().await;
-        tokio::time::sleep(Duration::from_millis(1)).await;
+        cluster.tickers[0].non_blocking_tick();
+        // tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     let mut applys = WriteCollection::default();
-    for _ in 0..group_size {
-        for _ in 0..command_size_per_group {
-            let apply = FixtureCluster::wait_for_command_apply(
-                cluster.mut_event_rx(1),
-                Duration::from_millis(1000),
-            ).await
-            .unwrap();
+    let events = FixtureCluster::wait_for_command_apply(
+        cluster.mut_event_rx(1),
+        Duration::from_millis(3000),
+        (group_size * command_size_per_group) as usize ,
+    ).await.unwrap();
 
-            match applys.data.get_mut(&apply.group_id) {
-                None => {
-                    applys.data.insert(apply.group_id, vec![apply.entry.data.clone()]);
-                },
-                Some(cmds) => cmds.push(apply.entry.data.clone()),
-            };
-            apply.tx.map(|tx| tx.send(Ok(())));
-        }
+
+    for event in events {
+        match applys.data.get_mut(&event.group_id) {
+            None => {
+                applys
+                    .data
+                    .insert(event.group_id, vec![event.entry.data.clone()]);
+            }
+            Some(cmds) => cmds.push(event.entry.data.clone()),
+        };
+        event.tx.map(|tx| tx.send(Ok(())));
     }
 
     assert_eq!(writes, applys);

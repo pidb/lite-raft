@@ -5,9 +5,9 @@ use std::time::Duration;
 use futures::future::BoxFuture;
 use prost::Message;
 use raft_proto::prelude::Entry;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 #[allow(unused)]
@@ -34,13 +34,13 @@ impl Ticker for Interval {
 
 #[derive(Clone)]
 pub struct ManualTick {
-    tx: Sender<(oneshot::Sender<()>)>,
-    rx: Arc<Mutex<Receiver<oneshot::Sender<()>>>>,
+    tx: UnboundedSender<oneshot::Sender<()>>,
+    rx: Arc<Mutex<UnboundedReceiver<oneshot::Sender<()>>>>,
 }
 
 impl ManualTick {
     pub fn new() -> Self {
-        let (tx, rx) = channel(1);
+        let (tx, rx) = unbounded_channel();
         Self {
             tx,
             rx: Arc::new(Mutex::new(rx)),
@@ -49,7 +49,7 @@ impl ManualTick {
 
     pub async fn tick(&mut self) {
         let (tx, rx) = oneshot::channel();
-        self.tx.send(tx).await.unwrap();
+        self.tx.send(tx).unwrap();
         rx.await.unwrap();
     }
 
@@ -57,7 +57,7 @@ impl ManualTick {
         let tx = self.tx.clone();
         let _ = tokio::spawn(async move {
             let (res_tx, res_rx) = oneshot::channel();
-            tx.send(res_tx).await.unwrap();
+            tx.send(res_tx).unwrap();
             res_rx.await.unwrap();
         });
     }

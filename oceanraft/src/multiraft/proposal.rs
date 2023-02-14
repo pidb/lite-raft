@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 
 use tokio::sync::oneshot;
-use tracing::info;
+use tracing::debug;
 use uuid::Uuid;
 
 use super::error::Error;
@@ -105,7 +105,7 @@ impl ProposalQueue {
     ) -> Result<Option<Proposal>, Error> {
         while let Some(proposal) = self.pop(term, index) {
             if proposal.term == term {
-                info!("find proposal index {} = {}", proposal.index, index);
+                debug!("find proposal index {} = {}", proposal.index, index);
                 // term matched.
                 if proposal.index == index {
                     return Ok(Some(proposal));

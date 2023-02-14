@@ -276,7 +276,6 @@ impl ApplyActorRuntime {
                 self.pending_applys.insert(group_id, new_apply);
                 return Some(pending_apply);
             }
-
             return Some(new_apply);
         }
 
@@ -320,6 +319,7 @@ impl ApplyActorRuntime {
         }
 
         let mut delegate = ApplyDelegate {
+            event_tx: self.event_tx.clone(),
             node_id: self.cfg.node_id,
             group_id: apply.group_id,
             pending_proposals: apply.proposals,
@@ -327,10 +327,10 @@ impl ApplyActorRuntime {
             callback_event_tx: self.callback_tx.clone(),
         };
 
-        delegate.handle_committed_entries(apply.entries, apply_state);
-        if !delegate.staging_events.is_empty() {
-            ApplyActorRuntime::notify_apply(&self.event_tx, delegate.staging_events).await;
-        }
+        delegate.handle_committed_entries(apply.entries, apply_state).await;
+        // if !delegate.staging_events.is_empty() {
+        //     ApplyActorRuntime::notify_apply(&self.event_tx, delegate.staging_events).await;
+        // }
 
         let res = ApplyResult {
             apply_state: apply_state.clone(),
@@ -343,11 +343,7 @@ impl ApplyActorRuntime {
     //     name = "ApplyActorRuntime::notify_apply",
     //     skip_all
     // )]
-    async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
-        if let Err(err) = event_tx.send(events).await {
-            warn!("notify apply events {:?}, but receiver dropped", err.0);
-        }
-    }
+   
 
     #[tracing::instrument(
         level = Level::TRACE,
@@ -360,6 +356,7 @@ impl ApplyActorRuntime {
 pub struct ApplyDelegate {
     group_id: u64,
     node_id: u64,
+    event_tx: Sender<Vec<Event>>,
     callback_event_tx: Sender<CallbackEvent>,
     pending_proposals: VecDeque<Proposal>,
     staging_events: Vec<Event>,
@@ -400,7 +397,7 @@ impl ApplyDelegate {
     //     name = "ApplyActorRuntime::handle_committed_entries",
     //     skip_all
     // )]
-    fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
+    async fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
         for entry in ents.into_iter() {
             match entry.entry_type() {
                 EntryType::EntryNormal => self.handle_committed_normal(entry, state),
@@ -408,6 +405,13 @@ impl ApplyDelegate {
                     self.handle_committed_conf_change(entry, state)
                 }
             }
+        }
+        Self::notify_apply(&self.event_tx, std::mem::take(&mut self.staging_events)).await;   
+    }
+
+    async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
+        if let Err(err) = event_tx.send(events).await {
+            warn!("notify apply events {:?}, but receiver dropped", err.0);
         }
     }
 

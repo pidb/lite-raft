@@ -221,6 +221,7 @@ impl FixtureCluster {
             msg.replica_id = replica_id;
             msg.replicas = replicas.clone();
             admin_msg.raft_group = Some(msg);
+            self.tickers[place_node_index].non_blocking_tick();
             let _ = node.admin(admin_msg).await?;
 
             match self.groups.get_mut(&plan.group_id) {
@@ -349,20 +350,28 @@ impl FixtureCluster {
     pub async fn wait_for_command_apply(
         rx:  &mut Receiver<Vec<Event>>,
         timeout: Duration,
-    ) -> Result<ApplyNormalEvent, String> {
+        size: usize,
+    ) -> Result<Vec<ApplyNormalEvent>, String> {
         let wait_loop_fut = async {
+            let mut results = vec![];
             loop {
+                if results.len() == size {
+                    return Ok(results)
+                }
+
                 let events = match rx.recv().await {
                     None => return Err(String::from("the event sender dropped")),
                     Some(evs) => evs,
                 };
 
+                // check all events type should apply
                 for event in events {
                     match event {
-                        Event::ApplyNormal(event) => return Ok(event),
-                        _ => {}
+                        Event::ApplyNormal(event) => results.push(event),
+                        _ => {},
                     }
                 }
+
             }
         };
         match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
