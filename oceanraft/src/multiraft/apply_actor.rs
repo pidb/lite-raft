@@ -15,18 +15,18 @@ use raft_proto::prelude::EntryType;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::ConfChangeI;
 
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
 use tracing::debug;
+use tracing::error;
 use tracing::info;
 use tracing::trace;
-use tracing::error;
 use tracing::trace_span;
 use tracing::warn;
 use tracing::Instrument;
@@ -265,7 +265,10 @@ impl ApplyActorRuntime {
         let task_response = ApplyTaskResponse { apply_results };
 
         if let Err(err) = self.tx.send(task_response) {
-            error!("node {}:send apply response {:?} error, the receiver on multiraft actor dropped", self.node_id, err.0);
+            error!(
+                "node {}:send apply response {:?} error, the receiver on multiraft actor dropped",
+                self.node_id, err.0
+            );
         }
     }
 
@@ -327,7 +330,9 @@ impl ApplyActorRuntime {
             callback_event_tx: self.callback_tx.clone(),
         };
 
-        delegate.handle_committed_entries(apply.entries, apply_state).await;
+        delegate
+            .handle_committed_entries(apply.entries, apply_state)
+            .await;
         // if !delegate.staging_events.is_empty() {
         //     ApplyActorRuntime::notify_apply(&self.event_tx, delegate.staging_events).await;
         // }
@@ -343,7 +348,6 @@ impl ApplyActorRuntime {
     //     name = "ApplyActorRuntime::notify_apply",
     //     skip_all
     // )]
-   
 
     #[tracing::instrument(
         level = Level::TRACE,
@@ -386,7 +390,11 @@ impl ApplyDelegate {
                 }
             } else {
                 // notify_stale_command(region_id, peer_id, self.term, head);
-                p.tx.map(|tx| tx.send(Err(Error::Proposal(ProposalError::Stale(p.term)))));
+                p.tx.map(|tx| {
+                    tx.send(Err(Error::Proposal(ProposalError::Stale(
+                        p.term, 0, /*FIXME: with term */
+                    ))))
+                });
             }
         }
         return None;
@@ -397,7 +405,11 @@ impl ApplyDelegate {
     //     name = "ApplyActorRuntime::handle_committed_entries",
     //     skip_all
     // )]
-    async fn handle_committed_entries(&mut self, ents: Vec<Entry>, state: &mut RaftGroupApplyState) {
+    async fn handle_committed_entries(
+        &mut self,
+        ents: Vec<Entry>,
+        state: &mut RaftGroupApplyState,
+    ) {
         for entry in ents.into_iter() {
             match entry.entry_type() {
                 EntryType::EntryNormal => self.handle_committed_normal(entry, state),
@@ -406,7 +418,7 @@ impl ApplyDelegate {
                 }
             }
         }
-        Self::notify_apply(&self.event_tx, std::mem::take(&mut self.staging_events)).await;   
+        Self::notify_apply(&self.event_tx, std::mem::take(&mut self.staging_events)).await;
     }
 
     async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
@@ -536,7 +548,11 @@ impl ApplyDelegate {
     // )]
     fn response_stale_proposals(&mut self, index: u64, term: u64) {
         while let Some(p) = self.pop_normal(index, term) {
-            p.tx.map(|tx| tx.send(Err(Error::Proposal(ProposalError::Stale(p.term)))));
+            p.tx.map(|tx| {
+                tx.send(Err(Error::Proposal(ProposalError::Stale(
+                    p.term, 0, /*FIXME: with term */
+                ))))
+            });
         }
     }
 }

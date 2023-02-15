@@ -67,8 +67,11 @@ impl Ticker for ManualTick {
     fn recv(&mut self) -> BoxFuture<'_, std::time::Instant> {
         Box::pin(async {
             let mut rx = { self.rx.lock().await };
-            let res_tx = rx.recv().await.unwrap();
-            res_tx.send(()).unwrap();
+            rx.recv().await.map(|res_tx| {
+                if let Err(_) = res_tx.send(()) {
+                    // the receiver waiting for the tick response is dropped.
+                }
+            });
             std::time::Instant::now()
         })
     }

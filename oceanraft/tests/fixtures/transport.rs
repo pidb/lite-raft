@@ -16,6 +16,7 @@ use tokio::sync::oneshot;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 use tracing::debug;
+use tracing::error;
 use tracing::info;
 use tracing::warn;
 
@@ -67,6 +68,7 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
 pub struct LocalTransport<M: RaftMessageDispatch> {
     task_group: TaskGroup,
     servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
+    disconnected: Arc<RwLock<HashMap<u64, Vec<u64>>>>,
 }
 
 impl<M: RaftMessageDispatch> LocalTransport<M> {
@@ -74,6 +76,7 @@ impl<M: RaftMessageDispatch> LocalTransport<M> {
         Self {
             task_group: TaskGroup::new(),
             servers: Default::default(),
+            disconnected: Default::default(),
         }
     }
 }
@@ -114,6 +117,56 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
         Ok(())
     }
 
+    pub async fn is_disconnected(
+        disconnected: &Arc<RwLock<HashMap<u64, Vec<u64>>>>,
+        from: u64,
+        to: u64,
+    ) -> bool {
+        match disconnected.read().await.get(&from) {
+            Some(dis) => dis.contains(&to),
+            None => false,
+        }
+    }
+
+    pub async fn disconnect(&self, from: u64, to: u64) {
+        self.disconnect_inner(from, to).await;
+        self.disconnect_inner(to, from).await;
+    }
+
+    async fn disconnect_inner(&self, from: u64, to: u64) {
+        let mut wl = self.disconnected.write().await;
+        match wl.get_mut(&from) {
+            Some(dis) => {
+                if !dis.contains(&to) {
+                    debug!("server {} -> {} disconnected", from, to);
+                    dis.push(to);
+                }
+            }
+            None => {
+                debug!("server {} -> {} disconnected", from, to);
+                wl.insert(from, vec![to]);
+            }
+        };
+    }
+
+    pub async fn reconnect(&self, from: u64, to: u64) {
+        self.reconnect_inner(from, to).await;
+        self.reconnect_inner(to, from).await;
+    }
+
+    async fn reconnect_inner(&self, from: u64, to: u64) {
+        let mut wl = self.disconnected.write().await;
+        match wl.get_mut(&from) {
+            Some(dis) => {
+                if let Some(pos) = dis.iter().position(|node| *node == to) {
+                    debug!("server {} -> {} reconnected", from, to);
+                    dis.remove(pos);
+                }
+            }
+            None => {},
+        };
+    }
+
     #[tracing::instrument(name = "LocalTransport::stop_all", skip(self))]
     pub async fn stop_all(&self) -> Result<(), Error> {
         let mut wl = self.servers.write().await;
@@ -143,9 +196,22 @@ where
             to_rep,
         );
         let servers = self.servers.clone();
-
+        let disconnected = self.disconnected.clone();
         // get client
         let send_fn = async move {
+            if LocalTransport::<RD>::is_disconnected(&disconnected, from_node, to_node).await {
+                error!(
+                    "discard {} -> {} {:?}, because  disconnected",
+                    from_node,
+                    to_node,
+                    msg.get_msg().msg_type(),
+                );
+                return Err(Error::Transport(TransportError::Server(format!(
+                    "server {} disconnected",
+                    to_node
+                ))));
+            }
+
             // get server by to
             let rl = servers.read().await;
             if !rl.contains_key(&to_node) {
@@ -153,13 +219,14 @@ where
             }
 
             // send reqeust
-            let local_server = rl.get(&to_node).unwrap();
-            if local_server.stopped {
+            let to_server = rl.get(&to_node).unwrap();
+            if to_server.stopped {
                 // FIXME: should return some error
                 return Ok(RaftMessageResponse {});
             }
+
             let (tx, rx) = oneshot::channel();
-            if let Err(_) = local_server.tx.send((msg, tx)).await {
+            if let Err(_) = to_server.tx.send((msg, tx)).await {
                 warn!(
                     "node {}: send msg failed, the {} node server stopped",
                     from_node, to_node

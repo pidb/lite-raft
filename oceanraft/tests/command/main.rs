@@ -2,5 +2,6 @@
 #[path = "../fixtures/mod.rs"]
 mod fixtures;
 
-mod t10_multiraft_command;
-mod t20_stale_write;
+mod t10_bad_write;
+mod t20_basic_write;
+mod t30_stale_write;

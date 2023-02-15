@@ -300,7 +300,7 @@ where
                 {
                     Err(err) => {
                         // FIXME: don't panic
-                        panic!("find proposal error {}", err);
+                        error!("find proposal error {}", err);
                     }
                     Ok(proposal) => match proposal {
                         None => {
@@ -557,7 +557,7 @@ where
         }
 
         if request.term != 0 && self.term() > request.term {
-            return Err(Error::Proposal(ProposalError::Stale(request.term)));
+            return Err(Error::Proposal(ProposalError::Stale(request.term, self.term())));
         }
 
         Ok(())

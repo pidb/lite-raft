@@ -71,8 +71,8 @@ pub enum ProposalError {
     #[error("unexpected at index = {0}")]
     Unexpected(u64),
 
-    #[error("stale at term = {0}")]
-    Stale(u64),
+    #[error("the proposal is stale, proposal term = {0}, current term = {1}")]
+    Stale(u64, u64),
 
     #[error("group = {0}, replcia = {1} removed")]
     GroupRemoved(u64, u64),

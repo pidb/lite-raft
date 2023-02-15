@@ -548,7 +548,8 @@ where
             for (group_id, _) in from_node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        warn!(
+                        // FIXME: don't panic
+                        panic!(
                             "missing group {} at from_node {} fanout heartbeat",
                             *group_id, msg.from_node
                         );
@@ -646,10 +647,10 @@ where
                 step_msg.commit = group.raft_group.raft.raft_log.committed;
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
-                debug!(
-                    "fanouting {}.{} -> {}.{} msg  = {:?}",
-                    from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
-                );
+                // debug!(
+                //     "fanouting {}.{} -> {}.{} msg  = {:?}",
+                //     from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
+                // );
                 // group.raft_group.step(msg).unwrap();
                 // FIXME: t30_membership single_step
                 group.raft_group.step(step_msg).unwrap();
@@ -690,7 +691,8 @@ where
             for (group_id, _) in node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        warn!(
+                        // FIXME: don't panic
+                        panic!(
                             "missing group {} at from_node {} fanout heartbeat response",
                             *group_id, msg.from_node
                         );
@@ -749,7 +751,7 @@ where
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
                 msg.from = from_replica.replica_id;
                 msg.to = to_replica.replica_id;
-                debug!("step msg = {:?}", msg);
+                // debug!("step msg = {:?}", msg);
 
                 // group.raft_group.step(msg).unwrap();
                 // FIXME: t30_membership single_step
