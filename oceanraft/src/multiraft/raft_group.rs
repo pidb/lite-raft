@@ -42,8 +42,8 @@ use super::multiraft::NO_NODE;
 use super::multiraft_actor::new_response_error_callback;
 use super::multiraft_actor::ResponseCb;
 use super::node::NodeManager;
-use super::proposal::ProposalQueue;
 use super::proposal::Proposal;
+use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexProposal;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
@@ -87,36 +87,38 @@ pub struct RaftGroup<RS: Storage> {
     pub leader: ReplicaDesc,
     pub committed_term: u64,
     pub state: RaftGroupState,
-
-    pub batch_apply: bool,
-    pub batch_size: usize,
-    pub pending_apply: Option<Apply>,
 }
 
+//===----------------------------------------------------------------------===//
+// The raft group internal state
+//===----------------------------------------------------------------------===//
 impl<RS> RaftGroup<RS>
 where
     RS: Storage,
 {
     #[inline]
-    pub fn is_leader(&self) -> bool {
+    pub(crate) fn is_leader(&self) -> bool {
         self.raft_group.raft.state == StateRole::Leader
     }
 
     #[inline]
-    pub fn term(&self) -> u64 {
+    pub(crate) fn term(&self) -> u64 {
         self.raft_group.raft.term
     }
 
     #[inline]
-    pub fn committed_term(&self) -> u64 {
-        self.committed_term
-    }
-
-    #[inline]
-    pub fn last_index(&self) -> u64 {
+    pub(crate) fn last_index(&self) -> u64 {
         self.raft_group.raft.raft_log.last_index()
     }
+}
 
+//===----------------------------------------------------------------------===//
+// Handle raft group ready
+//===----------------------------------------------------------------------===//
+impl<RS> RaftGroup<RS>
+where
+    RS: Storage,
+{
     #[tracing::instrument(
         level = Level::TRACE,
         name = "RaftGroup::handle_ready",
@@ -134,7 +136,10 @@ where
         multi_groups_apply: &mut HashMap<u64, ApplyTask>,
         pending_events: &mut Vec<Event>,
     ) {
-        debug!("node {}: group = {} is now ready for processing", node_id, self.group_id);
+        debug!(
+            "node {}: group = {} is now ready for processing",
+            node_id, self.group_id
+        );
         let group_id = self.group_id;
         let mut rd = self.raft_group.ready();
 
@@ -217,8 +222,7 @@ where
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
                 multi_groups_apply,
-            )
-            .await;
+            );
         }
 
         // make write task if need to write disk.
@@ -232,12 +236,12 @@ where
         );
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "RaftGroup:handle_committed_entries", 
-        skip_all
-    )]
-    async fn handle_committed_entries(
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "RaftGroup:handle_committed_entries",
+    //     skip_all
+    // )]
+    fn handle_committed_entries(
         &mut self,
         node_id: u64,
         gs: &RS,
@@ -296,7 +300,7 @@ where
                 {
                     Err(err) => {
                         // FIXME: don't panic
-                        panic!("find proposal error {}", err);
+                        error!("find proposal error {}", err);
                     }
                     Ok(proposal) => match proposal {
                         None => {
@@ -315,7 +319,7 @@ where
             }
         }
 
-        trace!("find proposals {:?} on replica {}", proposals, replica_id);
+        // trace!("find proposals {:?} on replica {}", proposals, replica_id);
 
         let entries_size = entries
             .iter()
@@ -332,7 +336,7 @@ where
             proposals,
         };
 
-        trace!("make apply {:?}", apply);
+        // trace!("make apply {:?}", apply);
 
         apply
     }
@@ -530,8 +534,7 @@ where
                 replica_id,
                 light_ready.take_committed_entries(),
                 multi_groups_apply,
-            )
-            .await;
+            );
         }
         // FIXME: always advance apply
         // TODO: move to upper layer
@@ -554,7 +557,7 @@ where
         }
 
         if request.term != 0 && self.term() > request.term {
-            return Err(Error::Proposal(ProposalError::Stale(request.term)));
+            return Err(Error::Proposal(ProposalError::Stale(request.term, self.term())));
         }
 
         Ok(())

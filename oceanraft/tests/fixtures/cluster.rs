@@ -98,7 +98,7 @@ impl FixtureCluster {
                 heartbeat_tick: 1,
                 tick_interval: 3_600_000, // hour ms
                 batch_apply: false,
-                batch_size: 0, 
+                batch_size: 0,
                 write_proposal_queue_size: 1000,
             };
 
@@ -146,10 +146,7 @@ impl FixtureCluster {
     /// number of `FixtureCluster` nodes.
     /// - replica_nums specifies the number of consensus groups. The replica_nums limit the number
     /// of nodes to `FixtureCluster` nodes.
-    pub async fn make_group(
-        &mut self,
-        plan: &MakeGroupPlan,
-    ) -> Result<MakeGroupPlanStatus, Error> {
+    pub async fn make_group(&mut self, plan: &MakeGroupPlan) -> Result<MakeGroupPlanStatus, Error> {
         assert!(
             plan.first_node_id != 0 && plan.first_node_id - 1 < self.nodes.len() as u64,
             "first_node_id violates the current constraint"
@@ -221,6 +218,7 @@ impl FixtureCluster {
             msg.replica_id = replica_id;
             msg.replicas = replicas.clone();
             admin_msg.raft_group = Some(msg);
+            // self.tickers[place_node_index].non_blocking_tick();
             let _ = node.admin(admin_msg).await?;
 
             match self.groups.get_mut(&plan.group_id) {
@@ -261,7 +259,6 @@ impl FixtureCluster {
             .unwrap()
             .unwrap()
     }
-
 
     /// Campaigns the consensus group by the given `node_id` and `group_id`.
     ///
@@ -330,7 +327,8 @@ impl FixtureCluster {
     }
 
     /// Write data to raft. return a onshot::Receiver to recv apply result.
-    pub fn write_command(&self,
+    pub fn write_command(
+        &self,
         node_id: u64,
         group_id: u64,
         data: Vec<u8>,
@@ -344,22 +342,27 @@ impl FixtureCluster {
         self.nodes[to_index(node_id)].async_write(request)
     }
 
-
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        rx:  &mut Receiver<Vec<Event>>,
+        rx: &mut Receiver<Vec<Event>>,
         timeout: Duration,
-    ) -> Result<ApplyNormalEvent, String> {
+        size: usize,
+    ) -> Result<Vec<ApplyNormalEvent>, String> {
         let wait_loop_fut = async {
+            let mut results = vec![];
             loop {
+                if results.len() == size {
+                    return Ok(results);
+                }
                 let events = match rx.recv().await {
                     None => return Err(String::from("the event sender dropped")),
                     Some(evs) => evs,
                 };
 
+                // check all events type should apply
                 for event in events {
                     match event {
-                        Event::ApplyNormal(event) => return Ok(event),
+                        Event::ApplyNormal(event) => results.push(event),
                         _ => {}
                     }
                 }
@@ -370,6 +373,83 @@ impl FixtureCluster {
             Ok(res) => res,
         }
     }
+
+    /// Tick node by given `node_id`. if `delay` is some that each tick will delay.
+    pub async fn tick_node(&mut self, node_id: u64, delay: Option<Duration>) {
+        self.tickers[to_index(node_id)].tick().await;
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await
+        }
+    }
+}
+
+/// Multiple consensus groups are quickly started. Node and consensus group ids start from 1.
+/// All consensus group replicas equal to 1 are elected as the leader.
+pub async fn quickstart_multi_groups(
+    node_nums: usize,
+    group_nums: usize,
+) -> (TaskGroup, FixtureCluster) {
+    // FIXME: each node has task group, if not that joinner can block.
+    let task_group = TaskGroup::new();
+    let mut cluster = FixtureCluster::make(node_nums as u64, task_group.clone()).await;
+    cluster.start();
+
+    // create multi groups
+    for i in 0..group_nums {
+        let group_id = (i + 1) as u64;
+        let plan = MakeGroupPlan {
+            group_id,
+            first_node_id: 1,
+            replica_nums: 3,
+        };
+        let _ = cluster.make_group(&plan).await.unwrap();
+        cluster.campaign_group(1, plan.group_id).await;
+
+        for j in 0..3 {
+            let leader_event = FixtureCluster::wait_leader_elect_event(&mut cluster, j + 1)
+                .await
+                .unwrap();
+            assert_eq!(
+                (1..group_nums as u64 + 1).contains(&leader_event.group_id),
+                true,
+                "expected group_id in {:?}, got {}",
+                (1..group_nums + 1),
+                leader_event.group_id,
+            );
+            assert_eq!(leader_event.replica_id, 1);
+        }
+    }
+
+    (task_group, cluster)
+}
+
+/// Quickly start a consensus group with 3 nodes and 3 replicas, with leader being replica 1.
+pub async fn quickstart_group(node_nums: usize) -> (TaskGroup, FixtureCluster) {
+    // FIXME: each node has task group, if not that joinner can block.
+    let task_group = TaskGroup::new();
+    let mut cluster = FixtureCluster::make(node_nums as u64, task_group.clone()).await;
+    cluster.start();
+
+    // create multi groups
+    let group_id = 1;
+    let plan = MakeGroupPlan {
+        group_id,
+        first_node_id: 1,
+        replica_nums: 3,
+    };
+    let _ = cluster.make_group(&plan).await.unwrap();
+    cluster.campaign_group(1, plan.group_id).await;
+
+    // check each replica should recv leader election event
+    for i in 0..3 {
+        let leader_event = FixtureCluster::wait_leader_elect_event(&mut cluster, i + 1)
+            .await
+            .unwrap();
+        assert_eq!(leader_event.group_id, 1);
+        assert_eq!(leader_event.replica_id, 1);
+    }
+
+    (task_group, cluster)
 }
 
 #[inline]
@@ -459,5 +539,3 @@ pub async fn wait_for_membership_change_apply<P, F>(
         Ok(_) => {}
     };
 }
-
-

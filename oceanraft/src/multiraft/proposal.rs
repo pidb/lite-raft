@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fmt::Debug;
 
 use tokio::sync::oneshot;
-use tracing::info;
+use tracing::debug;
 use uuid::Uuid;
 
 use super::error::Error;
@@ -53,7 +53,7 @@ impl ProposalQueue {
             // The term must be increasing among all log entries and the index
             // must be increasing inside a given term
             if proposal.term < last.term {
-                return Err(Error::Proposal(ProposalError::Stale(proposal.term)));
+                return Err(Error::Proposal(ProposalError::Stale(proposal.term, last.term)));
             }
 
             if proposal.index < last.index {
@@ -105,7 +105,7 @@ impl ProposalQueue {
     ) -> Result<Option<Proposal>, Error> {
         while let Some(proposal) = self.pop(term, index) {
             if proposal.term == term {
-                info!("find proposal index {} = {}", proposal.index, index);
+                debug!("find proposal index {} = {}", proposal.index, index);
                 // term matched.
                 if proposal.index == index {
                     return Ok(Some(proposal));
@@ -113,10 +113,16 @@ impl ProposalQueue {
                     return Err(Error::Proposal(ProposalError::Unexpected(index)));
                 }
             } else {
-                proposal
-                    .tx
-                    .map(|tx| tx.send(Err(Error::Proposal(ProposalError::Stale(proposal.term)))));
-                return Err(Error::Proposal(ProposalError::Stale(proposal.term)));
+                proposal.tx.map(|tx| {
+                    tx.send(Err(Error::Proposal(ProposalError::Stale(
+                        proposal.term,
+                        current_term,
+                    ))))
+                });
+                return Err(Error::Proposal(ProposalError::Stale(
+                    proposal.term,
+                    current_term,
+                )));
             }
         }
 
@@ -146,10 +152,7 @@ impl ProposalQueueManager {
         group_id: u64,
         replica_id: u64,
     ) -> &'a mut ProposalQueue {
-        match self
-            .groups
-            .insert(group_id, ProposalQueue::new(replica_id))
-        {
+        match self.groups.insert(group_id, ProposalQueue::new(replica_id)) {
             None => {}
             Some(_) => panic!(
                 "the previous proposal queue of group ({})  already exists",
@@ -173,10 +176,7 @@ impl ProposalQueueManager {
     }
 
     #[inline]
-    pub fn remove_group_proposal_queue<'a>(
-        &'a mut self,
-        group_id: &u64,
-    ) -> Option<ProposalQueue> {
+    pub fn remove_group_proposal_queue<'a>(&'a mut self, group_id: &u64) -> Option<ProposalQueue> {
         self.groups.remove(group_id)
     }
 }
@@ -195,7 +195,7 @@ fn test_proposal_queue() {
             1,
             false,
             Some(tx),
-            Err(Error::Proposal(ProposalError::Stale(1))),
+            Err(Error::Proposal(ProposalError::Stale(1,1))),
         ),
         (4, 2, false, None, Ok(())),
         (
@@ -259,7 +259,7 @@ fn test_proposal_queue_find() {
         (1, 1, Ok(Some((1, 1)))),
         (2, 1, Ok(Some((2, 1)))),
         (3, 1, Ok(None)), // expection due to term stale
-        (3, 3, Err(Error::Proposal(ProposalError::Stale(2)))), // expection to due index out of range, should 3,2
+        (3, 3, Err(Error::Proposal(ProposalError::Stale(2, 2)))), // expection to due index out of range, should 3,2
         (5, 2, Err(Error::Proposal(ProposalError::Unexpected(5)))), // expection to due index out of range, should 4, 2
     ];
 

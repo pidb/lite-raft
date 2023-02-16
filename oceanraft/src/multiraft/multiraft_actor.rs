@@ -1,43 +1,32 @@
 use std::collections::hash_map::HashMap;
 use std::collections::HashSet;
-use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::MutexGuard;
-use std::thread::current;
 use std::time::Duration;
 
 use raft::prelude::AdminMessage;
 use raft::prelude::AdminMessageType;
 use raft::prelude::RaftGroupManagement;
 use raft::prelude::RaftGroupManagementType;
-use raft::LightReady;
-use raft::Ready;
-use raft::SoftState;
-use raft::StateRole;
+
 use raft::Storage;
 
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
-use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::task::JoinError;
 use tokio::task::JoinHandle;
-use tokio::time::Instant;
 
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::ConfChangeSingle;
 use raft_proto::prelude::ConfChangeType;
-use raft_proto::prelude::ConfChangeV2;
-use raft_proto::prelude::Entry;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
@@ -50,10 +39,8 @@ use tokio::time::interval_at;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
-use tracing::span;
 use tracing::trace;
 use tracing::warn;
-use tracing::Instrument;
 use tracing::Level;
 use tracing::Span;
 
@@ -61,7 +48,6 @@ use crate::multiraft::error::RaftGroupError;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
-use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
 // use super::apply_actor::ApplyActorReceiver;
 // use super::apply_actor::ApplyActorSender;
@@ -72,7 +58,6 @@ use super::config::Config;
 use super::error::Error;
 use super::event::CallbackEvent;
 use super::event::Event;
-use super::event::LeaderElectionEvent;
 use super::event::MembershipChangeView;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
@@ -83,7 +68,6 @@ use super::raft_group::RaftGroupState;
 use super::raft_group::RaftGroupWriteRequest;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
-use super::transport;
 use super::transport::Transport;
 use super::util::Ticker;
 
@@ -168,7 +152,7 @@ where
         let (raft_message_tx, raft_message_rx) = channel(10);
 
         let (callback_tx, callback_rx) = channel(1);
-        
+
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
 
@@ -335,6 +319,7 @@ where
             //    and if the events treats the contained group as active, the group inserted
             //    into `activity_group`.
 
+
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -371,7 +356,6 @@ where
                         }
                         self.activity_groups.insert(group.group_id);
                     });
-
                     ticks += 1;
                     if ticks >= self.cfg.heartbeat_tick {
                         ticks = 0;
@@ -435,7 +419,6 @@ where
                 self.activity_groups.clear();
                 // TODO: shirk_to_fit
             }
-
             spawn_handle_response_callbacks(pending_response_callbacks);
         }
     }
@@ -565,7 +548,8 @@ where
             for (group_id, _) in from_node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        warn!(
+                        // FIXME: don't panic
+                        panic!(
                             "missing group {} at from_node {} fanout heartbeat",
                             *group_id, msg.from_node
                         );
@@ -663,10 +647,10 @@ where
                 step_msg.commit = group.raft_group.raft.raft_log.committed;
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
-                debug!(
-                    "fanouting {}.{} -> {}.{} msg  = {:?}",
-                    from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
-                );
+                // debug!(
+                //     "fanouting {}.{} -> {}.{} msg  = {:?}",
+                //     from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
+                // );
                 // group.raft_group.step(msg).unwrap();
                 // FIXME: t30_membership single_step
                 group.raft_group.step(step_msg).unwrap();
@@ -707,7 +691,8 @@ where
             for (group_id, _) in node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        warn!(
+                        // FIXME: don't panic
+                        panic!(
                             "missing group {} at from_node {} fanout heartbeat response",
                             *group_id, msg.from_node
                         );
@@ -766,7 +751,7 @@ where
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
                 msg.from = from_replica.replica_id;
                 msg.to = to_replica.replica_id;
-                debug!("step msg = {:?}", msg);
+                // debug!("step msg = {:?}", msg);
 
                 // group.raft_group.step(msg).unwrap();
                 // FIXME: t30_membership single_step
@@ -999,8 +984,8 @@ where
             applied,
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
-            // max_size_per_msg: 1024 * 1024,
-            // max_inflight_msgs: 256,
+            max_size_per_msg: 1024 * 1024,
+            max_inflight_msgs: 256,
             ..Default::default()
         };
 
@@ -1021,9 +1006,6 @@ where
             leader: ReplicaDesc::default(), // TODO: init leader from storage
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
-            batch_apply: self.cfg.batch_apply,
-            batch_size: self.cfg.batch_size,
-            pending_apply: None,
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -1077,7 +1059,7 @@ where
 
             // TODO: save apply state
             group.state.apply_state = apply_result.apply_state;
-            info!(
+            debug!(
                 "node {}: group = {} apply state change = {:?}",
                 self.node_id, group_id, group.state.apply_state
             );
@@ -1342,7 +1324,7 @@ where
     //     skip_all
     // )]
 
-     fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
+    fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
         let span = tracing::span::Span::current();
         if let Err(_err) = self
             .apply_request_tx
