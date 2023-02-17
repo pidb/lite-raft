@@ -48,12 +48,12 @@ use crate::multiraft::error::RaftGroupError;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
+use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
 // use super::apply_actor::ApplyActorReceiver;
 // use super::apply_actor::ApplyActorSender;
-use super::apply_actor::ApplyRequest;
-use super::apply_actor::ApplyTask;
-use super::apply_actor::ApplyTaskResponse;
+use super::apply_actor::Request as ApplyRequest;
+use super::apply_actor::Response as ApplyResponse;
 use super::config::Config;
 use super::error::Error;
 use super::event::CallbackEvent;
@@ -261,7 +261,7 @@ where
     event_tx: Sender<Vec<Event>>,
     callback_rx: Receiver<CallbackEvent>,
     apply_request_tx: UnboundedSender<(Span, ApplyRequest)>,
-    apply_response_rx: UnboundedReceiver<ApplyTaskResponse>,
+    apply_response_rx: UnboundedReceiver<ApplyResponse>,
     // write_actor_address: WriteAddress,
     // waiting_ready_groups: VecDeque<HashMap<u64, Ready>>,
     // proposals: ProposalQueueManager,
@@ -318,7 +318,6 @@ where
             // 1. if `on_groups_ready` is executed, `activity_groups` is empty until loop,
             //    and if the events treats the contained group as active, the group inserted
             //    into `activity_group`.
-
 
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
@@ -978,7 +977,7 @@ where
         //
         // but, voters of raft and replicas_desc are not one-to-one, because voters
         // can be added in the subsequent way of membership change.
-        let applied = 0; // TODO: get applied from stroage
+        let applied = 1; // TODO: get applied from stroage
         let raft_cfg = raft::Config {
             id: replica_id,
             applied,
@@ -1047,24 +1046,26 @@ where
         name = "MultiRaftActorRuntime::handle_apply_response",
         skip(self))
     ]
-    async fn handle_apply_response(&mut self, response: ApplyTaskResponse) {
-        for (group_id, apply_result) in response.apply_results {
-            let group = match self.groups.get_mut(&group_id) {
-                Some(group) => group,
-                None => {
-                    warn!("group {} removed, skip apply", group_id);
-                    continue;
-                }
-            };
+    async fn handle_apply_response(&mut self, response: ApplyResponse) {
+        let group = match self.groups.get_mut(&response.group_id) {
+            Some(group) => group,
+            None => {
+                warn!("group {} removed, skip apply", response.group_id);
+                return;
+            }
+        };
 
-            // TODO: save apply state
-            group.state.apply_state = apply_result.apply_state;
-            debug!(
-                "node {}: group = {} apply state change = {:?}",
-                self.node_id, group_id, group.state.apply_state
-            );
-            group.raft_group.advance_apply();
-        }
+        group
+            .raft_group
+            .advance_apply_to(response.apply_state.applied_index);
+        // group.raft_group.advance_apply();
+        debug!(
+            "node {}: group = {} apply state change = {:?}",
+            self.node_id, response.group_id, response.apply_state
+        );
+       
+        group.state.apply_state = response.apply_state;
+        
     }
 
     async fn handle_callback(&mut self, callback_event: CallbackEvent) {
@@ -1324,11 +1325,11 @@ where
     //     skip_all
     // )]
 
-    fn send_applys(&self, applys: HashMap<u64, ApplyTask>) {
+    fn send_applys(&self, applys: HashMap<u64, Apply>) {
         let span = tracing::span::Span::current();
         if let Err(_err) = self
             .apply_request_tx
-            .send((span.clone(), ApplyRequest { groups: applys }))
+            .send((span.clone(), ApplyRequest::Apply { applys }  ))
         {
             // FIXME
             warn!("apply actor stopped");

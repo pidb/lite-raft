@@ -79,7 +79,6 @@ impl<T: Storage> RaftLog<T> {
     pub fn new(store: T, logger: Logger) -> RaftLog<T> {
         let first_index = store.first_index().unwrap();
         let last_index = store.last_index().unwrap();
-
         // Initialize committed and applied pointers to the time of the last compaction.
         RaftLog {
             store,
