@@ -34,7 +34,6 @@ use tracing::warn;
 use tracing::Level;
 
 use super::apply_actor::Apply;
-use super::apply_actor::ApplyTask;
 use super::error::Error;
 use super::error::ProposalError;
 use super::event::LeaderElectionEvent;
@@ -133,7 +132,7 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
-        multi_groups_apply: &mut HashMap<u64, ApplyTask>,
+        multi_groups_apply: &mut HashMap<u64, Apply>,
         pending_events: &mut Vec<Event>,
     ) {
         debug!(
@@ -247,7 +246,7 @@ where
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
-        multi_groups_apply: &mut HashMap<u64, ApplyTask>,
+        multi_groups_apply: &mut HashMap<u64, Apply>,
     ) {
         debug!(
             "node {}: create apply entries [{}, {}], group = {}, replica = {}",
@@ -262,7 +261,7 @@ where
         self.maybe_update_committed_term(last_term);
 
         let apply = self.create_apply(gs, replica_id, entries);
-        multi_groups_apply.insert(group_id, ApplyTask::Apply(apply));
+        multi_groups_apply.insert(group_id, apply);
     }
 
     /// Update the term of the latest entries committed during
@@ -283,7 +282,7 @@ where
             self.raft_group.raft.raft_log.persisted,
         );
         let commit_term = gs.term(commit_index).unwrap();
-        let mut proposals = VecDeque::new();
+        let mut proposals = Vec::new();
         if !self.proposals.is_empty() {
             for entry in entries.iter() {
                 trace!(
@@ -313,7 +312,7 @@ where
                             continue;
                         }
 
-                        Some(p) => proposals.push_back(p),
+                        Some(p) => proposals.push(p),
                     },
                 };
             }
@@ -468,7 +467,9 @@ where
             .await;
         }
 
-        let light_ready = self.raft_group.advance(ready);
+        // let light_ready = self.raft_group.advance(ready);
+        let light_ready = self.raft_group.advance_append(ready);
+        self.raft_group.advance_apply_to(self.state.apply_state.applied_index);
         gwr.light_ready = Some(light_ready);
     }
 
@@ -486,7 +487,7 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         gwr: &mut RaftGroupWriteRequest,
-        multi_groups_apply: &mut HashMap<u64, ApplyTask>,
+        multi_groups_apply: &mut HashMap<u64, Apply>,
     ) {
         let group_id = self.group_id;
         let replica_id = gwr.replica_id;
