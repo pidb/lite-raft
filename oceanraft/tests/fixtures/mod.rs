@@ -3,6 +3,7 @@ mod transport;
 mod cluster;
 mod tracing_log;
 mod checker;
+mod rsm;
 
 pub use cluster::{
     FixtureCluster,

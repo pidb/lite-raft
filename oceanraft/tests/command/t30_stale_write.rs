@@ -65,7 +65,7 @@ async fn test_group_stale_write() {
         cluster.tickers[1].tick().await;
     }
 
-    let apply_events = FixtureCluster::wait_for_command_apply(cluster.mut_event_rx(2), Duration::from_millis(1000), 100).await.unwrap();
+    let apply_events = FixtureCluster::wait_for_command_apply(cluster.mut_apply_event_rx(2), Duration::from_millis(1000), 100).await.unwrap();
     write_checker.check(&apply_events);
     for event in apply_events {
         // TODO: use done method

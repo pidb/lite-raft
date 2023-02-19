@@ -1,6 +1,6 @@
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tokio::sync::mpsc::error::TrySendError;
 
 use futures::Future;
 
@@ -16,15 +16,14 @@ use super::multiraft_actor::ShardState;
 use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
 use super::util::Ticker;
+use super::StateMachine;
 
 use raft_proto::prelude::AdminMessage;
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
+use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
-use raft_proto::prelude::MembershipChangeRequest;
-
-
 
 use super::storage::MultiRaftStorage;
 
@@ -55,8 +54,8 @@ impl RaftMessageDispatch for RaftMessageDispatchImpl {
             match rx.await {
                 Err(_err) => {
                     // FIXME: handle error
-                    Ok(RaftMessageResponse {  })
-                },
+                    Ok(RaftMessageResponse {})
+                }
                 Ok(res) => res,
             }
         }
@@ -64,35 +63,38 @@ impl RaftMessageDispatch for RaftMessageDispatchImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<T, RS, MRS>
+pub struct MultiRaft<T, RS, MRS, RSM>
 where
     T: Transport + Clone,
     RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
+    RSM: StateMachine,
 {
     // ctx: Context,
     cfg: Config,
     transport: T,
     storage: MRS,
     task_group: TaskGroup,
-    actor: MultiRaftActor<T, RS, MRS>,
+    actor: MultiRaftActor<T, RS, MRS, RSM>,
     // apply_actor: ApplyActor,
     // _m2: PhantomData<T>,
     // _m3: PhantomData<RS>,
     // _m4: PhantomData<MRS>,
 }
 
-impl<T, RS, MRS> MultiRaft<T, RS, MRS>
+impl<T, RS, MRS, RSM> MultiRaft<T, RS, MRS, RSM>
 where
     T: Transport + Clone,
     RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
+    RSM: StateMachine,
 {
     /// Create a new multiraft. spawn multiraft actor and apply actor.
     pub fn new(
         config: Config,
         transport: T,
         storage: MRS,
+        rsm: RSM,
         task_group: TaskGroup,
         event_tx: &Sender<Vec<Event>>,
     ) -> Self {
@@ -116,7 +118,7 @@ where
         //     task_group.clone(),
         // );
 
-        let actor = MultiRaftActor::<T, RS, MRS>::new(&config, &transport, &storage, &event_tx);
+        let actor = MultiRaftActor::<T, RS, MRS, RSM>::new(&config, &transport, &storage, rsm, &event_tx);
 
         Self {
             cfg: config,
@@ -153,7 +155,7 @@ where
         let (tx, rx) = oneshot::channel();
         match self.actor.write_propose_tx.try_send((request, tx)) {
             // FIXME: handle write queue full case
-            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"), 
+            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"),
             Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
             Ok(_) => rx,
         }

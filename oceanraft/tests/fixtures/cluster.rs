@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use futures::Future;
 
+use oceanraft::multiraft::ApplyNormal;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
@@ -14,8 +15,7 @@ use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::memstore::RaftMemStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
-use oceanraft::multiraft::ApplyMembershipChangeEvent;
-use oceanraft::multiraft::ApplyNormalEvent;
+use oceanraft::multiraft::ApplyEvent;
 use oceanraft::multiraft::Config;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::Event;
@@ -32,17 +32,25 @@ use oceanraft::prelude::RaftGroupManagement;
 use oceanraft::prelude::RaftGroupManagementType;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
+use oceanraft::multiraft::ApplyMembership;
 use oceanraft::util::TaskGroup;
 
 use crate::fixtures::transport::LocalTransport;
 
-type FixtureMultiRaft =
-    MultiRaft<LocalTransport<RaftMessageDispatchImpl>, RaftMemStorage, MultiRaftMemoryStorage>;
+use super::rsm::FixtureStateMachine;
+
+type FixtureMultiRaft = MultiRaft<
+    LocalTransport<RaftMessageDispatchImpl>,
+    RaftMemStorage,
+    MultiRaftMemoryStorage,
+    FixtureStateMachine,
+>;
 
 pub struct FixtureCluster {
     pub election_ticks: usize,
     pub nodes: Vec<Arc<FixtureMultiRaft>>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
+    pub apply_events: Vec<Option<Receiver<Vec<ApplyEvent>>>>,
     pub transport: LocalTransport<RaftMessageDispatchImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -89,6 +97,9 @@ impl FixtureCluster {
         let mut storages = vec![];
         let mut events = vec![];
         let mut tickers = vec![];
+
+        let mut apply_events = vec![];
+
         let transport = LocalTransport::new();
         for i in 0..n {
             let node_id = i + 1;
@@ -103,11 +114,16 @@ impl FixtureCluster {
             };
 
             let (event_tx, event_rx) = channel(1);
+
+            let (apply_event_tx, apply_event_rx) = channel(1);
+
+            let rsm = FixtureStateMachine::new(apply_event_tx);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
             let node = FixtureMultiRaft::new(
                 config,
                 transport.clone(),
                 storage.clone(),
+                rsm,
                 task_group.clone(),
                 &event_tx,
             );
@@ -123,11 +139,13 @@ impl FixtureCluster {
 
             nodes.push(Arc::new(node));
             events.push(Some(event_rx));
+            apply_events.push(Some(apply_event_rx));
             storages.push(storage);
             tickers.push(ManualTick::new());
         }
         Self {
             events,
+            apply_events,
             storages,
             nodes,
             transport,
@@ -245,6 +263,10 @@ impl FixtureCluster {
         self.events[to_index(node_id)].as_mut().unwrap()
     }
 
+    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<ApplyEvent>> {
+        self.apply_events[to_index(node_id)].as_mut().unwrap()
+    }
+
     /// Remove event rx from cluster events.
     pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
         std::mem::take(&mut self.events[index]).unwrap()
@@ -303,8 +325,8 @@ impl FixtureCluster {
         cluster: &mut FixtureCluster,
         node_id: u64,
         timeout: Duration,
-    ) -> Result<ApplyMembershipChangeEvent, String> {
-        let rx = cluster.mut_event_rx(node_id);
+    ) -> Result<ApplyMembership, String> {
+        let rx = cluster.mut_apply_event_rx(node_id);
         let wait_loop_fut = async {
             loop {
                 let events = match rx.recv().await {
@@ -314,7 +336,7 @@ impl FixtureCluster {
 
                 for event in events {
                     match event {
-                        Event::ApplyMembershipChange(event) => return Ok(event),
+                        ApplyEvent::Membership(membership) => return Ok(membership),
                         _ => {}
                     }
                 }
@@ -344,10 +366,10 @@ impl FixtureCluster {
 
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        rx: &mut Receiver<Vec<Event>>,
+        rx: &mut Receiver<Vec<ApplyEvent>>,
         timeout: Duration,
         size: usize,
-    ) -> Result<Vec<ApplyNormalEvent>, String> {
+    ) -> Result<Vec<ApplyNormal>, String> {
         let wait_loop_fut = async {
             let mut results = vec![];
             loop {
@@ -362,7 +384,8 @@ impl FixtureCluster {
                 // check all events type should apply
                 for event in events {
                     match event {
-                        Event::ApplyNormal(event) => results.push(event),
+                        ApplyEvent::Normal (data) => results.push(data),
+                        // Event::ApplyNormal(event) => results.push(event),
                         _ => {}
                     }
                 }
@@ -459,83 +482,83 @@ fn to_index(node_id: u64) -> usize {
 
 impl FixtureCluster {}
 
-pub async fn wait_for_command_apply<P>(
-    rx: &mut Receiver<Vec<Event>>,
-    mut predicate: P,
-    timeout: Duration,
-) where
-    P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
-{
-    let fut = async {
-        loop {
-            let events = match rx.recv().await {
-                None => panic!("sender dropped"),
-                Some(events) => events,
-            };
+// pub async fn wait_for_command_apply<P>(
+//     rx: &mut Receiver<Vec<Event>>,
+//     mut predicate: P,
+//     timeout: Duration,
+// ) where
+//     P: FnMut(ApplyNormalEvent) -> Result<bool, String>,
+// {
+//     let fut = async {
+//         loop {
+//             let events = match rx.recv().await {
+//                 None => panic!("sender dropped"),
+//                 Some(events) => events,
+//             };
 
-            for event in events.into_iter() {
-                match event {
-                    Event::ApplyNormal(apply_event) => match predicate(apply_event) {
-                        Err(err) => panic!("{}", err),
-                        Ok(matched) => {
-                            if !matched {
-                                continue;
-                            } else {
-                                return;
-                            }
-                        }
-                    },
-                    _ => continue,
-                }
-            }
-        }
-    };
+//             for event in events.into_iter() {
+//                 match event {
+//                     Event::ApplyNormal(apply_event) => match predicate(apply_event) {
+//                         Err(err) => panic!("{}", err),
+//                         Ok(matched) => {
+//                             if !matched {
+//                                 continue;
+//                             } else {
+//                                 return;
+//                             }
+//                         }
+//                     },
+//                     _ => continue,
+//                 }
+//             }
+//         }
+//     };
 
-    match timeout_at(Instant::now() + timeout, fut).await {
-        Err(_) => {
-            panic!("timeout");
-        }
-        Ok(_) => {}
-    };
-}
+//     match timeout_at(Instant::now() + timeout, fut).await {
+//         Err(_) => {
+//             panic!("timeout");
+//         }
+//         Ok(_) => {}
+//     };
+// }
 
-pub async fn wait_for_membership_change_apply<P, F>(
-    rx: &mut Receiver<Vec<Event>>,
-    mut predicate: P,
-    timeout: Duration,
-) where
-    P: FnMut(ApplyMembershipChangeEvent) -> F,
-    F: Future<Output = Result<bool, String>>,
-{
-    let fut = async {
-        loop {
-            let events = match rx.recv().await {
-                None => panic!("sender dropped"),
-                Some(events) => events,
-            };
+// pub async fn wait_for_membership_change_apply<P, F>(
+//     rx: &mut Receiver<Vec<Event>>,
+//     mut predicate: P,
+//     timeout: Duration,
+// ) where
+//     P: FnMut(ApplyMembershipChangeEvent) -> F,
+//     F: Future<Output = Result<bool, String>>,
+// {
+//     let fut = async {
+//         loop {
+//             let events = match rx.recv().await {
+//                 None => panic!("sender dropped"),
+//                 Some(events) => events,
+//             };
 
-            for event in events.into_iter() {
-                match event {
-                    Event::ApplyMembershipChange(event) => match predicate(event).await {
-                        Err(err) => panic!("{}", err),
-                        Ok(matched) => {
-                            if !matched {
-                                continue;
-                            } else {
-                                return;
-                            }
-                        }
-                    },
-                    _ => continue,
-                }
-            }
-        }
-    };
+//             for event in events.into_iter() {
+//                 match event {
+//                     Event::ApplyMembershipChange(event) => match predicate(event).await {
+//                         Err(err) => panic!("{}", err),
+//                         Ok(matched) => {
+//                             if !matched {
+//                                 continue;
+//                             } else {
+//                                 return;
+//                             }
+//                         }
+//                     },
+//                     _ => continue,
+//                 }
+//             }
+//         }
+//     };
 
-    match timeout_at(Instant::now() + timeout, fut).await {
-        Err(_) => {
-            panic!("wait membership change timeout");
-        }
-        Ok(_) => {}
-    };
-}
+//     match timeout_at(Instant::now() + timeout, fut).await {
+//         Err(_) => {
+//             panic!("wait membership change timeout");
+//         }
+//         Ok(_) => {}
+//     };
+// }

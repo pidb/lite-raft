@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use oceanraft::multiraft::ApplyMembershipChangeEvent;
+use oceanraft::multiraft::ApplyMembership;
 use oceanraft::prelude::ConfChange;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfChangeV2;
@@ -24,9 +24,9 @@ async fn check_cc<F>(
     timeout: Duration,
     check: F,
 ) where
-    F: FnOnce(&ApplyMembershipChangeEvent),
+    F: FnOnce(&ApplyMembership),
 {
-    let mut event = FixtureCluster::wait_membership_change_apply_event(cluster, node_id, timeout)
+    let event = FixtureCluster::wait_membership_change_apply_event(cluster, node_id, timeout)
         .await
         .expect(
             format!(
@@ -36,8 +36,9 @@ async fn check_cc<F>(
             .as_str(),
         );
     check(&event);
-    event.done().await.unwrap();
+    event.done().await;
     // TODO: as method called
+    println!("event tx is none? = {}", event.tx.is_none());
     event.tx.map(|tx| tx.send(Ok(())));
 }
 
@@ -105,7 +106,7 @@ async fn test_single_step() {
 
     // check leader should recv all apply events.
     for i in 1..5 {
-        let check_fn = |event: &ApplyMembershipChangeEvent| {
+        let check_fn = |event: &ApplyMembership| {
             let mut cc = ConfChange::default();
             cc.merge_from_bytes(event.entry.get_data()).unwrap();
 
@@ -196,7 +197,7 @@ async fn test_joint_consensus() {
         done_tx.send(()).unwrap();
     });
 
-    let check_fn = |event: &ApplyMembershipChangeEvent| {
+    let check_fn = |event: &ApplyMembership| {
         let mut cc = ConfChangeV2::default();
         cc.merge_from_bytes(&event.entry.data).unwrap();
         let changes = cc
@@ -289,7 +290,7 @@ async fn test_remove() {
         done_tx.send(()).unwrap();
     });
 
-    let check_fn = |event: &ApplyMembershipChangeEvent| {
+    let check_fn = |event: &ApplyMembership| {
         let mut cc = ConfChangeV2::default();
         cc.merge_from_bytes(&event.entry.data).unwrap();
         let changes = cc

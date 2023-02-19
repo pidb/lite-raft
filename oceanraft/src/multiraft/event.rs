@@ -1,46 +1,37 @@
-use std::pin::Pin;
-
-use futures::Future;
-
-use raft::Storage;
-use raft_proto::prelude::ConfChangeV2;
-use raft_proto::prelude::Entry;
-use raft_proto::prelude::MembershipChangeRequest;
-
-use tokio::sync::mpsc::Sender;
+use prost::Message as _;
+use raft_proto::ConfChangeI;
+use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use crate::prelude::ConfChange;
+use crate::prelude::ConfChangeV2;
+use crate::prelude::Entry;
+use crate::prelude::EntryType;
+use crate::prelude::MembershipChangeRequest;
+
 use super::error::Error;
-use super::storage::MultiRaftStorage;
 
-// pub type MultiRaftAsyncCb<'r, RS: Storage, MRS: MultiRaftStorage<RS>> = Box<
-//     dyn FnOnce(
-//         &'r mut MultiRaftActorContext<RS, MRS>,
-//     ) -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'r>>,
-// >;
-
-/// Apply membership change results.
+/// Commit membership change results.
 ///
 /// If proposed change is ConfChange, the ConfChangeV2 is converted
 /// from ConfChange. If ConfChangeV2 is used, changes contains multiple
 /// requests, otherwise changes contains only one request.
 #[derive(Debug)]
-pub struct MembershipChangeView {
-    pub index: u64,
+pub struct CommitMembership {
+    pub entry_index: u64,
     pub conf_change: ConfChangeV2,
     pub change_request: MembershipChangeRequest,
 }
 
 #[derive(Debug)]
-pub enum CallbackEvent {
+pub enum CommitEvent {
     None,
-
-    MembershipChange(MembershipChangeView, oneshot::Sender<Result<(), Error>>),
+    Membership((CommitMembership, oneshot::Sender<Result<(), Error>>)),
 }
 
-impl Default for CallbackEvent {
+impl Default for CommitEvent {
     fn default() -> Self {
-        CallbackEvent::None
+        CommitEvent::None
     }
 }
 
@@ -57,50 +48,89 @@ pub struct LeaderElectionEvent {
 }
 
 #[derive(Debug)]
-pub struct ApplyNormalEvent {
+pub enum Event {
+    LederElection(LeaderElectionEvent),
+}
+
+#[derive(Debug)]
+pub struct ApplyNoOp {
+    pub group_id: u64,
+    pub entry_index: u64,
+    pub entry_term: u64,
+}
+
+#[derive(Debug)]
+pub struct ApplyNormal {
     pub group_id: u64,
     pub entry: Entry,
     pub is_conf_change: bool,
     pub tx: Option<oneshot::Sender<Result<(), Error>>>,
 }
 
-impl ApplyNormalEvent {
-    // FIXME: response with typed.
-    pub fn done(self, response: Result<(), Error>) {
-        println!("call done!");
-        self.tx.map(|tx| tx.send(response).unwrap());
-    }
-}
-
 #[derive(Debug)]
-pub struct ApplyMembershipChangeEvent {
+pub struct ApplyMembership {
     pub group_id: u64,
     pub entry: Entry,
     pub tx: Option<oneshot::Sender<Result<(), Error>>>,
-    pub(crate) change_view: Option<MembershipChangeView>,
-    pub(crate) callback_event_tx: Sender<CallbackEvent>,
+    pub commit_tx: UnboundedSender<CommitEvent>,
 }
 
-impl ApplyMembershipChangeEvent {
-    pub async fn done(&mut self) -> Result<(), Error> {
-        if let Some(change_view) = self.change_view.take() {
-            let (tx, rx) = oneshot::channel();
-            self.callback_event_tx
-                .send(CallbackEvent::MembershipChange(change_view, tx))
-                .await
-                .unwrap();
-            rx.await.unwrap()
-        } else {
-            Ok(())
+impl ApplyMembership {
+    pub fn parse(&self) -> CommitMembership {
+        match self.entry.entry_type() {
+            EntryType::EntryNormal => unreachable!(),
+            EntryType::EntryConfChange => {
+                let mut conf_change = ConfChange::default();
+                conf_change.merge(self.entry.data.as_ref()).unwrap();
+
+                let mut change_request = MembershipChangeRequest::default();
+                change_request.merge(self.entry.context.as_ref()).unwrap();
+
+                CommitMembership {
+                    entry_index: self.entry.index,
+                    conf_change: conf_change.into_v2(),
+                    change_request,
+                }
+            }
+            EntryType::EntryConfChangeV2 => {
+                let mut conf_change = ConfChangeV2::default();
+                conf_change.merge(self.entry.data.as_ref()).unwrap();
+
+                let mut change_request = MembershipChangeRequest::default();
+                change_request.merge(self.entry.context.as_ref()).unwrap();
+
+                CommitMembership {
+                    entry_index: self.entry.index,
+                    conf_change,
+                    change_request,
+                }
+            }
         }
+    }
+    
+    pub async fn done(&self) {
+        let (tx, rx) = oneshot::channel();
+        let commit = self.parse();
+        self.commit_tx
+            .send(CommitEvent::Membership((commit, tx)))
+            .unwrap();
+        rx.await.unwrap();
     }
 }
 
 #[derive(Debug)]
-pub enum Event {
-    LederElection(LeaderElectionEvent),
+pub enum ApplyEvent {
+    NoOp(ApplyNoOp),
+    Normal(ApplyNormal),
+    Membership(ApplyMembership),
+}
 
-    ApplyNormal(ApplyNormalEvent),
-
-    ApplyMembershipChange(ApplyMembershipChangeEvent),
+impl ApplyEvent {
+    pub(crate) fn entry_index(&self) -> u64 {
+        match self {
+            Self::NoOp(noop) => noop.entry_index,
+            Self::Normal(normal) => normal.entry.index,
+            Self::Membership(membership) => membership.entry.index,
+        }
+    }
 }

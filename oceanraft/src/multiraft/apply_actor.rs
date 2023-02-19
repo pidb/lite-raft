@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::mem::take;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -39,18 +40,21 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::config::Config;
+use crate::multiraft::ApplyNoOp;
+use crate::multiraft::ApplyNormal;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
 use super::error::Error;
 use super::error::ProposalError;
-use super::event::ApplyMembershipChangeEvent;
-use super::event::ApplyNormalEvent;
-use super::event::CallbackEvent;
+use crate::multiraft::ApplyEvent;
+use super::ApplyMembership;
+
+use super::event::CommitEvent;
 use super::event::Event;
-use super::event::MembershipChangeView;
 use super::proposal::Proposal;
 use super::raft_group::RaftGroupApplyState;
+use super::StateMachine;
 
 /// State is used to safely shard the state
 /// of an actor between threads.
@@ -60,33 +64,30 @@ struct State {
     stopped: AtomicBool,
 }
 
-// #[derive(Clone)]
-// pub struct ApplyActorSender {
-//     pub tx: Sender<ApplyTaskRequest>,
-// }
-
-// pub struct ApplyActorReceiver {
-//     pub rx: Receiver<ApplyTaskResponse>,
-// }
-
-pub struct ApplyActor {
+pub struct ApplyActor<RSM>
+where
+    RSM: StateMachine,
+{
     // cfg: Config,
     state: Arc<State>,
-    runtime: Mutex<Option<ApplyActorRuntime>>,
+    runtime: Mutex<Option<ApplyActorRuntime<RSM>>>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl ApplyActor {
+impl<RSM> ApplyActor<RSM>
+where
+    RSM: StateMachine,
+{
     pub fn new(
         cfg: &Config,
+        rsm: RSM,
         request_rx: UnboundedReceiver<(Span, Request)>,
         response_tx: UnboundedSender<Response>,
-        callback_tx: Sender<CallbackEvent>,
-        event_tx: &Sender<Vec<Event>>,
+        commit_tx: UnboundedSender<CommitEvent>,
     ) -> Self {
         let state = Arc::new(State::default());
         let runtime =
-            ApplyActorRuntime::new(cfg, &state, request_rx, response_tx, callback_tx, event_tx);
+            ApplyActorRuntime::new(cfg, &state, rsm, request_rx, response_tx, commit_tx);
 
         Self {
             state,
@@ -161,18 +162,20 @@ pub struct ApplyResult {}
 //     pub apply_results: HashMap<u64, ApplyResult>,
 // }
 
-pub struct ApplyActorRuntime {
+pub struct ApplyActorRuntime<RSM>
+where
+    RSM: StateMachine,
+{
     multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
     node_id: u64,
     cfg: Config,
     state: Arc<State>,
     rx: UnboundedReceiver<(tracing::span::Span, Request)>,
     tx: UnboundedSender<Response>,
-    event_tx: Sender<Vec<Event>>,
-    callback_tx: Sender<CallbackEvent>,
 
     pending_applys: HashMap<u64, Vec<Apply>>,
-
+    ctx: ApplyContext<RSM>,
+    delegate: ApplyDelegate<RSM>,
     batch_apply: bool,
     batch_size: usize,
 }
@@ -185,32 +188,34 @@ pub enum Request {
 pub struct Response {
     pub group_id: u64,
     pub apply_state: RaftGroupApplyState,
-    pub apply_results: Vec<ApplyResult>,
 }
 
-impl ApplyActorRuntime {
+impl<RSM> ApplyActorRuntime<RSM>
+where
+    RSM: StateMachine,
+{
     fn new(
         cfg: &Config,
         state: &Arc<State>,
+        rsm: RSM,
         request_rx: UnboundedReceiver<(Span, Request)>,
         response_tx: UnboundedSender<Response>,
-        callback_tx: Sender<CallbackEvent>,
-        event_tx: &Sender<Vec<Event>>,
+        commit_tx: UnboundedSender<CommitEvent>,
     ) -> Self {
         Self {
             state: state.clone(),
             multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
             node_id: cfg.node_id,
-            event_tx: event_tx.clone(),
             cfg: cfg.clone(),
             // ctx: ctx.clone(),
             rx: request_rx,
             tx: response_tx,
-            callback_tx,
+            ctx: ApplyContext { rsm, commit_tx },
             batch_apply: cfg.batch_apply,
             batch_size: cfg.batch_size, // TODO: per-group
             // task_group: task_group.clone(),
             pending_applys: HashMap::new(),
+            delegate: ApplyDelegate::new(cfg.node_id),
         }
     }
 
@@ -272,9 +277,10 @@ impl ApplyActorRuntime {
     }
 
     async fn delegate_handle_applys(&mut self) {
-        let mut futs = vec![];
+        // let mut futs = vec![];
         for (group_id, applys) in self.pending_applys.drain() {
-            let apply_state = match self.multi_groups_apply_state.get(&group_id) {
+            // FIXME: get mut
+            let mut apply_state = match self.multi_groups_apply_state.get(&group_id) {
                 None => {
                     self.multi_groups_apply_state.insert(
                         group_id,
@@ -294,34 +300,41 @@ impl ApplyActorRuntime {
                 }
                 Some(state) => state.clone(),
             };
-            let mut delegate = ApplyDelegate::new(
-                self.node_id,
-                group_id,
-                &self.event_tx,
-                &self.callback_tx,
-                apply_state,
-            );
-            futs.push(tokio::spawn(async move {
-                // TODO: new delegate
-                // let mut response = Response {
-                //     group_id,
-                //     apply_results: Vec::new(),
-                //     apply_state: RaftGroupApplyState::default(),
-                // };
-                delegate.handle_applys(group_id, applys).await.unwrap()
-                // response.apply_results.push(apply_result);
-                // response.apply_state = delegate.apply_state.clone();
-                // response
-            }));
+            // let mut delegate = ApplyDelegate::new(
+            //     self.node_id,
+            //     // group_id,
+            //     // &self.event_tx,
+            //     // &self.callback_tx,
+            //     // apply_state,
+            // );
+
+            let response = self
+                .delegate
+                .handle_applys(group_id, applys, &mut apply_state, &mut self.ctx).await
+                .unwrap();
+            self.tx.send(response).unwrap();
+            // futs.push(tokio::spawn(async move {
+            //     // TODO: new delegate
+            //     // let mut response = Response {
+            //     //     group_id,
+            //     //     apply_results: Vec::new(),
+            //     //     apply_state: RaftGroupApplyState::default(),
+            //     // };
+            //     delegate.handle_applys(group_id, applys).await.unwrap()
+            //     // response.apply_results.push(apply_result);
+            //     // response.apply_state = delegate.apply_state.clone();
+            //     // response
+            // }));
         }
 
-        for fut in futs {
-            let response = fut.await.unwrap();
-            self.multi_groups_apply_state
-                .insert(response.group_id, response.apply_state.clone());
-            self.tx.send(response).unwrap();
-        }
+        // for fut in futs {
+        //     let response = fut.await.unwrap();
+        //     self.multi_groups_apply_state
+        //         .insert(response.group_id, response.apply_state.clone());
+        //     self.tx.send(response).unwrap();
+        // }
     }
+
     // #[tracing::instrument(
     //     level = Level::TRACE,
     //     name = "ApplyActorInner::start",
@@ -360,6 +373,7 @@ impl ApplyActorRuntime {
 
                         requests.push(request);
                     }
+
                     self.handle_requests(requests);
                     self.delegate_handle_applys().await;
                 },
@@ -440,34 +454,29 @@ impl<AppResponse> PendingSenderQueue<AppResponse> {
     }
 }
 
-pub struct ApplyDelegate {
-    node_id: u64,
-    group_id: u64,
-    event_tx: Sender<Vec<Event>>,
-    callback_event_tx: Sender<CallbackEvent>,
-    // pending_proposals: VecDeque<Proposal>,
-    staging_events: Vec<Event>,
-
-    apply_state: RaftGroupApplyState,
-    pending_senders: PendingSenderQueue<()>, // TODO: add generic
+struct ApplyContext<RSM>
+where
+    RSM: StateMachine,
+{
+    rsm: RSM,
+    commit_tx: UnboundedSender<CommitEvent>,
 }
 
-impl ApplyDelegate {
-    fn new(
-        node_id: u64,
-        group_id: u64,
-        event_tx: &Sender<Vec<Event>>,
-        callback_event_tx: &Sender<CallbackEvent>,
-        apply_state: RaftGroupApplyState,
-    ) -> Self {
+pub struct ApplyDelegate<RSM> {
+    node_id: u64,
+    pending_senders: PendingSenderQueue<()>, // TODO: add generic
+    _m: PhantomData<RSM>,
+}
+
+impl<RSM> ApplyDelegate<RSM>
+where
+    RSM: StateMachine,
+{
+    fn new(node_id: u64) -> Self {
         Self {
             node_id,
-            group_id,
-            event_tx: event_tx.clone(),
-            callback_event_tx: callback_event_tx.clone(),
-            staging_events: Vec::new(),
-            apply_state,
             pending_senders: PendingSenderQueue::new(),
+            _m: PhantomData,
         }
     }
 
@@ -548,13 +557,13 @@ impl ApplyDelegate {
         &mut self,
         group_id: u64,
         applys: Vec<Apply>,
+        apply_state: &mut RaftGroupApplyState,
+        ctx: &mut ApplyContext<RSM>,
     ) -> Result<Response, Error> {
-        let mut results = vec![];
+        // let mut results = vec![];
         for mut apply in applys {
-            let (prev_applied_index, prev_applied_term) = (
-                self.apply_state.applied_index,
-                self.apply_state.applied_term,
-            );
+            let (prev_applied_index, prev_applied_term) =
+                (apply_state.applied_index, apply_state.applied_term);
             let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
             // check if the state machine is backword
             if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
@@ -565,18 +574,30 @@ impl ApplyDelegate {
                 );
             }
 
+            let committed_index = apply.commit_index;
             self.push_pending_proposals(std::mem::take(&mut apply.proposals));
-            let res = self
-                .handle_entries(std::mem::take(&mut apply.entries))
-                .await;
-            results.push(res.unwrap());
+
+            let events = self.handle_entries(ctx, group_id, std::mem::take( &mut apply.entries));
+
+            let iter = ctx.rsm.apply(events.into_iter()).await;
+
+            apply_state.applied_index =
+                iter.and_then(|mut iter| iter.next())
+                    .map_or(committed_index, |next| {
+                        let index = next.entry_index();
+                        assert_ne!(index, 0);
+                        if index == 1 {
+                            1
+                        } else {
+                            index - 1
+                        }
+                    });
+            apply_state.commit_index = committed_index;
         }
 
-        Self::notify_apply(&self.event_tx, std::mem::take(&mut self.staging_events)).await;
         Ok(Response {
             group_id,
-            apply_state: self.apply_state.clone(),
-            apply_results: results,
+            apply_state: apply_state.clone(),
         })
     }
 
@@ -585,7 +606,9 @@ impl ApplyDelegate {
     //     name = "ApplyActorRuntime::handle_committed_entries",
     //     skip_all
     // )]
-    async fn handle_entries(&mut self, ents: Vec<Entry>) -> Result<ApplyResult, Error> {
+    fn handle_entries(&mut self,         ctx: &mut ApplyContext<RSM>,
+        group_id: u64, ents: Vec<Entry>) -> Vec<ApplyEvent> {
+        let mut events = vec![];
         for entry in ents.into_iter() {
             // TODO: applied index need load from storage.
             // let next_apply_index = self.apply_state.applied_index + 1;
@@ -597,15 +620,17 @@ impl ApplyDelegate {
             // }
 
             // TODO: add result
-            match entry.entry_type() {
-                EntryType::EntryNormal => self.handle_committed_normal(entry),
+            let event = match entry.entry_type() {
+                EntryType::EntryNormal => self.handle_committed_normal(ctx, group_id, entry),
                 EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    self.handle_committed_conf_change(entry)
+                    self.handle_committed_conf_change(ctx, group_id, entry)
                 }
-            }
+            };
+
+            events.push(event)
         }
 
-        Ok(ApplyResult {})
+        events
     }
 
     async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
@@ -619,7 +644,12 @@ impl ApplyDelegate {
     //     name = "ApplyActorRuntime::handle_committed_normal",
     //     skip_all
     // )]
-    fn handle_committed_normal(&mut self, entry: Entry) {
+    fn handle_committed_normal(
+        &mut self,
+        ctx: &mut ApplyContext<RSM>,
+        group_id: u64,
+        entry: Entry,
+    ) -> ApplyEvent {
         let entry_index = entry.index;
         let entry_term = entry.term;
 
@@ -629,9 +659,14 @@ impl ApplyDelegate {
             // apply.
             info!(
                 "node {}: group = {} skip no-op entry index = {}, term = {}",
-                self.node_id, self.group_id, entry_index, entry_term
+                self.node_id, group_id, entry_index, entry_term
             );
             self.response_stale_proposals(entry_index, entry_term);
+            ApplyEvent::NoOp(ApplyNoOp {
+                group_id: group_id,
+                entry_index,
+                entry_term,
+            })
         } else {
             trace!(
                 "staging pending apply entry log ({}, {})",
@@ -642,17 +677,17 @@ impl ApplyDelegate {
                 .find_pending(entry.term, entry.index, false)
                 .map_or(None, |p| p.tx);
 
-            let apply_command = Event::ApplyNormal(ApplyNormalEvent {
-                group_id: self.group_id,
+            ApplyEvent::Normal(ApplyNormal {
+                group_id: group_id,
                 is_conf_change: false,
                 entry,
                 tx,
-            });
-            self.staging_events.push(apply_command);
+            })
+            // self.staging_events.push(apply_command);
         }
 
-        self.apply_state.applied_index = entry_index;
-        self.apply_state.applied_term = entry_term;
+        // self.apply_state.applied_index = entry_index;
+        // self.apply_state.applied_term = entry_term;
     }
 
     // #[tracing::instrument(
@@ -661,65 +696,72 @@ impl ApplyDelegate {
     //     skip_all,
     //     fields(node_id = self.node_id),
     // )]
-    fn handle_committed_conf_change(&mut self, entry: Entry) {
+    fn handle_committed_conf_change(&mut self,  ctx: &mut ApplyContext<RSM>, group_id: u64, entry: Entry) -> ApplyEvent {
         // TODO: empty adta?
         let entry_index = entry.index;
         let entry_term = entry.term;
 
         let tx = self
-            .find_pending(entry.term, entry.index, false)
+            .find_pending(entry.term, entry.index, true)
             .map_or(None, |p| p.tx);
-        let event = match entry.entry_type() {
-            EntryType::EntryNormal => unreachable!(),
-            EntryType::EntryConfChange => {
-                let mut cc = ConfChange::default();
-                cc.merge(entry.data.as_ref()).unwrap();
 
-                let mut change_request = MembershipChangeRequest::default();
-                change_request.merge(entry.context.as_ref()).unwrap();
+        // let event = match entry.entry_type() {
+        //     EntryType::EntryNormal => unreachable!(),
+        //     EntryType::EntryConfChange => {
+        //         let mut cc = ConfChange::default();
+        //         cc.merge(entry.data.as_ref()).unwrap();
 
-                let change_view = Some(MembershipChangeView {
-                    index: entry.index,
-                    conf_change: cc.clone().into_v2(),
-                    change_request,
-                });
+        //         let mut change_request = MembershipChangeRequest::default();
+        //         change_request.merge(entry.context.as_ref()).unwrap();
 
-                ApplyMembershipChangeEvent {
-                    group_id: self.group_id,
-                    entry,
-                    tx,
-                    change_view,
-                    callback_event_tx: self.callback_event_tx.clone(),
-                }
-            }
-            EntryType::EntryConfChangeV2 => {
-                let mut cc_v2 = ConfChangeV2::default();
-                cc_v2.merge(entry.data.as_ref()).unwrap();
+        //         let change_view = Some(MembershipChangeView {
+        //             index: entry.index,
+        //             conf_change: cc.clone().into_v2(),
+        //             change_request,
+        //         });
 
-                let mut change_request = MembershipChangeRequest::default();
-                change_request.merge(entry.context.as_ref()).unwrap();
+        //         ApplyMembershipChangeEvent {
+        //             group_id: self.group_id,
+        //             entry,
+        //             tx,
+        //             change_view,
+        //             callback_event_tx: self.callback_event_tx.clone(),
+        //         }
+        //     }
+        //     EntryType::EntryConfChangeV2 => {
+        //         let mut cc_v2 = ConfChangeV2::default();
+        //         cc_v2.merge(entry.data.as_ref()).unwrap();
 
-                let change_view = Some(MembershipChangeView {
-                    index: entry.index,
-                    conf_change: cc_v2,
-                    change_request,
-                });
+        //         let mut change_request = MembershipChangeRequest::default();
+        //         change_request.merge(entry.context.as_ref()).unwrap();
 
-                ApplyMembershipChangeEvent {
-                    group_id: self.group_id,
-                    entry,
-                    tx,
-                    change_view,
-                    callback_event_tx: self.callback_event_tx.clone(),
-                }
-            }
-        };
+        //         let change_view = Some(MembershipChangeView {
+        //             index: entry.index,
+        //             conf_change: cc_v2,
+        //             change_request,
+        //         });
 
-        let apply_command = Event::ApplyMembershipChange(event);
-        self.staging_events.push(apply_command);
+        //         ApplyMembershipChangeEvent {
+        //             group_id: self.group_id,
+        //             entry,
+        //             tx,
+        //             change_view,
+        //             callback_event_tx: self.callback_event_tx.clone(),
+        //         }
+        //     }
+        // };
 
-        self.apply_state.applied_index = entry_index;
-        self.apply_state.applied_term = entry_term;
+        ApplyEvent::Membership(ApplyMembership {
+            group_id,
+            entry,
+            tx,
+            commit_tx: ctx.commit_tx.clone(),
+        })
+        // let apply_command = Event::ApplyMembershipChange(event);
+        // self.staging_events.push(apply_command);
+
+        // self.apply_state.applied_index = entry_index;
+        // self.apply_state.applied_term = entry_term;
     }
 
     // #[tracing::instrument(
@@ -783,11 +825,13 @@ mod test {
     use std::collections::HashMap;
     use std::sync::Arc;
 
+    use futures::Future;
     use tokio::sync::mpsc::channel;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::multiraft::util::compute_entry_size;
     use crate::multiraft::Config;
+    use crate::multiraft::StateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
 
@@ -795,6 +839,22 @@ mod test {
     use super::ApplyActorRuntime;
     use super::Request;
     use super::State;
+
+    struct NoOpStateMachine {}
+
+    impl StateMachine for NoOpStateMachine {
+        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::ApplyEvent>>> + 'life0
+        where
+            Self: 'life0;
+        fn apply(
+            &mut self,
+            event: std::vec::IntoIter<crate::multiraft::ApplyEvent>,
+        ) -> Self::ApplyFuture<'_> {
+            async move {
+                None
+            }
+        }
+    }
 
     // TODO: as common method
     fn new_entries(start: u64, end: u64, term: u64, entry_size: usize) -> Vec<Entry> {
@@ -833,11 +893,10 @@ mod test {
         }
     }
 
-    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyActorRuntime {
+    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyActorRuntime<NoOpStateMachine> {
         let (_request_tx, request_rx) = unbounded_channel();
         let (response_tx, _response_rx) = unbounded_channel();
-        let (callback_tx, _callback_rx) = channel(1);
-        let (event_tx, _event_rx) = channel(1);
+        let (callback_tx, _callback_rx) = unbounded_channel();
         let state = Arc::new(State::default());
         let cfg = Config {
             batch_apply,
@@ -845,14 +904,8 @@ mod test {
             ..Default::default()
         };
 
-        ApplyActorRuntime::new(
-            &cfg,
-            &state,
-            request_rx,
-            response_tx,
-            callback_tx,
-            &event_tx,
-        )
+        let rsm = NoOpStateMachine {};
+        ApplyActorRuntime::new(&cfg, &state, rsm, request_rx, response_tx, callback_tx)
     }
     #[test]
     fn test_batch_pendings() {
