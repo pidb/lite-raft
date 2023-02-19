@@ -37,7 +37,7 @@ async fn test_group_write() {
     // }
 
     let events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_event_rx(1),
+        cluster.mut_apply_event_rx(1),
         Duration::from_millis(1000),
         command_nums as usize,
     )
@@ -101,7 +101,7 @@ async fn test_multigroup_write() {
     // }
 
     let events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_event_rx(1),
+        cluster.mut_apply_event_rx(1),
         Duration::from_millis(1000),
         (group_nums * command_nums) as usize,
     )

@@ -50,15 +50,16 @@ use crate::util::TaskGroup;
 
 use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
+use super::StateMachine;
 // use super::apply_actor::ApplyActorReceiver;
 // use super::apply_actor::ApplyActorSender;
 use super::apply_actor::Request as ApplyRequest;
 use super::apply_actor::Response as ApplyResponse;
 use super::config::Config;
 use super::error::Error;
-use super::event::CallbackEvent;
+use super::event::CommitEvent;
+use super::event::CommitMembership;
 use super::event::Event;
-use super::event::MembershipChangeView;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
@@ -113,11 +114,12 @@ impl ShardState {
     }
 }
 
-pub struct MultiRaftActor<T, RS, MRS>
+pub struct MultiRaftActor<T, RS, MRS, RSM>
 where
     T: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
+    RSM: StateMachine,
 {
     pub shard: ShardState,
     // FIXME: queue should have one per-group.
@@ -130,18 +132,19 @@ where
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
     )>,
     pub admin_tx: Sender<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
-    apply: ApplyActor,
+    apply: ApplyActor<RSM>,
     runtime: Mutex<Option<MultiRaftActorRuntime<T, RS, MRS>>>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<T, RS, MRS> MultiRaftActor<T, RS, MRS>
+impl<T, RS, MRS, RSM> MultiRaftActor<T, RS, MRS, RSM>
 where
     T: Transport + Clone,
     RS: Storage + Clone + Sync + Send + 'static,
     MRS: MultiRaftStorage<RS>,
+    RSM: StateMachine,
 {
-    pub fn new(cfg: &Config, transport: &T, storage: &MRS, event_tx: &Sender<Vec<Event>>) -> Self {
+    pub fn new(cfg: &Config, transport: &T, storage: &MRS, rsm: RSM, event_tx: &Sender<Vec<Event>>) -> Self {
         let state = Arc::new(State::default());
 
         let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
@@ -151,7 +154,7 @@ where
         let (campaign_tx, campaign_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(10);
 
-        let (callback_tx, callback_rx) = channel(1);
+        let (callback_tx, callback_rx) = unbounded_channel();
 
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
@@ -187,10 +190,10 @@ where
 
         let apply = ApplyActor::new(
             cfg,
+            rsm,
             apply_request_rx,
             apply_response_tx,
             callback_tx,
-            event_tx,
         );
 
         Self {
@@ -259,7 +262,7 @@ where
     admin_rx: Receiver<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
-    callback_rx: Receiver<CallbackEvent>,
+    callback_rx: UnboundedReceiver<CommitEvent>,
     apply_request_tx: UnboundedSender<(Span, ApplyRequest)>,
     apply_response_rx: UnboundedReceiver<ApplyResponse>,
     // write_actor_address: WriteAddress,
@@ -977,7 +980,7 @@ where
         //
         // but, voters of raft and replicas_desc are not one-to-one, because voters
         // can be added in the subsequent way of membership change.
-        let applied = 1; // TODO: get applied from stroage
+        let applied = 0; // TODO: get applied from stroage
         let raft_cfg = raft::Config {
             id: replica_id,
             applied,
@@ -1063,25 +1066,25 @@ where
             "node {}: group = {} apply state change = {:?}",
             self.node_id, response.group_id, response.apply_state
         );
-       
+
         group.state.apply_state = response.apply_state;
-        
     }
 
-    async fn handle_callback(&mut self, callback_event: CallbackEvent) {
-        trace!("handle callback = {:?}", callback_event);
-        match callback_event {
-            CallbackEvent::None => return,
-            CallbackEvent::MembershipChange(view, response_tx) => {
-                let res = self.apply_membership_change_view(view).await;
-                response_tx.send(res).unwrap();
+    async fn handle_callback(&mut self, commit: CommitEvent) {
+        debug!("handle callback = {:?}", commit);
+        match commit {
+            CommitEvent::None => return,
+            CommitEvent::Membership((commit, tx)) => {
+                let res = self.apply_membership_change_view(commit).await;
+                println!("res = {:?}", res);
+                tx.send(res).unwrap();
             }
         }
     }
 
     async fn apply_membership_change_view(
         &mut self,
-        view: MembershipChangeView,
+        view: CommitMembership,
     ) -> Result<(), Error> {
         assert_eq!(
             view.change_request.changes.len(),
@@ -1140,7 +1143,7 @@ where
             .group_storage(group_id, group.replica_id)
             .await?;
         gs.set_conf_state(conf_state);
-
+        println!("applied membership");
         return Ok(());
     }
 
@@ -1329,7 +1332,7 @@ where
         let span = tracing::span::Span::current();
         if let Err(_err) = self
             .apply_request_tx
-            .send((span.clone(), ApplyRequest::Apply { applys }  ))
+            .send((span.clone(), ApplyRequest::Apply { applys }))
         {
             // FIXME
             warn!("apply actor stopped");

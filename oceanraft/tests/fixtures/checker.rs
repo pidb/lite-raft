@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use oceanraft::multiraft::ApplyNormalEvent;
+use oceanraft::multiraft::ApplyNormal;
+
 
 #[derive(Default)]
 struct Commands(HashMap<u64, Vec<Vec<u8>>>);
@@ -28,14 +29,14 @@ impl WriteChecker {
        self.writes.insert(group_id, data);
     }
 
-    pub fn check(&mut self, events: &Vec<ApplyNormalEvent>) {
-        self.fill_applys(events);
+    pub fn check(&mut self, applys: &Vec<ApplyNormal>) {
+        self.fill_applys(applys);
         assert_eq!(self.writes, self.applys)
     }
 
-    fn fill_applys(&mut self, events: &Vec<ApplyNormalEvent>) {
-        for event in events.iter() {
-            self.applys.insert(event.group_id, event.entry.data.clone());
+    fn fill_applys(&mut self, applys: &Vec<ApplyNormal>) {
+        for apply in applys.iter() {
+            self.applys.insert(apply.group_id, apply.entry.data.clone());
         }
     }
 }
