@@ -1,4 +1,5 @@
 use prost::Message as _;
+use raft::RaftState;
 use raft_proto::ConfChangeI;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -132,5 +133,38 @@ impl ApplyEvent {
             Self::Normal(normal) => normal.entry.index,
             Self::Membership(membership) => membership.entry.index,
         }
+    }
+
+    #[allow(unused)]
+    pub(crate) fn entry_term(&self) -> u64 {
+        match self {
+            Self::NoOp(noop) => noop.entry_term,
+            Self::Normal(normal) => normal.entry.term,
+            Self::Membership(membership) => membership.entry.term,
+        }
+    }
+}
+
+/// MultiRaftEvent is sent by a multiraft actor, and the receiver 
+/// performs specific actions within the system.
+#[derive(Debug, Clone)]
+pub enum MultiRaftEvent {
+    /// Default value.
+    None,
+
+    /// Sent when consensus group is created.
+    CreateGroup {
+        group_id: u64,
+        replica_id: u64,
+        commit_index: u64,
+        commit_term: u64,
+        applied_index: u64,
+        applied_term: u64,
+    }
+}
+
+impl Default for MultiRaftEvent {
+    fn default() -> Self {
+        Self::None
     }
 }

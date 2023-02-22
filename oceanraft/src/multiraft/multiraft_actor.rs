@@ -11,7 +11,6 @@ use raft::prelude::AdminMessage;
 use raft::prelude::AdminMessageType;
 use raft::prelude::RaftGroupManagement;
 use raft::prelude::RaftGroupManagementType;
-
 use raft::Storage;
 
 use tokio::sync::mpsc::channel;
@@ -60,6 +59,7 @@ use super::error::Error;
 use super::event::CommitEvent;
 use super::event::CommitMembership;
 use super::event::Event;
+use super::event::MultiRaftEvent;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
@@ -144,7 +144,13 @@ where
     MRS: MultiRaftStorage<RS>,
     RSM: StateMachine,
 {
-    pub fn new(cfg: &Config, transport: &T, storage: &MRS, rsm: RSM, event_tx: &Sender<Vec<Event>>) -> Self {
+    pub fn new(
+        cfg: &Config,
+        transport: &T,
+        storage: &MRS,
+        rsm: RSM,
+        event_tx: &Sender<Vec<Event>>,
+    ) -> Self {
         let state = Arc::new(State::default());
 
         let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
@@ -551,6 +557,7 @@ where
                 let group = match self.groups.get_mut(group_id) {
                     None => {
                         // FIXME: don't panic
+                        // if group removed, but msg arrive here, panic boom!
                         panic!(
                             "missing group {} at from_node {} fanout heartbeat",
                             *group_id, msg.from_node
@@ -980,10 +987,14 @@ where
         //
         // but, voters of raft and replicas_desc are not one-to-one, because voters
         // can be added in the subsequent way of membership change.
-        let applied = 0; // TODO: get applied from stroage
+
+        // If there is an initial state, there are two cases
+        // 1. create a new replica, started by configuration, applied should be 1
+        // 2. an already run replica is created again, may have experienced snapshot,
+        // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied,
+            applied: rs.hard_state.commit,
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: 1024 * 1024,
@@ -1082,10 +1093,7 @@ where
         }
     }
 
-    async fn apply_membership_change_view(
-        &mut self,
-        view: CommitMembership,
-    ) -> Result<(), Error> {
+    async fn apply_membership_change_view(&mut self, view: CommitMembership) -> Result<(), Error> {
         assert_eq!(
             view.change_request.changes.len(),
             view.conf_change.changes.len()

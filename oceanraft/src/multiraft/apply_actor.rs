@@ -1,41 +1,22 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::mem::take;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use prost::Message as ProstMessage;
-
-use raft::prelude::ConfChangeV2;
-
-use raft_proto::prelude::ConfChange;
 use raft_proto::prelude::Entry;
 use raft_proto::prelude::EntryType;
-use raft_proto::prelude::MembershipChangeRequest;
-use raft_proto::ConfChangeI;
 
-use futures::stream::FuturesUnordered;
-
-use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::sync::mpsc::Receiver;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-use tokio::task::JoinError;
 use tokio::task::JoinHandle;
 
-use tracing::debug;
-use tracing::error;
 use tracing::info;
 use tracing::trace;
-use tracing::trace_span;
 use tracing::warn;
-use tracing::Instrument;
 use tracing::Level;
 use tracing::Span;
 
@@ -47,11 +28,11 @@ use crate::util::TaskGroup;
 
 use super::error::Error;
 use super::error::ProposalError;
-use crate::multiraft::ApplyEvent;
+
 use super::ApplyMembership;
+use crate::multiraft::ApplyEvent;
 
 use super::event::CommitEvent;
-use super::event::Event;
 use super::proposal::Proposal;
 use super::raft_group::RaftGroupApplyState;
 use super::StateMachine;
@@ -86,8 +67,7 @@ where
         commit_tx: UnboundedSender<CommitEvent>,
     ) -> Self {
         let state = Arc::new(State::default());
-        let runtime =
-            ApplyActorRuntime::new(cfg, &state, rsm, request_rx, response_tx, commit_tx);
+        let runtime = ApplyActorRuntime::new(cfg, &state, rsm, request_rx, response_tx, commit_tx);
 
         Self {
             state,
@@ -172,7 +152,6 @@ where
     state: Arc<State>,
     rx: UnboundedReceiver<(tracing::span::Span, Request)>,
     tx: UnboundedSender<Response>,
-
     pending_applys: HashMap<u64, Vec<Apply>>,
     ctx: ApplyContext<RSM>,
     delegate: ApplyDelegate<RSM>,
@@ -229,7 +208,39 @@ where
         };
     }
 
-    fn handle_requests(&mut self, requests: Vec<Request>) {
+    /// This method is called only when the apply request is received.
+    /// TODO: think replica_cache in local?
+    // async fn initialize_apply_state<RS: RaftStorage, MRS: MultiRaftStorage<RS>>(
+    //     &mut self,
+    //     group_id: u64,
+    //     store: Option<MRS>,
+    // ) -> Result<(), Error> {
+    //     let apply_state = self.multi_groups_apply_state.get_mut(&group_id).unwrap(); // FIXME: return error
+    //     let replica_desc = store
+    //         .replica_for_node(group_id, self.node_id)
+    //         .await?
+    //         .unwrap(); // FIXME: return error
+    //     let gs = store
+    //         .group_storage(group_id, replica_desc.replica_id)
+    //         .await?;
+    //     let rs = gs.initial_state().map_err(|err| Error::Raft(err))?;
+
+    //     *apply_state = RaftGroupApplyState {
+    //         commit_index: rs.hard_state.commit,
+    //         commit_term: rs.hard_state.term,
+    //         applied_index: rs.hard_state.commit,
+    //         applied_term: rs.hard_state.term,
+    //     };
+
+    //     Ok(())
+    // }
+
+    // This method performs a batch of apply from the same group in multiple requests,
+    // if batch is successful, multiple requests from the same group are batched into one apply,
+    // otherwise pending in FIFO order.
+    //
+    // Note: This method provides scalability for us to make more flexible apply decisions in the future.
+    async fn batch_requests(&mut self, requests: Vec<Request>) {
         // let mut pending_applys: HashMap<u64, Vec<Apply>> = HashMap::new();
         let mut batch_applys: HashMap<u64, Option<Apply>> = HashMap::new();
 
@@ -279,39 +290,14 @@ where
     async fn delegate_handle_applys(&mut self) {
         // let mut futs = vec![];
         for (group_id, applys) in self.pending_applys.drain() {
-            // FIXME: get mut
-            let mut apply_state = match self.multi_groups_apply_state.get(&group_id) {
-                None => {
-                    self.multi_groups_apply_state.insert(
-                        group_id,
-                        RaftGroupApplyState {
-                            commit_index: 0,
-                            commit_term: 0,
-                            applied_term: 1,
-                            applied_index: 1,
-                        },
-                    );
-                    RaftGroupApplyState {
-                        commit_index: 0,
-                        commit_term: 0,
-                        applied_index: 1,
-                        applied_term: 1,
-                    }
-                }
-                Some(state) => state.clone(),
-            };
-            // let mut delegate = ApplyDelegate::new(
-            //     self.node_id,
-            //     // group_id,
-            //     // &self.event_tx,
-            //     // &self.callback_tx,
-            //     // apply_state,
-            // );
+            let apply_state = self.multi_groups_apply_state.entry(group_id).or_default();
 
             let response = self
                 .delegate
-                .handle_applys(group_id, applys, &mut apply_state, &mut self.ctx).await
+                .handle_applys(group_id, applys, apply_state, &mut self.ctx)
+                .await
                 .unwrap();
+            // TODO: batch send?
             self.tx.send(response).unwrap();
             // futs.push(tokio::spawn(async move {
             //     // TODO: new delegate
@@ -335,12 +321,6 @@ where
         // }
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "ApplyActorInner::start",
-    //     fields(node_id=self.node_id)
-    //     skip_all
-    // )]
     async fn main_loop(mut self, mut stopper: Stopper) {
         info!("node {}: start apply main_loop", self.node_id);
 
@@ -350,6 +330,7 @@ where
                 _ = &mut stopper => {
                     break
                 },
+                // TODO: handle error
                 Some((span, incoming_request)) = self.rx.recv() =>  {
                     let mut requests = vec![];
                     requests.push(incoming_request);
@@ -374,9 +355,13 @@ where
                         requests.push(request);
                     }
 
-                    self.handle_requests(requests);
+                    self.batch_requests(requests).await;
                     self.delegate_handle_applys().await;
                 },
+                // Ok(_) = self.multiraft_event_rx.changed() =>  {
+                //     debug!("multiraft_event_rx changed");
+                //     self.handle_multiraft_event();
+                // }
             }
         }
 
@@ -553,6 +538,123 @@ where
         return None;
     }
 
+    async fn handle_apply(
+        &mut self,
+        ctx: &mut ApplyContext<RSM>,
+        mut apply: Apply,
+        apply_state: &mut RaftGroupApplyState,
+    ) {
+        let group_id = apply.group_id;
+        let (prev_applied_index, prev_applied_term) =
+            (apply_state.applied_index, apply_state.applied_term);
+        let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
+        // check if the state machine is backword
+        if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
+            panic!(
+                "commit state jump backward {:?} -> {:?}",
+                (prev_applied_index, prev_applied_term),
+                (curr_commit_index, curr_commit_term)
+            );
+        }
+
+        if apply.entries.is_empty() {
+            return;
+        }
+
+        // helps applications establish monotonically increasing apply constraints for each batch.
+        if *apply_state != RaftGroupApplyState::default()
+            && apply.entries[0].index != apply_state.applied_index + 1
+        {
+            panic!(
+                "apply entries index does not match, expect {}, but got {}",
+                apply_state.applied_index + 1,
+                apply.entries[0].index
+            );
+        }
+
+        self.push_pending_proposals(std::mem::take(&mut apply.proposals));
+
+        let mut events = vec![];
+        for entry in apply.entries.into_iter() {
+            let entry_index = entry.index;
+            let entry_term = entry.term;
+            // TODO: add result
+            let event = match entry.entry_type() {
+                EntryType::EntryNormal => {
+                    if entry.data.is_empty() {
+                        // When the new leader online, a no-op log will be send and commit.
+                        // we will skip this log for the application and set index and term after
+                        // apply.
+                        info!(
+                            "node {}: group = {} skip no-op entry index = {}, term = {}",
+                            self.node_id, group_id, entry_index, entry_term
+                        );
+                        self.response_stale_proposals(entry_index, entry_term);
+                        ApplyEvent::NoOp(ApplyNoOp {
+                            group_id: group_id,
+                            entry_index,
+                            entry_term,
+                        })
+                    } else {
+                        trace!(
+                            "staging pending apply entry log ({}, {})",
+                            entry_index,
+                            entry_term
+                        );
+                        let tx = self
+                            .find_pending(entry.term, entry.index, false)
+                            .map_or(None, |p| p.tx);
+
+                        ApplyEvent::Normal(ApplyNormal {
+                            group_id,
+                            is_conf_change: false,
+                            entry,
+                            tx,
+                        })
+                    }
+                }
+
+                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
+                    let tx = self
+                        .find_pending(entry.term, entry.index, true)
+                        .map_or(None, |p| p.tx);
+
+                    ApplyEvent::Membership(ApplyMembership {
+                        group_id,
+                        entry,
+                        tx,
+                        commit_tx: ctx.commit_tx.clone(),
+                    })
+                }
+            };
+
+            events.push(event)
+        }
+
+        // Since we feed the state machine probably a batch of entry logs, represented by IntoIter,
+        //processing applied can be divided into the following scenarios:
+        // 1. If maybe_failed_iter returns None, all entries have been applied successfully, and
+        //    applied is set to commit_index
+        // 2. If maybe_failed_iter returns Some, but next of maybe_failed_iter is None, this equals case 1
+        // 3. Otherwise, maybe_failed_iter.next() -1 fails. We set applied as the index of the successful application log
+        //
+        // Edge case: If index is 1, no logging has been applied, and applied is set to 0
+        let maybe_failed_iter = ctx.rsm.apply(events.into_iter()).await;
+        (apply_state.applied_index, apply_state.applied_term) = maybe_failed_iter
+            .and_then(|mut iter| iter.next())
+            .map_or((apply.commit_index, apply.commit_term), |next| {
+                let index = next.entry_index();
+                assert_ne!(index, 0);
+                if index == 1 {
+                    (0, 0)
+                } else {
+                    (index - 1, 0 /* TODO: load term from stored entries*/)
+                }
+            });
+        apply_state.commit_term = apply.commit_term;
+        apply_state.commit_index = apply.commit_index;
+    }
+
     async fn handle_applys(
         &mut self,
         group_id: u64,
@@ -561,207 +663,14 @@ where
         ctx: &mut ApplyContext<RSM>,
     ) -> Result<Response, Error> {
         // let mut results = vec![];
-        for mut apply in applys {
-            let (prev_applied_index, prev_applied_term) =
-                (apply_state.applied_index, apply_state.applied_term);
-            let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
-            // check if the state machine is backword
-            if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
-                panic!(
-                    "commit state jump backward {:?} -> {:?}",
-                    (prev_applied_index, prev_applied_term),
-                    (curr_commit_index, curr_commit_term)
-                );
-            }
-
-            let committed_index = apply.commit_index;
-            self.push_pending_proposals(std::mem::take(&mut apply.proposals));
-
-            let events = self.handle_entries(ctx, group_id, std::mem::take( &mut apply.entries));
-
-            let iter = ctx.rsm.apply(events.into_iter()).await;
-
-            apply_state.applied_index =
-                iter.and_then(|mut iter| iter.next())
-                    .map_or(committed_index, |next| {
-                        let index = next.entry_index();
-                        assert_ne!(index, 0);
-                        if index == 1 {
-                            1
-                        } else {
-                            index - 1
-                        }
-                    });
-            apply_state.commit_index = committed_index;
+        for apply in applys {
+            self.handle_apply(ctx, apply, apply_state).await;
         }
 
         Ok(Response {
             group_id,
             apply_state: apply_state.clone(),
         })
-    }
-
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "ApplyActorRuntime::handle_committed_entries",
-    //     skip_all
-    // )]
-    fn handle_entries(&mut self,         ctx: &mut ApplyContext<RSM>,
-        group_id: u64, ents: Vec<Entry>) -> Vec<ApplyEvent> {
-        let mut events = vec![];
-        for entry in ents.into_iter() {
-            // TODO: applied index need load from storage.
-            // let next_apply_index = self.apply_state.applied_index + 1;
-            // if entry.index != next_apply_index {
-            //     panic!(
-            //         "apply entry index does not match, expect {}, but got {}",
-            //         next_apply_index, entry.index
-            //     );
-            // }
-
-            // TODO: add result
-            let event = match entry.entry_type() {
-                EntryType::EntryNormal => self.handle_committed_normal(ctx, group_id, entry),
-                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    self.handle_committed_conf_change(ctx, group_id, entry)
-                }
-            };
-
-            events.push(event)
-        }
-
-        events
-    }
-
-    async fn notify_apply(event_tx: &Sender<Vec<Event>>, events: Vec<Event>) {
-        if let Err(err) = event_tx.send(events).await {
-            warn!("notify apply events {:?}, but receiver dropped", err.0);
-        }
-    }
-
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "ApplyActorRuntime::handle_committed_normal",
-    //     skip_all
-    // )]
-    fn handle_committed_normal(
-        &mut self,
-        ctx: &mut ApplyContext<RSM>,
-        group_id: u64,
-        entry: Entry,
-    ) -> ApplyEvent {
-        let entry_index = entry.index;
-        let entry_term = entry.term;
-
-        if entry.data.is_empty() {
-            // When the new leader online, a no-op log will be send and commit.
-            // we will skip this log for the application and set index and term after
-            // apply.
-            info!(
-                "node {}: group = {} skip no-op entry index = {}, term = {}",
-                self.node_id, group_id, entry_index, entry_term
-            );
-            self.response_stale_proposals(entry_index, entry_term);
-            ApplyEvent::NoOp(ApplyNoOp {
-                group_id: group_id,
-                entry_index,
-                entry_term,
-            })
-        } else {
-            trace!(
-                "staging pending apply entry log ({}, {})",
-                entry_index,
-                entry_term
-            );
-            let tx = self
-                .find_pending(entry.term, entry.index, false)
-                .map_or(None, |p| p.tx);
-
-            ApplyEvent::Normal(ApplyNormal {
-                group_id: group_id,
-                is_conf_change: false,
-                entry,
-                tx,
-            })
-            // self.staging_events.push(apply_command);
-        }
-
-        // self.apply_state.applied_index = entry_index;
-        // self.apply_state.applied_term = entry_term;
-    }
-
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "ApplyActorRuntime::handle_committed_conf_change",
-    //     skip_all,
-    //     fields(node_id = self.node_id),
-    // )]
-    fn handle_committed_conf_change(&mut self,  ctx: &mut ApplyContext<RSM>, group_id: u64, entry: Entry) -> ApplyEvent {
-        // TODO: empty adta?
-        let entry_index = entry.index;
-        let entry_term = entry.term;
-
-        let tx = self
-            .find_pending(entry.term, entry.index, true)
-            .map_or(None, |p| p.tx);
-
-        // let event = match entry.entry_type() {
-        //     EntryType::EntryNormal => unreachable!(),
-        //     EntryType::EntryConfChange => {
-        //         let mut cc = ConfChange::default();
-        //         cc.merge(entry.data.as_ref()).unwrap();
-
-        //         let mut change_request = MembershipChangeRequest::default();
-        //         change_request.merge(entry.context.as_ref()).unwrap();
-
-        //         let change_view = Some(MembershipChangeView {
-        //             index: entry.index,
-        //             conf_change: cc.clone().into_v2(),
-        //             change_request,
-        //         });
-
-        //         ApplyMembershipChangeEvent {
-        //             group_id: self.group_id,
-        //             entry,
-        //             tx,
-        //             change_view,
-        //             callback_event_tx: self.callback_event_tx.clone(),
-        //         }
-        //     }
-        //     EntryType::EntryConfChangeV2 => {
-        //         let mut cc_v2 = ConfChangeV2::default();
-        //         cc_v2.merge(entry.data.as_ref()).unwrap();
-
-        //         let mut change_request = MembershipChangeRequest::default();
-        //         change_request.merge(entry.context.as_ref()).unwrap();
-
-        //         let change_view = Some(MembershipChangeView {
-        //             index: entry.index,
-        //             conf_change: cc_v2,
-        //             change_request,
-        //         });
-
-        //         ApplyMembershipChangeEvent {
-        //             group_id: self.group_id,
-        //             entry,
-        //             tx,
-        //             change_view,
-        //             callback_event_tx: self.callback_event_tx.clone(),
-        //         }
-        //     }
-        // };
-
-        ApplyEvent::Membership(ApplyMembership {
-            group_id,
-            entry,
-            tx,
-            commit_tx: ctx.commit_tx.clone(),
-        })
-        // let apply_command = Event::ApplyMembershipChange(event);
-        // self.staging_events.push(apply_command);
-
-        // self.apply_state.applied_index = entry_index;
-        // self.apply_state.applied_term = entry_term;
     }
 
     // #[tracing::instrument(
@@ -826,7 +735,6 @@ mod test {
     use std::sync::Arc;
 
     use futures::Future;
-    use tokio::sync::mpsc::channel;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::multiraft::util::compute_entry_size;
@@ -848,11 +756,9 @@ mod test {
             Self: 'life0;
         fn apply(
             &mut self,
-            event: std::vec::IntoIter<crate::multiraft::ApplyEvent>,
+            _: std::vec::IntoIter<crate::multiraft::ApplyEvent>,
         ) -> Self::ApplyFuture<'_> {
-            async move {
-                None
-            }
+            async move { None }
         }
     }
 
@@ -981,7 +887,7 @@ mod test {
 
         for case in cases {
             let mut worker = new_worker(true, 400);
-            worker.handle_requests(case.0);
+            worker.batch_requests(case.0);
             for expect in case.1 {
                 let pending_applys = worker.pending_applys.get(&expect.group_id).unwrap();
                 assert_eq!(pending_applys.len(), expect.pending_apply_len);
