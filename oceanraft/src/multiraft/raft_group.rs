@@ -435,15 +435,14 @@ where
         let mut ready = gwr.ready.take().unwrap();
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
-            warn!("TODO: should apply snapshit = {:?}", snapshot);
-            // TODO: add apply snapshot
-            // 当添加新的 replica 时, 需要同步成员变更信息
+            // FIXME: handle error
             gs.apply_snapshot(snapshot).unwrap();
         }
 
         if !ready.entries().is_empty() {
             let entries = ready.take_entries();
             if let Err(_error) = gs.append_entries(&entries) {
+                // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
             }
         }
@@ -451,6 +450,7 @@ where
         if let Some(hs) = ready.hs() {
             let hs = hs.clone();
             if let Err(_error) = gs.set_hardstate(hs) {
+                // FIXME: handle error
                 panic!("node {}: set hardstate error = {}", node_id, _error);
             }
         }
@@ -467,9 +467,9 @@ where
             .await;
         }
 
-        // let light_ready = self.raft_group.advance(ready);
         let light_ready = self.raft_group.advance_append(ready);
-        self.raft_group.advance_apply_to(self.state.apply_state.applied_index);
+        // self.raft_group
+        //    .advance_apply_to(self.state.apply_state.applied_index);
         gwr.light_ready = Some(light_ready);
     }
 
@@ -558,7 +558,10 @@ where
         }
 
         if request.term != 0 && self.term() > request.term {
-            return Err(Error::Proposal(ProposalError::Stale(request.term, self.term())));
+            return Err(Error::Proposal(ProposalError::Stale(
+                request.term,
+                self.term(),
+            )));
         }
 
         Ok(())

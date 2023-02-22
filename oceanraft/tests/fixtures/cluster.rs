@@ -16,6 +16,7 @@ use oceanraft::memstore::RaftMemStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
 use oceanraft::multiraft::ApplyEvent;
+use oceanraft::multiraft::ApplyMembership;
 use oceanraft::multiraft::Config;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::Event;
@@ -32,7 +33,6 @@ use oceanraft::prelude::RaftGroupManagement;
 use oceanraft::prelude::RaftGroupManagementType;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
-use oceanraft::multiraft::ApplyMembership;
 use oceanraft::util::TaskGroup;
 
 use crate::fixtures::transport::LocalTransport;
@@ -205,13 +205,7 @@ impl FixtureCluster {
             let replica_id = (i + 1) as u64;
             let storage = &self.storages[place_node_index];
             let gs = storage.group_storage(plan.group_id, replica_id).await?;
-
-            // init hardstate
-            let mut hs = HardState::default();
-            hs.commit = 1;
-            hs.term = 1;
-            gs.set_hardstate(hs).unwrap();
-            // apply snapshot
+            // apply snapshot should mutable raft state (conf_state and hard_state)
             let mut ss = Snapshot::default();
             ss.mut_metadata().mut_conf_state().voters = voters.clone();
             ss.mut_metadata().index = 1;
@@ -384,7 +378,7 @@ impl FixtureCluster {
                 // check all events type should apply
                 for event in events {
                     match event {
-                        ApplyEvent::Normal (data) => results.push(data),
+                        ApplyEvent::Normal(data) => results.push(data),
                         // Event::ApplyNormal(event) => results.push(event),
                         _ => {}
                     }
