@@ -30,8 +30,6 @@ message RaftMessage {
     uint64 from_node = 2;
     uint64 to_node = 3;
     repeated ReplicaDesc replicas = 4;
-    // ReplicaMetadata from_replica = 2;
-    // ReplicaMetadata to_replica = 3;
     eraftpb.Message msg = 5;
 }
 
