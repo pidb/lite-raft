@@ -52,6 +52,9 @@ pub enum RaftGroupError {
     #[error("raft group not exist, node_id = {1}, group_d = {1}")]
     NotExist(u64, u64),
 
+    #[error("raft group deleted, node_id = {1}, group_d = {1}")]
+    Deleted(u64, u64),
+
     #[error("the raft group ({1}) already exists in node ({0}")]
     Exists(u64, u64),
 }
