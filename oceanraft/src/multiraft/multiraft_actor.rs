@@ -355,14 +355,13 @@ where
                 _ = ticker.recv() => {
                     self.groups.iter_mut().for_each(|(id, group)| {
                         if group.raft_group.tick() {
-                            // self.activity_groups.insert(group.group_id);
+                            self.activity_groups.insert(group.group_id);
                         }
-                        self.activity_groups.insert(group.group_id);
                     });
                     ticks += 1;
                     if ticks >= self.cfg.heartbeat_tick {
                         ticks = 0;
-                        self.coalesced_heratbeat().await;
+                        self.incorporate_heatbeat();
                     }
                 },
 
@@ -428,32 +427,32 @@ where
 
     /// The node sends heartbeats to other nodes instead
     /// of all raft groups on that node.
-    async fn coalesced_heratbeat(&self) {
-        for (node_id, _) in self.node_manager.iter() {
-            if *node_id == self.node_id {
+    fn incorporate_heatbeat(&self) {
+        for (to_node, _) in self.node_manager.iter() {
+            if *to_node == self.node_id {
                 continue;
             }
 
-            // debug!(
-            //     "trigger node coalesced heartbeta {} -> {} ",
-            //     self.node_id, *node_id
-            // );
+            trace!("trigger heartbeta {} -> {} ", self.node_id, *to_node);
 
             // coalesced heartbeat to all nodes. the heartbeat message is node
             // level message so from and to set 0 when sending, and the specific
             // value is set by message receiver.
             let mut raft_msg = Message::default();
-            // FIXME: should add commit information...
             raft_msg.set_msg_type(MessageType::MsgHeartbeat);
-            let msg = RaftMessage {
+            // TODO: transport as async method
+            if let Err(err) = self.transport.send(RaftMessage {
                 group_id: NO_GORUP,
                 from_node: self.node_id,
-                to_node: *node_id,
+                to_node: *to_node,
                 replicas: vec![],
                 msg: Some(raft_msg),
-            };
-
-            if let Err(_error) = self.transport.send(msg) {}
+            }) {
+                error!(
+                    "node {}: send heartbeat to {} error: {}",
+                    self.node_id, *to_node, err
+                )
+            }
         }
     }
 
@@ -545,18 +544,13 @@ where
     async fn fanout_heartbeat(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
         let from_node_id = msg.from_node;
         let to_node_id = msg.to_node;
+        let mut fanouted_groups = 0;
+        let mut fanouted_followers = 0;
         if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
-            let mut fanouted_groups = 0;
-            let mut fanouted_followers = 0;
             for (group_id, _) in from_node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        // FIXME: don't panic
-                        // if group removed, but msg arrive here, panic boom!
-                        panic!(
-                            "missing group {} at from_node {} fanout heartbeat",
-                            *group_id, msg.from_node
-                        );
+                        warn!("node {}: from node {} failed to fanout to group {} because does not exists", self.node_id, from_node_id, *group_id);
                         continue;
                     }
                     Some(group) => group,
@@ -565,19 +559,16 @@ where
                 fanouted_groups += 1;
                 self.activity_groups.insert(*group_id);
 
-                // if group.leader.node_id == 0
-                // || group.leader.node_id != msg.from_node
                 if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
                     trace!("node {}: not fanning out heartbeat to {}, msg is from {} and leader is {:?}", self.node_id, group_id, from_node_id, group.leader);
                     continue;
                 }
 
+                if group.is_leader() {
+                    warn!("node {}: received a heartbeat from the leader node {}, but replica {} of group {} also leader and there may have been a network partition", self.node_id, from_node_id, *group_id, group.replica_id)
+                }
+
                 // gets the replica stored in this node.
-                // FIXME: t30_membership single_step
-                // let from_replica = match self
-                //     .storage
-                //     .replica_for_node(*group_id, msg.from_node)
-                //     .await
                 let from_replica = match self
                     .replica_cache
                     .replica_for_node(*group_id, from_node_id)
@@ -600,7 +591,6 @@ where
                 };
 
                 // FIXME: t30_membership single_step
-                // let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
                 let to_replica = match self
                     .replica_cache
                     .replica_for_node(*group_id, to_node_id)
@@ -626,38 +616,23 @@ where
 
                 let mut step_msg = raft::prelude::Message::default();
                 step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                // group
-                //     .raft_group
-                //     .raft
-                //     .prs()
-                //     .iter()
-                //     .for_each(|(id, _)| println!("prs = {}", *id));
-                // let (_, pr) = group
-                //     .raft_group
-                //     .raft
-                //     .prs()
-                //     .iter()
-                //     .find(|&(id, _)| {
-                //         println!("id = {}", *id);
-                //         *id == from_replica.replica_id
-                //     })
-                //     .unwrap();
-                // msg.commit = std::cmp::min(group.raft_group.raft.raft_log.committed, pr.matched);
-                debug!(
-                    "node {}: group.raft_group.raft.raft_log.committed = {}",
-                    self.node_id, group.raft_group.raft.raft_log.committed
-                );
                 step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
-                step_msg.commit = group.raft_group.raft.raft_log.committed;
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
-                // debug!(
-                //     "fanouting {}.{} -> {}.{} msg  = {:?}",
-                //     from_node_id, step_msg.from, to_node_id, step_msg.to, step_msg
-                // );
-                // group.raft_group.step(msg).unwrap();
-                // FIXME: t30_membership single_step
-                group.raft_group.step(step_msg).unwrap();
+                trace!(
+                    "node {}: fanout heartbeat {}.{} -> {}.{}",
+                    self.node_id,
+                    from_node_id,
+                    step_msg.from,
+                    to_node_id,
+                    step_msg.to
+                );
+                if let Err(err) = group.raft_group.step(step_msg) {
+                    warn!(
+                        "node {}: step heatbeat message error: {}",
+                        self.node_id, err
+                    );
+                }
             }
         } else {
             // In this point, we receive heartbeat message from other nodes,
@@ -669,6 +644,13 @@ where
             );
             self.node_manager.add_node(msg.from_node, NO_GORUP);
         }
+
+        trace!(
+            "node {}: fanouted {} groups and followers {}",
+            self.node_id,
+            fanouted_groups,
+            fanouted_followers
+        );
 
         let response_msg = {
             let mut raft_msg = Message::default();
@@ -682,7 +664,7 @@ where
             }
         };
 
-        self.transport.send(response_msg).unwrap();
+        let _ = self.transport.send(response_msg)?;
         Ok(RaftMessageResponse {})
     }
 
@@ -695,11 +677,7 @@ where
             for (group_id, _) in node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
-                        // FIXME: don't panic
-                        panic!(
-                            "missing group {} at from_node {} fanout heartbeat response",
-                            *group_id, msg.from_node
-                        );
+                        warn!("node {}: from node {} failed to fanout response to group {} because does not exists", self.node_id, msg.from_node, *group_id);
                         continue;
                     }
                     Some(group) => group,
@@ -707,7 +685,6 @@ where
 
                 self.activity_groups.insert(*group_id);
 
-                // TODO: check leader is valid
                 if group.leader.node_id != self.node_id || msg.from_node == self.node_id {
                     continue;
                 }
@@ -753,13 +730,15 @@ where
 
                 let mut msg = raft::prelude::Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
+                msg.term = group.term();
                 msg.from = from_replica.replica_id;
                 msg.to = to_replica.replica_id;
-                // debug!("step msg = {:?}", msg);
-
-                // group.raft_group.step(msg).unwrap();
-                // FIXME: t30_membership single_step
-                group.raft_group.step(msg).unwrap();
+                if let Err(err) = group.raft_group.step(msg) {
+                    warn!(
+                        "node {}: step heatbeat response message error: {}",
+                        self.node_id, err
+                    );
+                }
             }
         } else {
             warn!(
