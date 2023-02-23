@@ -58,6 +58,11 @@ pub struct RaftGroupApplyState {
     pub applied_index: u64,
 }
 
+pub enum Status {
+    None,
+    Delete,
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct RaftGroupState {
     pub group_id: u64,
@@ -86,6 +91,7 @@ pub struct RaftGroup<RS: Storage> {
     pub leader: ReplicaDesc,
     pub committed_term: u64,
     pub state: RaftGroupState,
+    pub status: Status,
 }
 
 //===----------------------------------------------------------------------===//
@@ -679,6 +685,7 @@ where
         self.proposals.push(proposal).unwrap();
         None
     }
+
 
     /// Remove pending proposals.
     pub(crate) fn remove_pending_proposals(&mut self) {

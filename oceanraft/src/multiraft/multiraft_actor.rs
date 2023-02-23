@@ -44,6 +44,7 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::error::RaftGroupError;
+use crate::multiraft::raft_group::Status;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
@@ -194,13 +195,7 @@ where
             _m1: PhantomData,
         };
 
-        let apply = ApplyActor::new(
-            cfg,
-            rsm,
-            apply_request_rx,
-            apply_response_tx,
-            callback_tx,
-        );
+        let apply = ApplyActor::new(cfg, rsm, apply_request_rx, apply_response_tx, callback_tx);
 
         Self {
             shard: ShardState { state },
@@ -794,16 +789,16 @@ where
         let group_id = request.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
-                // TODO: process group deleted, we need remove pending proposals.
                 warn!(
-                    "client dropped before returning the write response, request = {:?}",
-                    request
+                    "node {}: proposal failed, group {} does not exists",
+                    self.node_id, group_id,
                 );
                 return Some(new_response_error_callback(
                     tx,
-                    Error::RaftGroup(RaftGroupError::NotExist(self.node_id, group_id)),
+                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
                 ));
             }
+            // TODO: handle nodes removed
             Some(group) => group.propose_write(request, tx),
         }
     }
@@ -826,14 +821,13 @@ where
         let group_id = request.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
-                // TODO: process group deleted, we need remove pending proposals.
                 warn!(
-                    "client dropped before returning the write response, request = {:?}",
-                    request
+                    "node {}: proposal membership failed, group {} does not exists",
+                    self.node_id, group_id,
                 );
                 return Some(new_response_error_callback(
                     tx,
-                    Error::RaftGroup(RaftGroupError::NotExist(self.node_id, group_id)),
+                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
                 ));
             }
             Some(group) => group.propose_membership_change(request, tx),
@@ -858,14 +852,13 @@ where
         let group_id = request.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
-                // TODO: process group deleted, we need remove pending proposals.
                 warn!(
-                    "client dropped before returning the read_index response, request = {:?}",
-                    request
+                    "node {}: proposal read_index failed, group {} does not exists",
+                    self.node_id, group_id,
                 );
                 return Some(new_response_error_callback(
                     tx,
-                    Error::RaftGroup(RaftGroupError::NotExist(self.node_id, group_id)),
+                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
                 ));
             }
             Some(group) => group.read_index_propose(request, tx),
@@ -896,20 +889,6 @@ where
             warn!("the node({}) campaign group({}) successfully but the receiver of receive the result is dropped", self.node_id, group_id)
         }
     }
-
-    // async fn handle_admin(&mut self) {
-    //     let (msg, tx) = match self.admin_rx.try_recv() {
-    //         Ok(msg) => msg,
-    //         Err(TryRecvError::Empty) => return,
-    //         Err(TryRecvError::Disconnected) => {
-    //             error!("write_propose sender of channel dropped");
-    //             return;
-    //         }
-    //     };
-    //     if let Some(cb) = self.handle_admin_request(msg, tx).await {
-    //         self.pending_response_cbs.push(cb)
-    //     }
-    // }
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::handle_admin_request",
@@ -947,15 +926,37 @@ where
                 self.create_raft_group(msg.group_id, msg.replica_id, msg.replicas)
                     .await
             }
-            RaftGroupManagementType::MsgRemoveGoup => unimplemented!(),
+            RaftGroupManagementType::MsgRemoveGoup => {
+                // marke delete
+                let group_id = msg.group_id;
+                let group = match self.groups.get_mut(&group_id) {
+                    None => return Ok(()),
+                    Some(group) => group,
+                };
+
+                for proposal in group.proposals.drain(..) {
+                    proposal.tx.map(|tx| {
+                        tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+                            self.node_id,
+                            group_id,
+                        ))))
+                    });
+                }
+
+                group.status = Status::Delete;
+
+                // TODO: impl broadcast
+
+                Ok(())
+            }
         }
     }
 
-    #[tracing::instrument(
-        name = "MultiRaftActorRuntime::create_raft_group", 
-        level = Level::TRACE,
-        skip(self))
-    ]
+    // #[tracing::instrument(
+    //     name = "MultiRaftActorRuntime::create_raft_group",
+    //     level = Level::TRACE,
+    //     skip(self))
+    // ]
     async fn create_raft_group(
         &mut self,
         group_id: u64,
@@ -1019,6 +1020,7 @@ where
             leader: ReplicaDesc::default(), // TODO: init leader from storage
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
+            status: Status::None,
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -1051,6 +1053,29 @@ where
             }
         }
         self.groups.insert(group_id, group);
+
+        Ok(())
+    }
+
+    #[allow(unused)]
+    async fn remove_raft_group(&mut self, group_id: u64, replica_id: u64) -> Result<(), Error> {
+        let mut group = match self.groups.remove(&group_id) {
+            None => return Ok(()),
+            Some(group) => group,
+        };
+
+        for proposal in group.proposals.drain(..) {
+            proposal.tx.map(|tx| {
+                tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+                    self.node_id,
+                    group_id,
+                ))))
+            });
+        }
+
+        for node_id in group.node_ids {
+            self.node_manager.remove_group(node_id, group_id);
+        }
 
         Ok(())
     }
@@ -1218,22 +1243,30 @@ where
                 continue;
             }
 
-            if let Some(group) = self.groups.get_mut(group_id) {
-                if !group.raft_group.has_ready() {
-                    continue;
-                }
-                group
-                    .handle_ready(
-                        self.node_id,
-                        &self.transport,
-                        &self.storage,
-                        &mut self.replica_cache,
-                        &mut self.node_manager,
-                        &mut multi_groups_write,
-                        &mut applys,
-                        &mut self.pending_events,
+            match self.groups.get_mut(group_id) {
+                None => {
+                    warn!(
+                        "node {}: make group {} activity but dropped",
+                        self.node_id, *group_id
                     )
-                    .await;
+                }
+                Some(group) => {
+                    if !group.raft_group.has_ready() {
+                        continue;
+                    }
+                    group
+                        .handle_ready(
+                            self.node_id,
+                            &self.transport,
+                            &self.storage,
+                            &mut self.replica_cache,
+                            &mut self.node_manager,
+                            &mut multi_groups_write,
+                            &mut applys,
+                            &mut self.pending_events,
+                        )
+                        .await;
+                }
             }
         }
         if !applys.is_empty() {
