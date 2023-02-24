@@ -2,7 +2,7 @@ use std::collections::hash_map::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use oceanraft::multiraft::transport::RaftMessageDispatch;
+use oceanraft::multiraft::MultiRaftMessageSender;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::TransportError;
@@ -20,7 +20,7 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-struct LocalServer<M: RaftMessageDispatch> {
+struct LocalServer<M: MultiRaftMessageSender> {
     tx: Sender<(
         RaftMessage,
         oneshot::Sender<Result<RaftMessageResponse, Error>>,
@@ -29,7 +29,7 @@ struct LocalServer<M: RaftMessageDispatch> {
     _m1: PhantomData<M>,
 }
 
-impl<RD: RaftMessageDispatch> LocalServer<RD> {
+impl<RD: MultiRaftMessageSender> LocalServer<RD> {
     /// Spawn a server to accepct request.
     #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher, task_group))]
     fn spawn(
@@ -49,7 +49,7 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
             loop {
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
-                        let res = dispatcher.dispatch(msg).await;
+                        let res = dispatcher.send(msg).await;
                         tx.send(res).unwrap(); // FIXME: handle error
                     },
                     _ = &mut stopper => {
@@ -65,13 +65,13 @@ impl<RD: RaftMessageDispatch> LocalServer<RD> {
 }
 
 #[derive(Clone)]
-pub struct LocalTransport<M: RaftMessageDispatch> {
+pub struct LocalTransport<M: MultiRaftMessageSender> {
     task_group: TaskGroup,
     servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
     disconnected: Arc<RwLock<HashMap<u64, Vec<u64>>>>,
 }
 
-impl<M: RaftMessageDispatch> LocalTransport<M> {
+impl<M: MultiRaftMessageSender> LocalTransport<M> {
     pub fn new() -> Self {
         Self {
             task_group: TaskGroup::new(),
@@ -81,7 +81,7 @@ impl<M: RaftMessageDispatch> LocalTransport<M> {
     }
 }
 
-impl<RD: RaftMessageDispatch> LocalTransport<RD> {
+impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
     #[tracing::instrument(name = "LocalTransport::listen", skip(self, dispatcher))]
     pub async fn listen<'life0>(
         &'life0 self,
@@ -181,7 +181,7 @@ impl<RD: RaftMessageDispatch> LocalTransport<RD> {
 
 impl<RD> Transport for LocalTransport<RD>
 where
-    RD: RaftMessageDispatch,
+    RD: MultiRaftMessageSender,
 {
     fn send(&self, msg: RaftMessage) -> Result<(), Error> {
         let (from_node, to_node) = (msg.from_node, msg.to_node);

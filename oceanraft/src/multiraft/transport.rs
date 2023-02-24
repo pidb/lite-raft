@@ -1,5 +1,3 @@
-use futures::Future;
-
 use raft::Storage;
 use tracing::error;
 use tracing::warn;
@@ -8,25 +6,17 @@ use tracing::Level;
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
 use raft_proto::prelude::RaftMessage;
-use raft_proto::prelude::RaftMessageResponse;
 
 use super::error::Error;
 use super::node::NodeManager;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
 
-pub trait RaftMessageDispatch: Send + Sync + 'static {
-    type DispatchFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
-    where
-        Self: 'life0;
-
-    fn dispatch<'life0>(&'life0 self, msg: RaftMessage) -> Self::DispatchFuture<'life0>;
-}
-
 pub trait Transport: Send + Sync + 'static {
     fn send(&self, msg: RaftMessage) -> Result<(), Error>;
 }
 
+/// Call `Transport` to send the messages.
 pub async fn send_messages<TR, RS, MRS>(
     from_node_id: u64,
     transport: &TR,

@@ -21,7 +21,9 @@ pub use config::Config;
 pub use error::{
     Error, MultiRaftStorageError, ProposalError, RaftCoreError, RaftGroupError, TransportError,
 };
-pub use event::{CommitEvent, Event, LeaderElectionEvent, ApplyEvent, ApplyMembership, ApplyNoOp, ApplyNormal};
-pub use multiraft::{MultiRaft, RaftMessageDispatchImpl};
-pub use rsm:: {StateMachine};
+pub use event::{
+    ApplyEvent, ApplyMembership, ApplyNoOp, ApplyNormal, CommitEvent, Event, LeaderElectionEvent,
+};
+pub use multiraft::{MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl};
+pub use rsm::StateMachine;
 pub use util::{ManualTick, Ticker};

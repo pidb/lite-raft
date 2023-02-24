@@ -22,7 +22,7 @@ use oceanraft::multiraft::Error;
 use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
 use oceanraft::multiraft::ManualTick;
-use oceanraft::multiraft::RaftMessageDispatchImpl;
+use oceanraft::multiraft::MultiRaftMessageSenderImpl;
 use oceanraft::prelude::AdminMessage;
 use oceanraft::prelude::AdminMessageType;
 use oceanraft::prelude::AppWriteRequest;
@@ -40,7 +40,7 @@ use crate::fixtures::transport::LocalTransport;
 use super::rsm::FixtureStateMachine;
 
 type FixtureMultiRaft = MultiRaft<
-    LocalTransport<RaftMessageDispatchImpl>,
+    LocalTransport<MultiRaftMessageSenderImpl>,
     RaftMemStorage,
     MultiRaftMemoryStorage,
     FixtureStateMachine,
@@ -51,7 +51,7 @@ pub struct FixtureCluster {
     pub nodes: Vec<Arc<FixtureMultiRaft>>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
     pub apply_events: Vec<Option<Receiver<Vec<ApplyEvent>>>>,
-    pub transport: LocalTransport<RaftMessageDispatchImpl>,
+    pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
     pub storages: Vec<MultiRaftMemoryStorage>,
@@ -132,7 +132,7 @@ impl FixtureCluster {
                 .listen(
                     node_id,
                     format!("test://node/{}", node_id).as_str(),
-                    node.dispatch_impl(),
+                    node.message_sender(),
                 )
                 .await
                 .unwrap();
@@ -355,7 +355,7 @@ impl FixtureCluster {
             context: vec![],
             data,
         };
-        self.nodes[to_index(node_id)].async_write(request)
+        self.nodes[to_index(node_id)].write_non_block(request)
     }
 
     // Wait normal apply.

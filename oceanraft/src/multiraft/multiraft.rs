@@ -13,7 +13,6 @@ use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
 use super::multiraft_actor::ShardState;
-use super::transport::RaftMessageDispatch;
 use super::transport::Transport;
 use super::util::Ticker;
 use super::StateMachine;
@@ -22,6 +21,7 @@ use raft_proto::prelude::AdminMessage;
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::MembershipChangeRequest;
+use raft_proto::prelude::RaftGroupManagement;
 use raft_proto::prelude::RaftMessage;
 use raft_proto::prelude::RaftMessageResponse;
 
@@ -30,8 +30,22 @@ use super::storage::MultiRaftStorage;
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
 
+/// Send `RaftMessage` to `MuiltiRaft`.
+///
+/// When the server receives a `RaftMessage` from another node,
+/// it should send it to `MultiRaft` through the implementors of
+/// the trait for further processing.
+pub trait MultiRaftMessageSender: Send + Sync + 'static {
+    type SendFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
+    where
+        Self: 'life0;
+
+    /// Send `RaftMessage` to `MultiRaft`. the implementor should return future.
+    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0>;
+}
+
 #[derive(Clone)]
-pub struct RaftMessageDispatchImpl {
+pub struct MultiRaftMessageSenderImpl {
     shard: ShardState,
     tx: Sender<(
         RaftMessage,
@@ -39,12 +53,12 @@ pub struct RaftMessageDispatchImpl {
     )>,
 }
 
-impl RaftMessageDispatch for RaftMessageDispatchImpl {
-    type DispatchFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
+impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
+    type SendFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
     where
         Self: 'life0;
 
-    fn dispatch<'life0>(&'life0 self, msg: RaftMessage) -> Self::DispatchFuture<'life0> {
+    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0> {
         async move {
             if self.shard.stopped() {
                 return Err(Error::Stop);
@@ -89,7 +103,6 @@ where
     MRS: MultiRaftStorage<RS>,
     RSM: StateMachine,
 {
-    /// Create a new multiraft. spawn multiraft actor and apply actor.
     pub fn new(
         config: Config,
         transport: T,
@@ -144,15 +157,24 @@ where
         // TODO: start apply and multiraft actor
     }
 
-    /// Panic. if multi raft actor stopped.
     pub async fn write(&self, request: AppWriteRequest) -> Result<(), Error> {
-        let rx = self.async_write(request);
+        let rx = self.write_non_block(request);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the write was dropped".to_string())
         })?
     }
 
-    pub fn async_write(&self, request: AppWriteRequest) -> oneshot::Receiver<Result<(), Error>> {
+    pub fn write_block(&self, request: AppWriteRequest) -> Result<(), Error> {
+        let rx = self.write_non_block(request);
+        rx.blocking_recv().map_err(|_| {
+            Error::Internal("the sender that result the write was dropped".to_string())
+        })?
+    }
+
+    pub fn write_non_block(
+        &self,
+        request: AppWriteRequest,
+    ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         match self.actor.write_propose_tx.try_send((request, tx)) {
             // FIXME: handle write queue full case
@@ -163,13 +185,20 @@ where
     }
 
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
-        let rx = self.async_read_index(request);
+        let rx = self.read_index_non_block(request);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the read_index was dropped".to_string())
         })?
     }
 
-    pub fn async_read_index(
+    pub fn read_index_block(&self, request: AppReadIndexRequest) -> Result<(), Error> {
+        let rx = self.read_index_non_block(request);
+        rx.blocking_recv().map_err(|_| {
+            Error::Internal("the sender that result the read_index was dropped".to_string())
+        })?
+    }
+
+    pub fn read_index_non_block(
         &self,
         request: AppReadIndexRequest,
     ) -> oneshot::Receiver<Result<(), Error>> {
@@ -182,13 +211,20 @@ where
     }
 
     pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<(), Error> {
-        let rx = self.async_membership_change(request);
+        let rx = self.membership_change_non_block(request);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the membership change was dropped".to_string())
         })?
     }
 
-    pub fn async_membership_change(
+    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<(), Error> {
+        let rx = self.membership_change_non_block(request);
+        rx.blocking_recv().map_err(|_| {
+            Error::Internal("the sender that result the membership change was dropped".to_string())
+        })?
+    }
+
+    pub fn membership_change_non_block(
         &self,
         request: MembershipChangeRequest,
     ) -> oneshot::Receiver<Result<(), Error>> {
@@ -205,10 +241,41 @@ where
     /// `campaign` is synchronous and waits for the campaign to submitted a
     /// result to raft.
     pub async fn campaign_group(&self, group_id: u64) -> Result<(), Error> {
-        let rx = self.async_campaign_group(group_id);
+        let rx = self.campaign_group_non_block(group_id);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the campaign was dropped".to_string())
         })?
+    }
+
+    /// Campaign and without wait raft group by given `group_id`.
+    ///
+    /// `async_campaign` is asynchronous, meaning that without waiting for
+    /// the campaign to actually be submitted to raft group.
+    /// `tokio::sync::oneshot::Receiver<Result<(), Error>>` is successfully returned
+    /// and the user can receive the response submitted by the campaign to raft. if
+    /// campaign receiver stop, `Error` is returned.
+    pub fn campaign_group_non_block(&self, group_id: u64) -> oneshot::Receiver<Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        if let Err(_) = self.actor.campaign_tx.try_send((group_id, tx)) {
+            panic!("MultiRaftActor stopped")
+        }
+
+        rx
+    }
+
+    pub async fn group_manage(&self, msg: RaftGroupManagement) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    pub fn group_manage_block(&self, msg: RaftGroupManagement) -> Result<(), Error> {
+        unimplemented!()
+    }
+
+    pub fn group_manage_non_block(
+        &self,
+        msg: RaftGroupManagement,
+    ) -> oneshot::Receiver<Result<(), Error>> {
+        unimplemented!()
     }
 
     pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
@@ -223,25 +290,9 @@ where
         }
     }
 
-    /// Campaign and without wait raft group by given `group_id`.
-    ///
-    /// `async_campaign` is asynchronous, meaning that without waiting for
-    /// the campaign to actually be submitted to raft group.
-    /// `tokio::sync::oneshot::Receiver<Result<(), Error>>` is successfully returned
-    /// and the user can receive the response submitted by the campaign to raft. if
-    /// campaign receiver stop, `Error` is returned.
-    pub fn async_campaign_group(&self, group_id: u64) -> oneshot::Receiver<Result<(), Error>> {
-        let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.campaign_tx.try_send((group_id, tx)) {
-            panic!("MultiRaftActor stopped")
-        }
-
-        rx
-    }
-
     #[inline]
-    pub fn dispatch_impl(&self) -> RaftMessageDispatchImpl {
-        RaftMessageDispatchImpl {
+    pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
+        MultiRaftMessageSenderImpl {
             shard: self.actor.shard.clone(),
             tx: self.actor.raft_message_tx.clone(),
         }
