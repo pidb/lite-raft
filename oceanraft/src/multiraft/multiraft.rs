@@ -71,9 +71,9 @@ where
     RSM: StateMachine,
 {
     // ctx: Context,
-    cfg: Config,
-    transport: T,
-    storage: MRS,
+    // cfg: Config,
+    // transport: T,
+    // storage: MRS,
     task_group: TaskGroup,
     actor: MultiRaftActor<T, RS, MRS, RSM>,
     // apply_actor: ApplyActor,
@@ -118,12 +118,13 @@ where
         //     task_group.clone(),
         // );
 
-        let actor = MultiRaftActor::<T, RS, MRS, RSM>::new(&config, &transport, &storage, rsm, &event_tx);
+        let actor =
+            MultiRaftActor::<T, RS, MRS, RSM>::new(&config, &transport, &storage, rsm, &event_tx);
 
         Self {
-            cfg: config,
-            transport,
-            storage,
+            // cfg: config,
+            // transport,
+            // storage,
             task_group,
             actor,
         }
