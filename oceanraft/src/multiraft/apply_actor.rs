@@ -208,33 +208,6 @@ where
         };
     }
 
-    /// This method is called only when the apply request is received.
-    /// TODO: think replica_cache in local?
-    // async fn initialize_apply_state<RS: RaftStorage, MRS: MultiRaftStorage<RS>>(
-    //     &mut self,
-    //     group_id: u64,
-    //     store: Option<MRS>,
-    // ) -> Result<(), Error> {
-    //     let apply_state = self.multi_groups_apply_state.get_mut(&group_id).unwrap(); // FIXME: return error
-    //     let replica_desc = store
-    //         .replica_for_node(group_id, self.node_id)
-    //         .await?
-    //         .unwrap(); // FIXME: return error
-    //     let gs = store
-    //         .group_storage(group_id, replica_desc.replica_id)
-    //         .await?;
-    //     let rs = gs.initial_state().map_err(|err| Error::Raft(err))?;
-
-    //     *apply_state = RaftGroupApplyState {
-    //         commit_index: rs.hard_state.commit,
-    //         commit_term: rs.hard_state.term,
-    //         applied_index: rs.hard_state.commit,
-    //         applied_term: rs.hard_state.term,
-    //     };
-
-    //     Ok(())
-    // }
-
     // This method performs a batch of apply from the same group in multiple requests,
     // if batch is successful, multiple requests from the same group are batched into one apply,
     // otherwise pending in FIFO order.

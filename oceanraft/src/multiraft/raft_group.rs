@@ -686,7 +686,6 @@ where
         None
     }
 
-
     /// Remove pending proposals.
     pub(crate) fn remove_pending_proposals(&mut self) {
         let proposals = self.proposals.drain(..);
