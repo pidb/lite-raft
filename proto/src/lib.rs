@@ -42,7 +42,7 @@ pub mod prelude {
     pub use crate::multiraft::{
         AdminMessage, AdminMessageType, AppReadIndexRequest, AppReadIndexResponse, AppWriteRequest,
         AppWriteResponse, MembershipChangeRequest, RaftGroupDesc, RaftGroupManagement,
-        RaftGroupManagementType, RaftMessage, RaftMessageResponse, ReadIndexContext, ReplicaDesc,
+        RaftGroupManagementType, MultiRaftMessage, MultiRaftMessageResponse, ReadIndexContext, ReplicaDesc,
         SingleMembershipChange,
     };
 }

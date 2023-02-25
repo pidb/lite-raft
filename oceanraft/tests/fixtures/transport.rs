@@ -2,12 +2,12 @@ use std::collections::hash_map::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use oceanraft::multiraft::MultiRaftMessageSender;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
+use oceanraft::multiraft::MultiRaftMessageSender;
 use oceanraft::multiraft::TransportError;
-use oceanraft::prelude::RaftMessage;
-use oceanraft::prelude::RaftMessageResponse;
+use oceanraft::prelude::MultiRaftMessage;
+use oceanraft::prelude::MultiRaftMessageResponse;
 use oceanraft::util::TaskGroup;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -22,8 +22,8 @@ use tracing::warn;
 
 struct LocalServer<M: MultiRaftMessageSender> {
     tx: Sender<(
-        RaftMessage,
-        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+        MultiRaftMessage,
+        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     stopped: bool,
     _m1: PhantomData<M>,
@@ -37,8 +37,8 @@ impl<RD: MultiRaftMessageSender> LocalServer<RD> {
         addr: &str,
         dispatcher: RD,
         mut rx: Receiver<(
-            RaftMessage,
-            oneshot::Sender<Result<RaftMessageResponse, Error>>,
+            MultiRaftMessage,
+            oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
         )>,
         task_group: &TaskGroup,
     ) -> JoinHandle<()> {
@@ -163,7 +163,7 @@ impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
                     dis.remove(pos);
                 }
             }
-            None => {},
+            None => {}
         };
     }
 
@@ -183,7 +183,7 @@ impl<RD> Transport for LocalTransport<RD>
 where
     RD: MultiRaftMessageSender,
 {
-    fn send(&self, msg: RaftMessage) -> Result<(), Error> {
+    fn send(&self, msg: MultiRaftMessage) -> Result<(), Error> {
         let (from_node, to_node) = (msg.from_node, msg.to_node);
         let (from_rep, to_rep) = (msg.msg.as_ref().unwrap().from, msg.msg.as_ref().unwrap().to);
         debug!(
@@ -222,7 +222,7 @@ where
             let to_server = rl.get(&to_node).unwrap();
             if to_server.stopped {
                 // FIXME: should return some error
-                return Ok(RaftMessageResponse {});
+                return Ok(MultiRaftMessageResponse {});
             }
 
             let (tx, rx) = oneshot::channel();
@@ -231,7 +231,7 @@ where
                     "node {}: send msg failed, the {} node server stopped",
                     from_node, to_node
                 );
-                return Ok(RaftMessageResponse {}); // FIXME: should return error
+                return Ok(MultiRaftMessageResponse {}); // FIXME: should return error
             }
 
             // and receive response
