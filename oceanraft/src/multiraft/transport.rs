@@ -1,11 +1,11 @@
 use raft::Storage;
 use tracing::error;
-use tracing::warn;
+use tracing::trace;
 use tracing::Level;
 
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
-use raft_proto::prelude::RaftMessage;
+use raft_proto::prelude::MultiRaftMessage;
 
 use super::error::Error;
 use super::node::NodeManager;
@@ -13,7 +13,7 @@ use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
 
 pub trait Transport: Send + Sync + 'static {
-    fn send(&self, msg: RaftMessage) -> Result<(), Error>;
+    fn send(&self, msg: MultiRaftMessage) -> Result<(), Error>;
 }
 
 /// Call `Transport` to send the messages.
@@ -33,17 +33,24 @@ pub async fn send_messages<TR, RS, MRS>(
     for msg in msgs {
         match msg.msg_type() {
             MessageType::MsgHeartbeat => {
-                // trace!(
-                //     "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
-                //     from_node_id, group_id, msg.from, msg.to
-                // );
+                trace!(
+                    "node {}: drop group = {}, {} -> {} individual heartbeat",
+                    from_node_id,
+                    group_id,
+                    msg.from,
+                    msg.to
+                );
                 continue;
             }
+
             MessageType::MsgHeartbeatResponse => {
-                // trace!(
-                //     "node({}) group({}) replica({}) drop individual heartbeat message to replica({})",
-                //     from_node_id, group_id, msg.from, msg.to
-                // );
+                trace!(
+                    "node {}: drop group = {}, {} -> {} individual heartbeat response",
+                    from_node_id,
+                    group_id,
+                    msg.from,
+                    msg.to
+                );
                 continue;
             }
             _ => {
@@ -64,7 +71,7 @@ pub async fn send_messages<TR, RS, MRS>(
 #[tracing::instrument(
     level = Level::TRACE,
     name = "transport::send_message",
-    skip(from_node_id, group_id, transport, replica_cache, node_mgr)
+    skip_all,
 )]
 async fn send_message<TR, RS, MRS>(
     from_node_id: u64,
@@ -86,17 +93,17 @@ async fn send_message<TR, RS, MRS>(
     // synchronization (TODO: unimpl)
     let to_replica = match replica_cache.replica_desc(group_id, msg.to).await {
         Err(err) => {
-            warn!(
-                "find to node replica description error {} for send {:?}",
-                err, msg
+            error!(
+                "node {}: from = {}, to = {} send {:?} to group failed, find to replica_desc error: {}",
+                from_node_id, msg.from, msg.to, msg.msg_type(), err
             );
             return;
         }
         Ok(op) => match op {
             None => {
-                warn!(
-                    "can not find to node replica description for send {:?}",
-                    msg
+                error!(
+                    "node {}: from = {}, to = {} send {:?} to group failed, to replica_desc not found",
+                    from_node_id, msg.from, msg.to, msg.msg_type(),
                 );
                 return;
             }
@@ -105,11 +112,20 @@ async fn send_message<TR, RS, MRS>(
     };
     assert_ne!(to_replica.node_id, 0);
 
+    trace!(
+        "node {}: send raft msg to node {}: msg_type = {:?}, group = {}, from = {}, to = {}",
+        from_node_id,
+        to_replica.node_id,
+        msg.msg_type(),
+        group_id,
+        msg.from,
+        msg.to
+    );
     if !node_mgr.contains_node(&to_replica.node_id) {
         node_mgr.add_node(to_replica.node_id, group_id);
     }
 
-    let msg = RaftMessage {
+    let msg = MultiRaftMessage {
         group_id,
         from_node: from_node_id,
         to_node: to_replica.node_id,
@@ -119,6 +135,9 @@ async fn send_message<TR, RS, MRS>(
 
     // FIXME: send trait should be return original msg when error occurred.
     if let Err(err) = transport.send(msg) {
-        error!("call transport error {} for send msg", err);
+        error!(
+            "node {}: send raft msg to node {} error: group = {}, err = {:?}",
+            from_node_id, to_replica.node_id, group_id, err
+        );
     }
 }

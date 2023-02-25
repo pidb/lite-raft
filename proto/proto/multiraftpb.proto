@@ -41,7 +41,7 @@ message RaftGroupDesc {
     repeated ReplicaDesc replicas = 3;
 }
 
-// RaftGroupMessage wraps eraft.Message and includes the node information.
+// MultiRaftMessage wraps eraft.Message and includes the node information.
 // 1. `group_id` is the raft group identifier. it must define that 0 is invalid.
 // 2. `from_node` represents which node the message came from, so `msg.from` represents 
 //    which replica id came from the node.
@@ -51,17 +51,18 @@ message RaftGroupDesc {
 //     Note: This field is used to configure new replicas to learn this information when the 
 //     raft group sends initialization messages to other nodes after a membership change.
 // 5. `msg` is eraft.Message.
-message RaftMessage {
+message MultiRaftMessage {
     uint64 group_id = 1;
     uint64 from_node = 2;
     uint64 to_node = 3;
-    repeated ReplicaDesc replicas = 4;
+    repeated  ReplicaDesc replicas = 4;
     eraftpb.Message msg = 5;
 }
 
-// RaftMessageResponse is an empty message returned by raft RPCs. If a
+// MultiRaftMessageResponse is an empty message returned by raft RPCs. If a
 // response is needed it will be sent as a separate message.
-message RaftMessageResponse {
+message MultiRaftMessageResponse {
+
 }
 
 

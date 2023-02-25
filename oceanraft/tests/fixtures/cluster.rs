@@ -115,7 +115,7 @@ impl FixtureCluster {
 
             let (event_tx, event_rx) = channel(1);
 
-            let (apply_event_tx, apply_event_rx) = channel(1);
+            let (apply_event_tx, apply_event_rx) = channel(100);
 
             let rsm = FixtureStateMachine::new(apply_event_tx);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
@@ -364,9 +364,11 @@ impl FixtureCluster {
         timeout: Duration,
         size: usize,
     ) -> Result<Vec<ApplyNormal>, String> {
+        let mut results_len = 0;
         let wait_loop_fut = async {
             let mut results = vec![];
             loop {
+                results_len = results.len();
                 if results.len() == size {
                     return Ok(results);
                 }
@@ -386,7 +388,7 @@ impl FixtureCluster {
             }
         };
         match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
-            Err(_) => Err(format!("wait for apply normal event timeouted")),
+            Err(_) => Err(format!("wait for apply normal event timeouted, waited nums = {}", results_len)),
             Ok(res) => res,
         }
     }

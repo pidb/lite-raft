@@ -29,8 +29,8 @@ use raft_proto::prelude::ConfChangeType;
 use raft_proto::prelude::MembershipChangeRequest;
 use raft_proto::prelude::Message;
 use raft_proto::prelude::MessageType;
-use raft_proto::prelude::RaftMessage;
-use raft_proto::prelude::RaftMessageResponse;
+use raft_proto::prelude::MultiRaftMessage;
+use raft_proto::prelude::MultiRaftMessageResponse;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
 
@@ -128,8 +128,8 @@ where
     pub membership_change_tx: Sender<(MembershipChangeRequest, oneshot::Sender<Result<(), Error>>)>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
-        RaftMessage,
-        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+        MultiRaftMessage,
+        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     pub admin_tx: Sender<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
     apply: ApplyActor<RSM>,
@@ -246,8 +246,8 @@ where
     groups: HashMap<u64, RaftGroup<RS>>,
     tick_interval: Duration,
     raft_message_rx: Receiver<(
-        RaftMessage,
-        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+        MultiRaftMessage,
+        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
     read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
@@ -305,7 +305,7 @@ where
                 }
 
                 Some((req, tx)) = self.raft_message_rx.recv() => {
-                    let res = self.handle_message(req).await ;
+                    let res = self.handle_multiraft_message(req).await ;
                     self.response_cbs.push(new_response_callback(tx, res));
                 },
 
@@ -384,15 +384,19 @@ where
                 continue;
             }
 
-            trace!("trigger heartbeta {} -> {} ", self.node_id, *to_node);
+            trace!(
+                "node {}: trigger heartbeta {} -> {} ",
+                self.node_id,
+                self.node_id,
+                *to_node
+            );
 
             // coalesced heartbeat to all nodes. the heartbeat message is node
             // level message so from and to set 0 when sending, and the specific
             // value is set by message receiver.
             let mut raft_msg = Message::default();
             raft_msg.set_msg_type(MessageType::MsgHeartbeat);
-            // TODO: transport as async method
-            if let Err(err) = self.transport.send(RaftMessage {
+            if let Err(err) = self.transport.send(MultiRaftMessage {
                 group_id: NO_GORUP,
                 from_node: self.node_id,
                 to_node: *to_node,
@@ -407,8 +411,11 @@ where
         }
     }
 
-    async fn handle_message(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
-        match msg.msg.as_ref().unwrap().msg_type() {
+    async fn handle_multiraft_message(
+        &mut self,
+        msg: MultiRaftMessage,
+    ) -> Result<MultiRaftMessageResponse, Error> {
+        match msg.msg.as_ref().expect("invalid msg").msg_type() {
             MessageType::MsgHeartbeat => self.fanout_heartbeat(msg).await,
             MessageType::MsgHeartbeatResponse => self.fanout_heartbeat_response(msg).await,
             _ => self.handle_raft_message(msg).await,
@@ -418,16 +425,16 @@ where
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::handle_raft_message",
         level = Level::TRACE,
-        skip(self),
+        skip_all,
     )]
     async fn handle_raft_message(
         &mut self,
-        mut msg: RaftMessage,
-    ) -> Result<RaftMessageResponse, Error> {
-        let raft_msg = msg.msg.take().expect("invalid message");
-        // processing messages between replicas from other nodes to self node.
+        mut msg: MultiRaftMessage,
+    ) -> Result<MultiRaftMessageResponse, Error> {
+        let raft_msg = msg.msg.take().unwrap();
         let group_id = msg.group_id;
 
+        // processing messages between replicas from other nodes to self node.
         let from_replica = ReplicaDesc {
             node_id: msg.from_node,
             replica_id: raft_msg.from,
@@ -437,6 +444,16 @@ where
             node_id: msg.to_node,
             replica_id: raft_msg.to,
         };
+
+        trace!(
+            "node {}: recv msg {:?} from {}: group = {}, from_replica = {}, to_replica = {}",
+            self.node_id,
+            raft_msg.msg_type(),
+            msg.from_node,
+            group_id,
+            from_replica.replica_id,
+            to_replica.replica_id,
+        );
 
         let _ = self
             .replica_cache
@@ -462,11 +479,9 @@ where
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,
             None => {
-                trace!(
+                info!(
                     "node {}: got message for unknow group {}; creating replica {}",
-                    self.node_id,
-                    group_id,
-                    to_replica.replica_id
+                    self.node_id, group_id, to_replica.replica_id
                 );
                 // if we receive initialization messages from a raft replica
                 // on another node, this means that a member change has occurred
@@ -477,7 +492,10 @@ where
                     .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
                     .await
                     .map_err(|err| {
-                        error!("create raft group error {}", err);
+                        error!(
+                            "node {}: create group for replica {} error {}",
+                            self.node_id, to_replica.replica_id, err
+                        );
                         err
                     })?;
 
@@ -485,14 +503,19 @@ where
             }
         };
 
-        // FIXME: t30_membership single_step
-        group.raft_group.step(raft_msg).unwrap();
+        // FIX: t30_membership single_step
+        if let Err(err) = group.raft_group.step(raft_msg) {
+            warn!("node {}: step raf message error: {}", self.node_id, err);
+        }
         self.active_groups.insert(group_id);
-        Ok(RaftMessageResponse {})
+        Ok(MultiRaftMessageResponse {})
     }
 
     /// Fanout heartbeats from other nodes to all raft groups on this node.
-    async fn fanout_heartbeat(&mut self, msg: RaftMessage) -> Result<RaftMessageResponse, Error> {
+    async fn fanout_heartbeat(
+        &mut self,
+        msg: MultiRaftMessage,
+    ) -> Result<MultiRaftMessageResponse, Error> {
         let from_node_id = msg.from_node;
         let to_node_id = msg.to_node;
         let mut fanouted_groups = 0;
@@ -567,6 +590,13 @@ where
 
                 let mut step_msg = raft::prelude::Message::default();
                 step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
+                // FIX(test command)
+                // 
+                // Although the heatbeat is not set without affecting correctness, but liveness
+                // maybe cannot satisty. such as in test code 1) submit some commands 2) and
+                // then wait apply and perform a heartbeat. but due to a heartbeat cannot set commit, so
+                // no propose lead to test failed.
+                step_msg.commit = group.raft_group.raft.raft_log.committed;
                 step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
@@ -606,7 +636,7 @@ where
         let response_msg = {
             let mut raft_msg = Message::default();
             raft_msg.set_msg_type(MessageType::MsgHeartbeatResponse);
-            RaftMessage {
+            MultiRaftMessage {
                 group_id: NO_GORUP,
                 from_node: self.node_id,
                 to_node: from_node_id,
@@ -616,14 +646,14 @@ where
         };
 
         let _ = self.transport.send(response_msg)?;
-        Ok(RaftMessageResponse {})
+        Ok(MultiRaftMessageResponse {})
     }
 
     /// Fanout heartbeats response from other nodes to all raft groups on this node.
     async fn fanout_heartbeat_response(
         &mut self,
-        msg: RaftMessage,
-    ) -> Result<RaftMessageResponse, Error> {
+        msg: MultiRaftMessage,
+    ) -> Result<MultiRaftMessageResponse, Error> {
         if let Some(node) = self.node_manager.get_node(&msg.from_node) {
             for (group_id, _) in node.group_map.iter() {
                 let group = match self.groups.get_mut(group_id) {
@@ -698,7 +728,7 @@ where
             );
             self.node_manager.add_node(msg.from_node, NO_GORUP);
         }
-        Ok(RaftMessageResponse {})
+        Ok(MultiRaftMessageResponse {})
     }
 
     /// if `None` is returned, the write request is successfully committed
@@ -961,6 +991,8 @@ where
             group.node_ids.push(replica_desc.node_id);
             self.node_manager.add_node(replica_desc.node_id, group_id);
         }
+
+        // TODO: check voters and replica_descs consistent
 
         // if voters are initialized in storage, we need to read
         // the voter from replica_desc to build the data structure

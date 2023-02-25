@@ -21,44 +21,44 @@ use raft_proto::prelude::AdminMessage;
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::MembershipChangeRequest;
+use raft_proto::prelude::MultiRaftMessage;
+use raft_proto::prelude::MultiRaftMessageResponse;
 use raft_proto::prelude::RaftGroupManagement;
-use raft_proto::prelude::RaftMessage;
-use raft_proto::prelude::RaftMessageResponse;
 
 use super::storage::MultiRaftStorage;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
 
-/// Send `RaftMessage` to `MuiltiRaft`.
+/// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///
-/// When the server receives a `RaftMessage` from another node,
+/// When the server receives a `MultiRaftMessage` from another node,
 /// it should send it to `MultiRaft` through the implementors of
 /// the trait for further processing.
 pub trait MultiRaftMessageSender: Send + Sync + 'static {
-    type SendFuture<'life0>: Future<Output = Result<RaftMessageResponse, Error>> + Send
+    type SendFuture<'life0>: Future<Output = Result<MultiRaftMessageResponse, Error>> + Send
     where
         Self: 'life0;
 
-    /// Send `RaftMessage` to `MultiRaft`. the implementor should return future.
-    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0>;
+    /// Send `MultiRaftMessage` to `MultiRaft`. the implementor should return future.
+    fn send<'life0>(&'life0 self, msg: MultiRaftMessage) -> Self::SendFuture<'life0>;
 }
 
 #[derive(Clone)]
 pub struct MultiRaftMessageSenderImpl {
     shard: ShardState,
     tx: Sender<(
-        RaftMessage,
-        oneshot::Sender<Result<RaftMessageResponse, Error>>,
+        MultiRaftMessage,
+        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
 }
 
 impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
-    type SendFuture<'life0> = impl Future<Output = Result<RaftMessageResponse, Error>> + Send + 'life0
+    type SendFuture<'life0> = impl Future<Output = Result<MultiRaftMessageResponse, Error>> + Send + 'life0
     where
         Self: 'life0;
 
-    fn send<'life0>(&'life0 self, msg: RaftMessage) -> Self::SendFuture<'life0> {
+    fn send<'life0>(&'life0 self, msg: MultiRaftMessage) -> Self::SendFuture<'life0> {
         async move {
             if self.shard.stopped() {
                 return Err(Error::Stop);
@@ -68,7 +68,7 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
             match rx.await {
                 Err(_err) => {
                     // FIXME: handle error
-                    Ok(RaftMessageResponse {})
+                    Ok(MultiRaftMessageResponse {})
                 }
                 Ok(res) => res,
             }
