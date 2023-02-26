@@ -388,7 +388,10 @@ impl FixtureCluster {
             }
         };
         match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
-            Err(_) => Err(format!("wait for apply normal event timeouted, waited nums = {}", results_len)),
+            Err(_) => Err(format!(
+                "wait for apply normal event timeouted, waited nums = {}",
+                results_len
+            )),
             Ok(res) => res,
         }
     }
@@ -460,8 +463,8 @@ pub async fn quickstart_group(node_nums: usize) -> (TaskGroup, FixtureCluster) {
     cluster.campaign_group(1, plan.group_id).await;
 
     // check each replica should recv leader election event
-    for i in 0..3 {
-        let leader_event = FixtureCluster::wait_leader_elect_event(&mut cluster, i + 1)
+    for i in 0..node_nums {
+        let leader_event = FixtureCluster::wait_leader_elect_event(&mut cluster, i as u64 + 1)
             .await
             .unwrap();
         assert_eq!(leader_event.group_id, 1);

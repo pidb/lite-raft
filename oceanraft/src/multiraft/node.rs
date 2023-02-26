@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use prost::encoding::group;
 
 /// Node represents a physical node and contains a group of rafts.
+#[derive(Debug)]
 pub struct Node {
     pub node_id: u64,
     pub group_map: HashMap<u64, ()>,
@@ -55,7 +56,7 @@ impl NodeManager {
             Some(node) => node,
         };
 
-        // assert_ne!(group_id, 0);
+        assert_ne!(group_id, 0);
         node.group_map.insert(group_id, ());
     }
 
@@ -83,7 +84,19 @@ impl NodeManager {
             Some(node) => node,
         };
 
-        // assert_ne!(group_id, 0);
+        assert_ne!(group_id, 0);
         node.group_map.insert(group_id, ());
+    }
+
+    pub fn add_node2(&mut self, node_id: u64) {
+        if self.nodes.get_mut(&node_id).is_none() {
+            self.nodes.insert(
+                node_id,
+                Node {
+                    node_id,
+                    group_map: HashMap::new(),
+                },
+            );
+        }
     }
 }

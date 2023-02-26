@@ -108,13 +108,18 @@ impl ApplyMembership {
             }
         }
     }
-    
+
+    /// Commit membership change to multiraft.
+    ///
+    /// Note: it's must be called because multiraft need apply membersip change to raft.
     pub async fn done(&self) {
         let (tx, rx) = oneshot::channel();
         let commit = self.parse();
+        // FIXME: don't unwrap
         self.commit_tx
             .send(CommitEvent::Membership((commit, tx)))
             .unwrap();
+        // FIXME: don't unwrap
         rx.await.unwrap();
     }
 }
@@ -145,7 +150,7 @@ impl ApplyEvent {
     }
 }
 
-/// MultiRaftEvent is sent by a multiraft actor, and the receiver 
+/// MultiRaftEvent is sent by a multiraft actor, and the receiver
 /// performs specific actions within the system.
 #[derive(Debug, Clone)]
 pub enum MultiRaftEvent {
@@ -160,7 +165,7 @@ pub enum MultiRaftEvent {
         commit_term: u64,
         applied_index: u64,
         applied_term: u64,
-    }
+    },
 }
 
 impl Default for MultiRaftEvent {

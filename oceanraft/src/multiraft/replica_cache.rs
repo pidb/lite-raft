@@ -5,8 +5,8 @@ use raft::Storage;
 use raft_proto::prelude::RaftGroupDesc;
 use raft_proto::prelude::ReplicaDesc;
 
-use super::storage::MultiRaftStorage;
 use super::error::Error;
+use super::storage::MultiRaftStorage;
 
 /// ReplicaCache cache replica metadatas
 /// from read storage and messages and write the replica metadata the storage
@@ -17,7 +17,7 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     storage: MRS,
-    groups: HashMap<u64, RaftGroupDesc>,
+    pub groups: HashMap<u64, RaftGroupDesc>,
     _m: PhantomData<RS>,
 }
 
@@ -65,6 +65,32 @@ where
         Ok(ReplicaCache::<RS, MRS>::find(group_desc, |replica| replica.node_id == node_id).await)
     }
 
+    #[inline]
+    async fn ensure_cache_group(&mut self, group_id: u64) -> Result<(), Error> {
+        if self.groups.get(&group_id).is_none() {
+            let group_desc = self.storage.group_desc(group_id).await?;
+            self.groups.insert(group_id, group_desc);
+        }
+
+        Ok(())
+    }
+
+    #[inline]
+    async fn find<P>(group_desc: &RaftGroupDesc, predicate: P) -> Option<ReplicaDesc>
+    where
+        P: Fn(&&ReplicaDesc) -> bool,
+    {
+        if group_desc.replicas.is_empty() {
+            return None;
+        }
+
+        if let Some(replica) = group_desc.replicas.iter().find(predicate) {
+            return Some(replica.clone());
+        }
+
+        None
+    }
+
     /// Cache given replica and `sync` indicates whether syn to storage.
     pub async fn cache_replica_desc(
         &mut self,
@@ -107,32 +133,38 @@ where
         return Ok(());
     }
 
-    #[inline]
-    async fn ensure_cache_group(&mut self, group_id: u64) -> Result<(), Error> {
-        if self.groups.get(&group_id).is_none() {
-            let group_desc = self
-                .storage
-                .group_desc(group_id)
-                .await?;
-            self.groups.insert(group_id, group_desc);
+    pub async fn remove_replica_desc(
+        &mut self,
+        group_id: u64,
+        replica_desc: ReplicaDesc,
+        sync: bool,
+    ) -> Result<(), Error> {
+        if let Some(group_desc) = self.groups.get_mut(&group_id) {
+            if let Some(index) = group_desc
+                .replicas
+                .iter()
+                .position(|replica| *replica == replica_desc)
+            {
+                let _ = group_desc.replicas.remove(index);
+            }
+
+            if let Some(index) = group_desc
+                .nodes
+                .iter()
+                .position(|node_id| *node_id == replica_desc.node_id)
+            {
+                group_desc.nodes.remove(index);
+            }
+
+            if sync {
+                let _ = self
+                    .storage
+                    .set_group_desc(group_id, group_desc.clone())
+                    .await?;
+            }
+            return Ok(());
         }
 
-        Ok(())
-    }
-
-    #[inline]
-    async fn find<P>(group_desc: &RaftGroupDesc, predicate: P) -> Option<ReplicaDesc>
-    where
-        P: Fn(&&ReplicaDesc) -> bool,
-    {
-        if group_desc.replicas.is_empty() {
-            return None;
-        }
-
-        if let Some(replica) = group_desc.replicas.iter().find(predicate) {
-            return Some(replica.clone());
-        }
-
-        None
+        return Ok(());
     }
 }
