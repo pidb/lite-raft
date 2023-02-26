@@ -1,9 +1,5 @@
-use std::collections::vec_deque::Drain;
 use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::ops::RangeBounds;
 
-use futures::future::OptionFuture;
 use prost::Message;
 use raft::prelude::Entry;
 use raft::prelude::MembershipChangeRequest;
@@ -13,19 +9,15 @@ use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
 use raft::Storage;
-use raft_proto::ConfChangeI;
-use tokio::sync::oneshot;
-
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::ConfChange;
 use raft_proto::prelude::ConfChangeSingle;
 use raft_proto::prelude::ConfChangeV2;
 use raft_proto::prelude::ConfState;
-use raft_proto::prelude::HardState;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::Snapshot;
-
+use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -580,8 +572,6 @@ where
     ) -> Option<ResponseCb> {
         if let Err(err) = self.pre_propose_write(&request) {
             return Some(new_response_error_callback(tx, err));
-            // tx.send(Err(err)).unwrap();
-            // return;
         }
         let term = self.term();
 
@@ -641,15 +631,53 @@ where
         None
     }
 
+    fn pre_propose_membership(&mut self, request: &MembershipChangeRequest) -> Result<(), Error>
+    where
+        RS: Storage,
+    {
+        if request.group_id == 0 {
+            return Err(Error::BadParameter(format!("group_id is 0")));
+        }
+
+        if request.changes.is_empty() {
+            return Err(Error::BadParameter(format!("empty changes")));
+        }
+
+        if !self.is_leader() {
+            return Err(Error::Proposal(ProposalError::NotLeader {
+                group_id: self.group_id,
+                replica_id: self.replica_id,
+            }));
+        }
+
+        if request.term != 0 && self.term() > request.term {
+            return Err(Error::Proposal(ProposalError::Stale(
+                request.term,
+                self.term(),
+            )));
+        }
+
+        Ok(())
+    }
+
     pub fn propose_membership_change(
         &mut self,
         req: MembershipChangeRequest,
         tx: oneshot::Sender<Result<(), Error>>,
     ) -> Option<ResponseCb> {
         // TODO: add pre propose check
+
+        if let Err(err) = self.pre_propose_membership(&req) {
+            return Some(new_response_error_callback(tx, err));
+        }
+
         let term = self.term();
 
-        // propose to raft group
+        info!(
+            "node {}: propose membership change: request = {:?}",
+            0, /* TODO: add it*/ req
+        );
+
         let next_index = self.last_index() + 1;
 
         let res = if req.changes.len() == 1 {
@@ -661,13 +689,22 @@ where
         };
 
         if let Err(err) = res {
-            error!("propose membership change error = {}", err);
+            error!(
+                "node {}: propose membership change error: error = {}",
+                0, /* TODO: add it*/ err
+            );
             return Some(new_response_error_callback(tx, Error::Raft(err)));
         }
 
         let index = self.last_index() + 1;
         if next_index == index {
-            error!("propose_conf_change index invalid");
+            error!(
+                "node {}: propose membership failed, expect log index = {}, got = {}",
+                0, /* TODO: add it*/
+                next_index,
+                index - 1,
+            );
+
             return Some(new_response_error_callback(
                 tx,
                 Error::Proposal(ProposalError::Unexpected(index)),
@@ -682,7 +719,13 @@ where
         };
 
         // FIXME: should return error ResponseCb
-        self.proposals.push(proposal).unwrap();
+        if let Err(err) = self.proposals.push(proposal) {
+            panic!(
+                "node {}: propose membership success, but push proposal error: {}",
+                0, /* TODO: add it*/ err
+            );
+            return Some(new_response_error_callback(tx, err));
+        }
         None
     }
 
@@ -696,6 +739,12 @@ where
             )));
             // TODO: move to event queue
             proposal.tx.map(|tx| tx.send(err));
+        }
+    }
+
+    pub(crate) fn add_track_node(&mut self, node_id: u64) {
+        if self.node_ids.iter().position(|id| *id == node_id).is_none() {
+            self.node_ids.push(node_id)
         }
     }
 

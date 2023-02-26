@@ -11,7 +11,6 @@ use protobuf::Message;
 use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
-use tracing::info;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::FixtureCluster;
@@ -83,12 +82,11 @@ async fn test_single_step() {
             change.replica_id = (i + 1) as u64;
             let req = MembershipChangeRequest {
                 group_id,
+                term: 0, // not check
                 changes: vec![change],
                 replicas: vec![],
             };
-            info!("start membership change request = {:?}", req);
             node.membership_change(req.clone()).await.unwrap();
-            info!("membership change request done, request = {:?}", req);
         }
         done_tx.send(()).unwrap();
     });
@@ -147,8 +145,6 @@ async fn test_single_step() {
     tracing_span = "debug"
 )]
 async fn test_joint_consensus() {
-    init_default_ut_tracing();
-
     let task_group = TaskGroup::new();
     // defer! {
     //     task_group.stop();
@@ -174,27 +170,20 @@ async fn test_joint_consensus() {
         .await
         .unwrap();
 
-    let (done_tx, done_rx) = oneshot::channel();
-    let node = cluster.nodes[0].clone();
-    tokio::spawn(async move {
-        let mut changes = vec![];
-        for i in 1..5 {
-            let mut change = SingleMembershipChange::default();
-            change.set_change_type(ConfChangeType::AddNode);
-            change.node_id = (i + 1) as u64;
-            change.replica_id = (i + 1) as u64;
-            changes.push(change);
-        }
-        let req = MembershipChangeRequest {
-            group_id,
-            changes,
-            replicas: vec![],
-        };
-
-        println!("start membership change request = {:?}", req);
-        node.membership_change(req.clone()).await.unwrap();
-        println!("membership change request done, request = {:?}", req);
-        done_tx.send(()).unwrap();
+    // create joint consenus for membership change
+    let mut changes = vec![];
+    for i in 1..5 {
+        let mut change = SingleMembershipChange::default();
+        change.set_change_type(ConfChangeType::AddNode);
+        change.node_id = (i + 1) as u64;
+        change.replica_id = (i + 1) as u64;
+        changes.push(change);
+    }
+    let rx = cluster.nodes[0].membership_change_non_block(MembershipChangeRequest {
+        group_id,
+        changes,
+        term: 0, // no check term
+        replicas: vec![],
     });
 
     let check_fn = |event: &ApplyMembership| {
@@ -216,19 +205,23 @@ async fn test_joint_consensus() {
         );
     };
 
+    // wait joint consensus apply and check
     check_cc(&mut cluster, 1, 1, Duration::from_millis(100), check_fn).await;
-
-    // TODO: check all replicas inner states
-    for i in 0..5 {
-        for _ in 0..10 {
-            cluster.tickers[i].tick().await;
-        }
-    }
-
-    match timeout_at(Instant::now() + Duration::from_millis(2000), done_rx).await {
+    match timeout_at(Instant::now() + Duration::from_millis(2000), rx).await {
         Err(_) => panic!("timeouted for wait all membership change complte"),
         Ok(_) => {}
     }
+
+    // send heartbeats to new replica and creating it.
+    for _ in 0..10 {
+        cluster.tickers[0].tick().await;
+    }
+
+    // wait new replicas apply membership change
+    check_cc(&mut cluster, 2, 2, Duration::from_millis(100), check_fn).await;
+    check_cc(&mut cluster, 3, 3, Duration::from_millis(100), check_fn).await;
+    check_cc(&mut cluster, 4, 4, Duration::from_millis(100), check_fn).await;
+    check_cc(&mut cluster, 5, 5, Duration::from_millis(100), check_fn).await;
 }
 
 #[async_entry::test(
@@ -281,12 +274,11 @@ async fn test_remove() {
         let req = MembershipChangeRequest {
             group_id,
             changes,
+            term: 0, // no check term
             replicas: vec![],
         };
 
-        println!("start membership change request = {:?}", req);
         node.membership_change(req.clone()).await.unwrap();
-        println!("membership change request done, request = {:?}", req);
         done_tx.send(()).unwrap();
     });
 

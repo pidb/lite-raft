@@ -51,8 +51,6 @@ use crate::util::TaskGroup;
 use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
 use super::StateMachine;
-// use super::apply_actor::ApplyActorReceiver;
-// use super::apply_actor::ApplyActorSender;
 use super::apply_actor::Request as ApplyRequest;
 use super::apply_actor::Response as ApplyResponse;
 use super::config::Config;
@@ -184,7 +182,7 @@ where
             transport: transport.clone(),
             apply_request_tx,
             apply_response_rx,
-            callback_rx,
+            commit_rx: callback_rx,
             active_groups: HashSet::new(),
             sync_replica_cache: true,
             replica_cache: ReplicaCache::new(storage.clone()),
@@ -255,7 +253,7 @@ where
     admin_rx: Receiver<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
-    callback_rx: UnboundedReceiver<CommitEvent>,
+    commit_rx: UnboundedReceiver<CommitEvent>,
     apply_request_tx: UnboundedSender<(Span, ApplyRequest)>,
     apply_response_rx: UnboundedReceiver<ApplyResponse>,
     active_groups: HashSet<u64>,
@@ -361,8 +359,8 @@ where
                     self.active_groups.insert(group_id);
                 }
 
-                Some(msg) = self.callback_rx.recv() => {
-                    self.handle_callback(msg).await;
+                Some(msg) = self.commit_rx.recv() => {
+                    self.handle_apply_commit(msg).await;
                 },
 
                 else => {},
@@ -591,7 +589,7 @@ where
                 let mut step_msg = raft::prelude::Message::default();
                 step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
                 // FIX(test command)
-                // 
+                //
                 // Although the heatbeat is not set without affecting correctness, but liveness
                 // maybe cannot satisty. such as in test code 1) submit some commands 2) and
                 // then wait apply and perform a heartbeat. but due to a heartbeat cannot set commit, so
@@ -623,7 +621,7 @@ where
                 "missing raft groups at from_node {} fanout heartbeat",
                 msg.from_node
             );
-            self.node_manager.add_node(msg.from_node, NO_GORUP);
+            self.node_manager.add_node2(msg.from_node);
         }
 
         trace!(
@@ -726,7 +724,7 @@ where
                 "missing raft groups at from_node {} fanout heartbeat response",
                 msg.from_node
             );
-            self.node_manager.add_node(msg.from_node, NO_GORUP);
+            self.node_manager.add_node2(msg.from_node);
         }
         Ok(MultiRaftMessageResponse {})
     }
@@ -771,8 +769,8 @@ where
     #[tracing::instrument(
         level = Level::TRACE,
         name = "MultiRaftActorRuntime::propose_membership_change_request",
-        skip(self, tx))
-    ]
+        skip_all,
+    )]
     fn propose_membership_change_request(
         &mut self,
         request: MembershipChangeRequest,
@@ -988,7 +986,7 @@ where
                 .cache_replica_desc(group_id, replica_desc.clone(), true)
                 .await?;
             // track the nodes which other members of the raft consensus group
-            group.node_ids.push(replica_desc.node_id);
+            group.add_track_node(replica_desc.node_id);
             self.node_manager.add_node(replica_desc.node_id, group_id);
         }
 
@@ -1010,7 +1008,7 @@ where
                 if replica_desc.node_id == NO_NODE {
                     continue;
                 }
-                group.node_ids.push(replica_desc.node_id);
+                group.add_track_node(replica_desc.node_id);
                 self.node_manager.add_node(replica_desc.node_id, group_id);
             }
         }
@@ -1068,19 +1066,17 @@ where
         group.state.apply_state = response.apply_state;
     }
 
-    async fn handle_callback(&mut self, commit: CommitEvent) {
-        debug!("handle callback = {:?}", commit);
+    async fn handle_apply_commit(&mut self, commit: CommitEvent) {
         match commit {
             CommitEvent::None => return,
             CommitEvent::Membership((commit, tx)) => {
-                let res = self.apply_membership_change_view(commit).await;
-                println!("res = {:?}", res);
-                tx.send(res).unwrap();
+                self.commit_membership_change(commit).await;
+                self.response_cbs.push(new_response_callback(tx, Ok(())));
             }
         }
     }
 
-    async fn apply_membership_change_view(&mut self, view: CommitMembership) -> Result<(), Error> {
+    async fn commit_membership_change(&mut self, view: CommitMembership) -> Result<(), Error> {
         assert_eq!(
             view.change_request.changes.len(),
             view.conf_change.changes.len()
@@ -1088,14 +1084,21 @@ where
 
         let group_id = view.change_request.group_id;
 
-        let group = self.groups.get_mut(&group_id).map_or(
-            Err(Error::RaftGroup(RaftGroupError::NotExist(
-                self.node_id,
-                group_id,
-            ))),
-            |group| Ok(group),
-        )?;
+        let group = match self.groups.get_mut(&group_id) {
+            Some(group) => group,
+            None => {
+                error!(
+                    "node {}: commit membership change failed: group {} deleted",
+                    self.node_id, group_id,
+                );
+                return Err(Error::RaftGroup(RaftGroupError::Deleted(
+                    self.node_id,
+                    group_id,
+                )));
+            }
+        };
 
+        // apply to inner state
         for (conf_change, change_request) in view
             .conf_change
             .changes
@@ -1106,12 +1109,12 @@ where
                 ConfChangeType::AddNode => {
                     MultiRaftActorRuntime::<T, RS, MRS>::membership_add(
                         self.node_id,
-                        group_id,
+                        group,
                         change_request,
                         &mut self.node_manager,
                         &mut self.replica_cache,
                     )
-                    .await?
+                    .await;
                 }
                 ConfChangeType::RemoveNode => {
                     MultiRaftActorRuntime::<T, RS, MRS>::membership_remove(
@@ -1121,57 +1124,72 @@ where
                         &mut self.node_manager,
                         &mut self.replica_cache,
                     )
-                    .await?
+                    .await;
                 }
                 ConfChangeType::AddLearnerNode => unimplemented!(),
             }
         }
 
         // apply to raft
-        let conf_state = group
-            .raft_group
-            .apply_conf_change(&view.conf_change)
-            .map_err(|raft_err| Error::Raft(raft_err))?;
+        let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
+            Err(err) => {
+                error!(
+                    "node {}: commit membership change error: group = {}, err = {}",
+                    self.node_id, group_id, err,
+                );
+                return Err(Error::Raft(err));
+            }
+            Ok(conf_state) => conf_state,
+        };
 
         let gs = &self
             .storage
             .group_storage(group_id, group.replica_id)
             .await?;
         gs.set_conf_state(conf_state);
-        println!("applied membership");
+
         return Ok(());
     }
 
     async fn membership_add(
         node_id: u64,
-        group_id: u64,
+        group: &mut RaftGroup<RS>,
         change: &SingleMembershipChange,
         node_manager: &mut NodeManager,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-    ) -> Result<(), Error> {
-        let (node_id, replica_id) = (change.node_id, change.replica_id);
-        node_manager.add_group(node_id, group_id);
+    ) {
+        let group_id = group.group_id;
+        node_manager.add_group(change.node_id, group_id);
 
         // TODO: this call need transfer to user call, and if user call return errored,
         // the membership change should failed and user need to retry.
         // we need a channel to provider user notify actor it need call these code.
         // and we recv the notify can executing these code, if executed failed, we
         // response to user and membership change is failed.
-        let replica_desc = ReplicaDesc {
-            node_id,
-            replica_id,
-        };
+
         if let Err(err) = replica_cache
-            .cache_replica_desc(group_id, replica_desc, true)
+            .cache_replica_desc(
+                group_id,
+                ReplicaDesc {
+                    node_id: change.node_id,
+                    replica_id: change.replica_id,
+                },
+                true,
+            )
             .await
         {
             warn!(
                 "node {}: the membership change request to add replica desc error: {} ",
-                node_id, err
+                change.node_id, err
             );
         }
 
-        Ok(())
+        group.add_track_node(change.node_id);
+
+        info!(
+            "node {}: add membership change applied: node = {}, group = {}, replica = {}",
+            node_id, change.node_id, group_id, change.replica_id
+        );
     }
 
     async fn membership_remove(
@@ -1179,22 +1197,35 @@ where
         group: &mut RaftGroup<RS>,
         change_request: &SingleMembershipChange,
         node_manager: &mut NodeManager,
-        _replica_cache: &mut ReplicaCache<RS, MRS>,
-    ) -> Result<(), Error> {
+        replica_cache: &mut ReplicaCache<RS, MRS>,
+    ) {
+        let group_id = group.group_id;
         let _ = group.remove_pending_proposals();
         let _ = group.remove_track_node(change_request.node_id);
-        println!(
-            "node {}: remove group = {} tracked node = {}",
-            node_id, group.group_id, change_request.node_id
-        );
-        let _ = node_manager.remove_group(change_request.node_id, group.group_id);
-        println!(
-            "node {}: remove node = {} of group = {} on node manager",
-            node_id, change_request.node_id, group.group_id,
-        );
+        // TODO: think remove if node has empty group_map.
+        let _ = node_manager.remove_group(change_request.node_id, group_id);
 
-        // TODO: remove replica desc cache
-        Ok(())
+        if let Err(err) = replica_cache
+            .remove_replica_desc(
+                group_id,
+                ReplicaDesc {
+                    node_id: change_request.node_id,
+                    replica_id: change_request.replica_id,
+                },
+                true,
+            )
+            .await
+        {
+            warn!(
+                "node {}: the membership change request to add replica desc error: {} ",
+                change_request.node_id, err
+            );
+        }
+
+        info!(
+            "node {}: remove membership change applied: node = {}, group = {}, replica = {}",
+            node_id, change_request.node_id, group_id, change_request.replica_id
+        );
     }
 
     async fn handle_readys(&mut self) {
