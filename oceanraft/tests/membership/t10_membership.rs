@@ -23,7 +23,7 @@ async fn check_cc<F>(
     timeout: Duration,
     check: F,
 ) where
-    F: FnOnce(&ApplyMembership),
+    F: FnOnce(&ApplyMembership<()>),
 {
     let event = FixtureCluster::wait_membership_change_apply_event(cluster, node_id, timeout)
         .await
@@ -104,7 +104,7 @@ async fn test_single_step() {
 
     // check leader should recv all apply events.
     for i in 1..5 {
-        let check_fn = |event: &ApplyMembership| {
+        let check_fn = |event: &ApplyMembership<()>| {
             let mut cc = ConfChange::default();
             cc.merge_from_bytes(event.entry.get_data()).unwrap();
 
@@ -186,7 +186,7 @@ async fn test_joint_consensus() {
         replicas: vec![],
     });
 
-    let check_fn = |event: &ApplyMembership| {
+    let check_fn = |event: &ApplyMembership<()>| {
         let mut cc = ConfChangeV2::default();
         cc.merge_from_bytes(&event.entry.data).unwrap();
         let changes = cc
@@ -282,7 +282,7 @@ async fn test_remove() {
         done_tx.send(()).unwrap();
     });
 
-    let check_fn = |event: &ApplyMembership| {
+    let check_fn = |event: &ApplyMembership<()>| {
         let mut cc = ConfChangeV2::default();
         cc.merge_from_bytes(&event.entry.data).unwrap();
         let changes = cc

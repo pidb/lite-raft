@@ -29,12 +29,12 @@ impl WriteChecker {
        self.writes.insert(group_id, data);
     }
 
-    pub fn check(&mut self, applys: &Vec<ApplyNormal>) {
+    pub fn check(&mut self, applys: &Vec<ApplyNormal<()>>) {
         self.fill_applys(applys);
         assert_eq!(self.writes, self.applys)
     }
 
-    fn fill_applys(&mut self, applys: &Vec<ApplyNormal>) {
+    fn fill_applys(&mut self, applys: &Vec<ApplyNormal<()>>) {
         for apply in applys.iter() {
             self.applys.insert(apply.group_id, apply.entry.data.clone());
         }

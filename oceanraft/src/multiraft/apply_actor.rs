@@ -29,6 +29,7 @@ use crate::util::TaskGroup;
 use super::error::Error;
 use super::error::ProposalError;
 
+use super::response::AppWriteResponse;
 use super::ApplyMembership;
 use crate::multiraft::ApplyEvent;
 
@@ -45,24 +46,26 @@ struct State {
     stopped: AtomicBool,
 }
 
-pub struct ApplyActor<RSM>
+pub struct ApplyActor<RSM, RES>
 where
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     // cfg: Config,
     state: Arc<State>,
-    runtime: Mutex<Option<ApplyActorRuntime<RSM>>>,
+    runtime: Mutex<Option<ApplyActorRuntime<RSM, RES>>>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<RSM> ApplyActor<RSM>
+impl<RSM, RES> ApplyActor<RSM, RES>
 where
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     pub fn new(
         cfg: &Config,
         rsm: RSM,
-        request_rx: UnboundedReceiver<(Span, Request)>,
+        request_rx: UnboundedReceiver<(Span, Request<RES>)>,
         response_tx: UnboundedSender<Response>,
         commit_tx: UnboundedSender<CommitEvent>,
     ) -> Self {
@@ -94,7 +97,10 @@ where
 const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
-pub struct Apply {
+pub struct Apply<RES>
+where
+    RES: AppWriteResponse,
+{
     pub replica_id: u64,
     pub group_id: u64,
     pub term: u64,
@@ -102,11 +108,14 @@ pub struct Apply {
     pub commit_term: u64,
     pub entries: Vec<Entry>,
     pub entries_size: usize,
-    pub proposals: Vec<Proposal>,
+    pub proposals: Vec<Proposal<RES>>,
 }
 
-impl Apply {
-    fn try_batch(&mut self, that: &mut Apply, max_batch_size: usize) -> bool {
+impl<RES> Apply<RES>
+where
+    RES: AppWriteResponse,
+{
+    fn try_batch(&mut self, that: &mut Apply<RES>, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
         assert_eq!(self.group_id, that.group_id);
         assert!(that.term >= self.term);
@@ -125,42 +134,29 @@ impl Apply {
     }
 }
 
-// pub enum ApplyTask {
-//     Apply(Apply),
-// }
-
-// #[derive(Default)]
-// pub struct ApplyRequest {
-//     pub groups: HashMap<u64, ApplyTask>,
-// }
-
 #[derive(Debug)]
 pub struct ApplyResult {}
 
-// #[derive(Debug)]
-// pub struct ApplyTaskResponse {
-//     pub apply_results: HashMap<u64, ApplyResult>,
-// }
-
-pub struct ApplyActorRuntime<RSM>
+pub struct ApplyActorRuntime<RSM, RES>
 where
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
     node_id: u64,
     cfg: Config,
     state: Arc<State>,
-    rx: UnboundedReceiver<(tracing::span::Span, Request)>,
+    rx: UnboundedReceiver<(tracing::span::Span, Request<RES>)>,
     tx: UnboundedSender<Response>,
-    pending_applys: HashMap<u64, Vec<Apply>>,
-    ctx: ApplyContext<RSM>,
-    delegate: ApplyDelegate<RSM>,
+    pending_applys: HashMap<u64, Vec<Apply<RES>>>,
+    ctx: ApplyContext<RSM, RES>,
+    delegate: ApplyDelegate<RSM, RES>,
     batch_apply: bool,
     batch_size: usize,
 }
 
-pub enum Request {
-    Apply { applys: HashMap<u64, Apply> },
+pub enum Request<RES: AppWriteResponse> {
+    Apply { applys: HashMap<u64, Apply<RES>> },
 }
 
 #[derive(Debug)]
@@ -169,15 +165,16 @@ pub struct Response {
     pub apply_state: RaftGroupApplyState,
 }
 
-impl<RSM> ApplyActorRuntime<RSM>
+impl<RSM, RES> ApplyActorRuntime<RSM, RES>
 where
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     fn new(
         cfg: &Config,
         state: &Arc<State>,
         rsm: RSM,
-        request_rx: UnboundedReceiver<(Span, Request)>,
+        request_rx: UnboundedReceiver<(Span, Request<RES>)>,
         response_tx: UnboundedSender<Response>,
         commit_tx: UnboundedSender<CommitEvent>,
     ) -> Self {
@@ -189,7 +186,11 @@ where
             // ctx: ctx.clone(),
             rx: request_rx,
             tx: response_tx,
-            ctx: ApplyContext { rsm, commit_tx },
+            ctx: ApplyContext {
+                rsm,
+                commit_tx,
+                _m: PhantomData,
+            },
             batch_apply: cfg.batch_apply,
             batch_size: cfg.batch_size, // TODO: per-group
             // task_group: task_group.clone(),
@@ -199,7 +200,7 @@ where
     }
 
     #[inline]
-    fn insert_pending_apply(&mut self, group_id: u64, apply: Apply) {
+    fn insert_pending_apply(&mut self, group_id: u64, apply: Apply<RES>) {
         match self.pending_applys.get_mut(&group_id) {
             Some(applys) => applys.push(apply),
             None => {
@@ -213,9 +214,9 @@ where
     // otherwise pending in FIFO order.
     //
     // Note: This method provides scalability for us to make more flexible apply decisions in the future.
-    async fn batch_requests(&mut self, requests: Vec<Request>) {
+    async fn batch_requests(&mut self, requests: Vec<Request<RES>>) {
         // let mut pending_applys: HashMap<u64, Vec<Apply>> = HashMap::new();
-        let mut batch_applys: HashMap<u64, Option<Apply>> = HashMap::new();
+        let mut batch_applys: HashMap<u64, Option<Apply<RES>>> = HashMap::new();
 
         // let mut batcher = Batcher::new(self.cfg.batch_apply, self.cfg.batch_size);
         for request in requests {
@@ -352,24 +353,36 @@ where
 
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
-struct PendingSender<AppResponse> {
+struct PendingSender<RES>
+where
+    RES: AppWriteResponse,
+{
     index: u64,
     term: u64,
-    tx: Option<oneshot::Sender<Result<AppResponse, Error>>>,
+    tx: Option<oneshot::Sender<Result<RES, Error>>>,
 }
 
-impl<AppResponse> PendingSender<AppResponse> {
-    fn new(index: u64, term: u64, tx: Option<oneshot::Sender<Result<AppResponse, Error>>>) -> Self {
+impl<RES> PendingSender<RES>
+where
+    RES: AppWriteResponse,
+{
+    fn new(index: u64, term: u64, tx: Option<oneshot::Sender<Result<RES, Error>>>) -> Self {
         Self { index, term, tx }
     }
 }
 
-struct PendingSenderQueue<AppResponse> {
-    normals: VecDeque<PendingSender<AppResponse>>,
-    conf_change: Option<PendingSender<AppResponse>>,
+struct PendingSenderQueue<RES>
+where
+    RES: AppWriteResponse,
+{
+    normals: VecDeque<PendingSender<RES>>,
+    conf_change: Option<PendingSender<RES>>,
 }
 
-impl<AppResponse> PendingSenderQueue<AppResponse> {
+impl<RES> PendingSenderQueue<RES>
+where
+    RES: AppWriteResponse,
+{
     pub fn new() -> Self {
         Self {
             normals: VecDeque::new(),
@@ -386,11 +399,11 @@ impl<AppResponse> PendingSenderQueue<AppResponse> {
     }
 
     #[inline]
-    pub fn push_normal(&mut self, normal: PendingSender<AppResponse>) {
+    pub fn push_normal(&mut self, normal: PendingSender<RES>) {
         self.normals.push_back(normal)
     }
 
-    pub fn pop_normal(&mut self, index: u64, term: u64) -> Option<PendingSender<AppResponse>> {
+    pub fn pop_normal(&mut self, index: u64, term: u64) -> Option<PendingSender<RES>> {
         self.normals.pop_front().and_then(|cmd| {
             self.try_gc();
             if (cmd.term, cmd.index) > (term, index) {
@@ -402,46 +415,51 @@ impl<AppResponse> PendingSenderQueue<AppResponse> {
     }
 
     #[inline]
-    pub fn set_conf_change(&mut self, conf_change: PendingSender<AppResponse>) {
+    pub fn set_conf_change(&mut self, conf_change: PendingSender<RES>) {
         self.conf_change = Some(conf_change)
     }
 
     #[inline]
-    pub fn take_conf_change(&mut self) -> Option<PendingSender<AppResponse>> {
+    pub fn take_conf_change(&mut self) -> Option<PendingSender<RES>> {
         self.conf_change.take()
     }
 }
 
-struct ApplyContext<RSM>
+struct ApplyContext<RSM, RES>
 where
-    RSM: StateMachine,
+    RES: AppWriteResponse,
+    RSM: StateMachine<RES>,
 {
     rsm: RSM,
     commit_tx: UnboundedSender<CommitEvent>,
+    _m: PhantomData<RES>,
 }
 
-pub struct ApplyDelegate<RSM> {
-    node_id: u64,
-    pending_senders: PendingSenderQueue<()>, // TODO: add generic
-    _m: PhantomData<RSM>,
-}
-
-impl<RSM> ApplyDelegate<RSM>
+pub struct ApplyDelegate<RSM, RES>
 where
-    RSM: StateMachine,
+    RES: AppWriteResponse,
+{
+    node_id: u64,
+    pending_senders: PendingSenderQueue<RES>, // TODO: add generic
+    _m1: PhantomData<RSM>,
+    _m2: PhantomData<RES>,
+}
+
+impl<RSM, RES> ApplyDelegate<RSM, RES>
+where
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     fn new(node_id: u64) -> Self {
         Self {
             node_id,
             pending_senders: PendingSenderQueue::new(),
-            _m: PhantomData,
+            _m1: PhantomData,
+            _m2: PhantomData,
         }
     }
 
-    fn set_pending_conf_change(
-        &mut self,
-        sender: PendingSender<()>, /*FIXME: add generic type */
-    ) {
+    fn set_pending_conf_change(&mut self, sender: PendingSender<RES>) {
         if let Some(sender) = self.pending_senders.take_conf_change() {
             // From tikv:
             // if it loses leadership before conf change is replicated, there may be
@@ -455,7 +473,7 @@ where
         self.pending_senders.set_conf_change(sender);
     }
 
-    fn push_pending_proposals(&mut self, proposals: Vec<Proposal>) {
+    fn push_pending_proposals(&mut self, proposals: Vec<Proposal<RES>>) {
         for mut p in proposals {
             let sender = PendingSender::new(p.index, p.term, p.tx.take());
             if p.is_conf_change {
@@ -466,7 +484,7 @@ where
         }
     }
 
-    fn find_pending_conf_change(&mut self, term: u64, index: u64) -> Option<PendingSender<()>> /* FIXME: add generic type */
+    fn find_pending_conf_change(&mut self, term: u64, index: u64) -> Option<PendingSender<RES>> /* FIXME: add generic type */
     {
         if let Some(p) = self.pending_senders.take_conf_change() {
             if p.term == term && p.index == index {
@@ -484,7 +502,7 @@ where
         term: u64,
         index: u64,
         is_conf_change: bool,
-    ) -> Option<PendingSender<()>> {
+    ) -> Option<PendingSender<RES>> {
         if is_conf_change {
             return self.find_pending_conf_change(term, index);
         }
@@ -513,8 +531,8 @@ where
 
     async fn handle_apply(
         &mut self,
-        ctx: &mut ApplyContext<RSM>,
-        mut apply: Apply,
+        ctx: &mut ApplyContext<RSM, RES>,
+        mut apply: Apply<RES>,
         apply_state: &mut RaftGroupApplyState,
     ) {
         let group_id = apply.group_id;
@@ -631,9 +649,9 @@ where
     async fn handle_applys(
         &mut self,
         group_id: u64,
-        applys: Vec<Apply>,
+        applys: Vec<Apply<RES>>,
         apply_state: &mut RaftGroupApplyState,
-        ctx: &mut ApplyContext<RSM>,
+        ctx: &mut ApplyContext<RSM, RES>,
     ) -> Result<Response, Error> {
         // let mut results = vec![];
         for apply in applys {
@@ -723,13 +741,13 @@ mod test {
 
     struct NoOpStateMachine {}
 
-    impl StateMachine for NoOpStateMachine {
-        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::ApplyEvent>>> + 'life0
+    impl StateMachine<()> for NoOpStateMachine {
+        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::ApplyEvent<()>>>> + 'life0
         where
             Self: 'life0;
         fn apply(
             &mut self,
-            _: std::vec::IntoIter<crate::multiraft::ApplyEvent>,
+            _: std::vec::IntoIter<crate::multiraft::ApplyEvent<()>>,
         ) -> Self::ApplyFuture<'_> {
             async move { None }
         }
@@ -758,7 +776,7 @@ mod test {
         ent_start: u64,
         ent_end: u64,
         entry_size: usize,
-    ) -> Apply {
+    ) -> Apply<()> {
         let entries = new_entries(ent_start, ent_end, term, entry_size);
         Apply {
             group_id,
@@ -772,7 +790,7 @@ mod test {
         }
     }
 
-    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyActorRuntime<NoOpStateMachine> {
+    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyActorRuntime<NoOpStateMachine, ()> {
         let (_request_tx, request_rx) = unbounded_channel();
         let (response_tx, _response_rx) = unbounded_channel();
         let (callback_tx, _callback_rx) = unbounded_channel();

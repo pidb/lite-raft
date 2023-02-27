@@ -11,6 +11,7 @@ use crate::prelude::EntryType;
 use crate::prelude::MembershipChangeRequest;
 
 use super::error::Error;
+use super::response::AppWriteResponse;
 
 /// Commit membership change results.
 ///
@@ -61,22 +62,22 @@ pub struct ApplyNoOp {
 }
 
 #[derive(Debug)]
-pub struct ApplyNormal {
+pub struct ApplyNormal<RES: AppWriteResponse> {
     pub group_id: u64,
     pub entry: Entry,
     pub is_conf_change: bool,
-    pub tx: Option<oneshot::Sender<Result<(), Error>>>,
+    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
 }
 
 #[derive(Debug)]
-pub struct ApplyMembership {
+pub struct ApplyMembership<RES: AppWriteResponse> {
     pub group_id: u64,
     pub entry: Entry,
-    pub tx: Option<oneshot::Sender<Result<(), Error>>>,
+    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
     pub commit_tx: UnboundedSender<CommitEvent>,
 }
 
-impl ApplyMembership {
+impl<RES: AppWriteResponse> ApplyMembership<RES> {
     pub fn parse(&self) -> CommitMembership {
         match self.entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
@@ -125,13 +126,13 @@ impl ApplyMembership {
 }
 
 #[derive(Debug)]
-pub enum ApplyEvent {
+pub enum ApplyEvent<RES: AppWriteResponse> {
     NoOp(ApplyNoOp),
-    Normal(ApplyNormal),
-    Membership(ApplyMembership),
+    Normal(ApplyNormal<RES>),
+    Membership(ApplyMembership<RES>),
 }
 
-impl ApplyEvent {
+impl<RES: AppWriteResponse> ApplyEvent<RES> {
     pub(crate) fn entry_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_index,

@@ -50,7 +50,6 @@ use crate::util::TaskGroup;
 
 use super::apply_actor::Apply;
 use super::apply_actor::ApplyActor;
-use super::StateMachine;
 use super::apply_actor::Request as ApplyRequest;
 use super::apply_actor::Response as ApplyResponse;
 use super::config::Config;
@@ -66,9 +65,11 @@ use super::raft_group::RaftGroup;
 use super::raft_group::RaftGroupState;
 use super::raft_group::RaftGroupWriteRequest;
 use super::replica_cache::ReplicaCache;
+use super::response::AppWriteResponse;
 use super::storage::MultiRaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
+use super::StateMachine;
 
 pub(crate) type ResponseCb = Box<dyn FnOnce() -> Result<(), Error> + Send + Sync + 'static>;
 
@@ -112,35 +113,38 @@ impl ShardState {
     }
 }
 
-pub struct MultiRaftActor<T, RS, MRS, RSM>
+pub struct MultiRaftActor<T, RS, MRS, RSM, RES>
 where
     T: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     pub shard: ShardState,
     // FIXME: queue should have one per-group.
-    pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
+    pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<RES, Error>>)>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    pub membership_change_tx: Sender<(MembershipChangeRequest, oneshot::Sender<Result<(), Error>>)>,
+    pub membership_change_tx:
+        Sender<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     pub admin_tx: Sender<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
-    apply: ApplyActor<RSM>,
-    runtime: Mutex<Option<MultiRaftActorRuntime<T, RS, MRS>>>,
+    apply: ApplyActor<RSM, RES>,
+    runtime: Mutex<Option<MultiRaftActorRuntime<T, RS, MRS, RES>>>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<T, RS, MRS, RSM> MultiRaftActor<T, RS, MRS, RSM>
+impl<T, RS, MRS, RSM, RES> MultiRaftActor<T, RS, MRS, RSM, RES>
 where
     T: Transport + Clone,
     RS: Storage + Clone + Sync + Send + 'static,
     MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine,
+    RES: AppWriteResponse,
+    RSM: StateMachine<RES>,
 {
     pub fn new(
         cfg: &Config,
@@ -163,7 +167,7 @@ where
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
 
-        let runtime = MultiRaftActorRuntime {
+        let runtime = MultiRaftActorRuntime::<T, RS, MRS, RES> {
             cfg: cfg.clone(),
             // activity_groups: HashSet::new(),
             state: state.clone(),
@@ -227,11 +231,12 @@ where
     }
 }
 
-pub struct MultiRaftActorRuntime<T, RS, MRS>
+pub struct MultiRaftActorRuntime<T, RS, MRS, RES>
 where
     T: Transport,
     RS: Storage,
     MRS: MultiRaftStorage<RS>,
+    RES: AppWriteResponse,
 {
     cfg: Config,
     node_id: u64,
@@ -241,20 +246,20 @@ where
     node_manager: NodeManager,
     replica_cache: ReplicaCache<RS, MRS>,
     sync_replica_cache: bool,
-    groups: HashMap<u64, RaftGroup<RS>>,
+    groups: HashMap<u64, RaftGroup<RS, RES>>,
     tick_interval: Duration,
     raft_message_rx: Receiver<(
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<(), Error>>)>,
+    write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<RES, Error>>)>,
     read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    membership_change_rx: Receiver<(MembershipChangeRequest, oneshot::Sender<Result<(), Error>>)>,
+    membership_change_rx: Receiver<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
     admin_rx: Receiver<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
     commit_rx: UnboundedReceiver<CommitEvent>,
-    apply_request_tx: UnboundedSender<(Span, ApplyRequest)>,
+    apply_request_tx: UnboundedSender<(Span, ApplyRequest<RES>)>,
     apply_response_rx: UnboundedReceiver<ApplyResponse>,
     active_groups: HashSet<u64>,
     response_cbs: Vec<ResponseCb>,
@@ -262,11 +267,12 @@ where
     _m1: PhantomData<RS>,
 }
 
-impl<T, RS, MRS> MultiRaftActorRuntime<T, RS, MRS>
+impl<T, RS, MRS, RES> MultiRaftActorRuntime<T, RS, MRS, RES>
 where
     T: Transport + Clone,
     RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
+    RES: AppWriteResponse,
 {
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::main_loop"
@@ -742,7 +748,7 @@ where
     fn propose_write_request(
         &mut self,
         request: AppWriteRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
+        tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCb> {
         let group_id = request.group_id;
         match self.groups.get_mut(&group_id) {
@@ -774,7 +780,7 @@ where
     fn propose_membership_change_request(
         &mut self,
         request: MembershipChangeRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
+        tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCb> {
         let group_id = request.group_id;
         match self.groups.get_mut(&group_id) {
@@ -1107,7 +1113,7 @@ where
         {
             match conf_change.change_type() {
                 ConfChangeType::AddNode => {
-                    MultiRaftActorRuntime::<T, RS, MRS>::membership_add(
+                    MultiRaftActorRuntime::<T, RS, MRS, RES>::membership_add(
                         self.node_id,
                         group,
                         change_request,
@@ -1117,7 +1123,7 @@ where
                     .await;
                 }
                 ConfChangeType::RemoveNode => {
-                    MultiRaftActorRuntime::<T, RS, MRS>::membership_remove(
+                    MultiRaftActorRuntime::<T, RS, MRS, RES>::membership_remove(
                         self.node_id,
                         group,
                         change_request,
@@ -1153,7 +1159,7 @@ where
 
     async fn membership_add(
         node_id: u64,
-        group: &mut RaftGroup<RS>,
+        group: &mut RaftGroup<RS, RES>,
         change: &SingleMembershipChange,
         node_manager: &mut NodeManager,
         replica_cache: &mut ReplicaCache<RS, MRS>,
@@ -1194,7 +1200,7 @@ where
 
     async fn membership_remove(
         node_id: u64,
-        group: &mut RaftGroup<RS>,
+        group: &mut RaftGroup<RS, RES>,
         change_request: &SingleMembershipChange,
         node_manager: &mut NodeManager,
         replica_cache: &mut ReplicaCache<RS, MRS>,
@@ -1364,7 +1370,7 @@ where
     //     skip_all
     // )]
 
-    fn send_applys(&self, applys: HashMap<u64, Apply>) {
+    fn send_applys(&self, applys: HashMap<u64, Apply<RES>>) {
         let span = tracing::span::Span::current();
         if let Err(_err) = self
             .apply_request_tx
