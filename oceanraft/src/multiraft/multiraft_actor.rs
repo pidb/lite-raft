@@ -132,7 +132,7 @@ where
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    pub admin_tx: Sender<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
+    pub admin_tx: Sender<(RaftGroupManagement, oneshot::Sender<Result<(), Error>>)>,
     apply: ApplyActor<RSM, RES>,
     runtime: Mutex<Option<MultiRaftActorRuntime<T, RS, MRS, RES>>>,
     join: Mutex<Option<JoinHandle<()>>>,
@@ -255,7 +255,7 @@ where
     write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<RES, Error>>)>,
     read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
     membership_change_rx: Receiver<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
-    admin_rx: Receiver<(AdminMessage, oneshot::Sender<Result<(), Error>>)>,
+    admin_rx: Receiver<(RaftGroupManagement, oneshot::Sender<Result<(), Error>>)>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
     commit_rx: UnboundedReceiver<CommitEvent>,
@@ -355,7 +355,7 @@ where
                 },
 
                 Some((req, tx)) = self.admin_rx.recv() => {
-                     if let Some(cb) = self.handle_admin_request(req, tx).await {
+                     if let Some(cb) = self.handle_raft_group_management(req, tx).await {
                         self.response_cbs.push(cb);
                     }
                 },
@@ -854,26 +854,26 @@ where
         }
     }
 
-    #[tracing::instrument(
-        name = "MultiRaftActorRuntime::handle_admin_request",
-        level = Level::TRACE,
-        skip_all,
-    )]
-    async fn handle_admin_request(
-        &mut self,
-        msg: AdminMessage,
-        tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Option<ResponseCb> {
-        let res = match msg.msg_type() {
-            // handle raft group management request
-            AdminMessageType::RaftGroup => {
-                let msg = msg.raft_group.unwrap();
-                self.handle_raft_group_management(msg).await
-            }
-        };
+    // #[tracing::instrument(
+    //     name = "MultiRaftActorRuntime::handle_admin_request",
+    //     level = Level::TRACE,
+    //     skip_all,
+    // )]
+    // async fn handle_admin_request(
+    //     &mut self,
+    //     msg: AdminMessage,
+    //     tx: oneshot::Sender<Result<(), Error>>,
+    // ) -> Option<ResponseCb> {
+    //     let res = match msg.msg_type() {
+    //         // handle raft group management request
+    //         AdminMessageType::RaftGroup => {
+    //             let msg = msg.raft_group.unwrap();
+    //             self.handle_raft_group_management(msg).await
+    //         }
+    //     };
 
-        return Some(new_response_callback(tx, res));
-    }
+    //     return Some(new_response_callback(tx, res));
+    // }
 
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::raft_group_management",
@@ -883,8 +883,9 @@ where
     async fn handle_raft_group_management(
         &mut self,
         msg: RaftGroupManagement,
-    ) -> Result<(), Error> {
-        match msg.msg_type() {
+        tx: oneshot::Sender<Result<(), Error>>,
+    ) -> Option<ResponseCb> {
+        let res = match msg.msg_type() {
             RaftGroupManagementType::MsgCreateGroup => {
                 self.active_groups.insert(msg.group_id);
                 self.create_raft_group(msg.group_id, msg.replica_id, msg.replicas)
@@ -894,7 +895,7 @@ where
                 // marke delete
                 let group_id = msg.group_id;
                 let group = match self.groups.get_mut(&group_id) {
-                    None => return Ok(()),
+                    None => return Some(new_response_callback(tx, Ok(()))),
                     Some(group) => group,
                 };
 
@@ -913,7 +914,9 @@ where
 
                 Ok(())
             }
-        }
+        };
+
+        return Some(new_response_callback(tx, res));
     }
 
     // #[tracing::instrument(

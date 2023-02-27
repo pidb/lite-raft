@@ -223,16 +223,13 @@ impl FixtureCluster {
             let node = &self.nodes[place_node_index];
 
             // create admin message for create raft grop
-            let mut admin_msg = AdminMessage::default();
-            admin_msg.set_msg_type(AdminMessageType::RaftGroup);
             let mut msg = RaftGroupManagement::default();
             msg.set_msg_type(RaftGroupManagementType::MsgCreateGroup);
             msg.group_id = plan.group_id;
             msg.replica_id = replica_id;
             msg.replicas = replicas.clone();
-            admin_msg.raft_group = Some(msg);
             // self.tickers[place_node_index].non_blocking_tick();
-            let _ = node.admin(admin_msg).await?;
+            let _ = node.group_manage(msg).await?;
 
             match self.groups.get_mut(&plan.group_id) {
                 None => {
