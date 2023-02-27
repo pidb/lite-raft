@@ -13,6 +13,7 @@ use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
 use super::multiraft_actor::ShardState;
+use super::response::AppWriteResponse;
 use super::transport::Transport;
 use super::util::Ticker;
 use super::StateMachine;
@@ -77,31 +78,33 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<T, RS, MRS, RSM>
+pub struct MultiRaft<T, RS, MRS, RSM, RES>
 where
     T: Transport + Clone,
     RS: Storage + Send + Sync + Clone + 'static,
     MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     // ctx: Context,
     // cfg: Config,
     // transport: T,
     // storage: MRS,
     task_group: TaskGroup,
-    actor: MultiRaftActor<T, RS, MRS, RSM>,
+    actor: MultiRaftActor<T, RS, MRS, RSM, RES>,
     // apply_actor: ApplyActor,
     // _m2: PhantomData<T>,
     // _m3: PhantomData<RS>,
     // _m4: PhantomData<MRS>,
 }
 
-impl<T, RS, MRS, RSM> MultiRaft<T, RS, MRS, RSM>
+impl<T, RS, MRS, RSM, RES> MultiRaft<T, RS, MRS, RSM, RES>
 where
     T: Transport + Clone,
     RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine,
+    RSM: StateMachine<RES>,
+    RES: AppWriteResponse,
 {
     pub fn new(
         config: Config,
@@ -132,7 +135,7 @@ where
         // );
 
         let actor =
-            MultiRaftActor::<T, RS, MRS, RSM>::new(&config, &transport, &storage, rsm, &event_tx);
+            MultiRaftActor::<T, RS, MRS, RSM, RES>::new(&config, &transport, &storage, rsm, &event_tx);
 
         Self {
             // cfg: config,
@@ -157,14 +160,14 @@ where
         // TODO: start apply and multiraft actor
     }
 
-    pub async fn write(&self, request: AppWriteRequest) -> Result<(), Error> {
+    pub async fn write(&self, request: AppWriteRequest) -> Result<RES, Error> {
         let rx = self.write_non_block(request);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the write was dropped".to_string())
         })?
     }
 
-    pub fn write_block(&self, request: AppWriteRequest) -> Result<(), Error> {
+    pub fn write_block(&self, request: AppWriteRequest) -> Result<RES, Error> {
         let rx = self.write_non_block(request);
         rx.blocking_recv().map_err(|_| {
             Error::Internal("the sender that result the write was dropped".to_string())
@@ -174,7 +177,7 @@ where
     pub fn write_non_block(
         &self,
         request: AppWriteRequest,
-    ) -> oneshot::Receiver<Result<(), Error>> {
+    ) -> oneshot::Receiver<Result<RES, Error>> {
         let (tx, rx) = oneshot::channel();
         match self.actor.write_propose_tx.try_send((request, tx)) {
             // FIXME: handle write queue full case
@@ -210,14 +213,14 @@ where
         rx
     }
 
-    pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<(), Error> {
+    pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
         let rx = self.membership_change_non_block(request);
         rx.await.map_err(|_| {
             Error::Internal("the sender that result the membership change was dropped".to_string())
         })?
     }
 
-    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<(), Error> {
+    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
         let rx = self.membership_change_non_block(request);
         rx.blocking_recv().map_err(|_| {
             Error::Internal("the sender that result the membership change was dropped".to_string())
@@ -227,7 +230,7 @@ where
     pub fn membership_change_non_block(
         &self,
         request: MembershipChangeRequest,
-    ) -> oneshot::Receiver<Result<(), Error>> {
+    ) -> oneshot::Receiver<Result<RES, Error>> {
         let (tx, rx) = oneshot::channel();
         if let Err(_) = self.actor.membership_change_tx.try_send((request, tx)) {
             panic!("MultiRaftActor stopped")

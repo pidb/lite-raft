@@ -14,6 +14,7 @@ mod raft_group;
 mod replica_cache;
 mod rsm;
 pub mod storage;
+mod response;
 
 // pub use transport_local::LocalTransport;
 

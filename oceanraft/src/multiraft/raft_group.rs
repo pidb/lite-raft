@@ -37,6 +37,7 @@ use super::proposal::Proposal;
 use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexProposal;
 use super::replica_cache::ReplicaCache;
+use super::response::AppWriteResponse;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::util;
@@ -73,13 +74,13 @@ pub struct RaftGroupWriteRequest {
 }
 
 /// Represents a replica of a raft group.
-pub struct RaftGroup<RS: Storage> {
+pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     pub group_id: u64,
     pub replica_id: u64,
     pub raft_group: RawNode<RS>,
     // track the nodes which members ofq the raft consensus group
     pub node_ids: Vec<u64>,
-    pub proposals: ProposalQueue,
+    pub proposals: ProposalQueue<RES>,
     pub leader: ReplicaDesc,
     pub committed_term: u64,
     pub state: RaftGroupState,
@@ -89,9 +90,10 @@ pub struct RaftGroup<RS: Storage> {
 //===----------------------------------------------------------------------===//
 // The raft group internal state
 //===----------------------------------------------------------------------===//
-impl<RS> RaftGroup<RS>
+impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: Storage,
+    RES: AppWriteResponse,
 {
     #[inline]
     pub(crate) fn is_leader(&self) -> bool {
@@ -112,9 +114,10 @@ where
 //===----------------------------------------------------------------------===//
 // Handle raft group ready
 //===----------------------------------------------------------------------===//
-impl<RS> RaftGroup<RS>
+impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: Storage,
+    RES: AppWriteResponse,
 {
     #[tracing::instrument(
         level = Level::TRACE,
@@ -130,7 +133,7 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
-        multi_groups_apply: &mut HashMap<u64, Apply>,
+        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
         pending_events: &mut Vec<Event>,
     ) {
         debug!(
@@ -244,7 +247,7 @@ where
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
-        multi_groups_apply: &mut HashMap<u64, Apply>,
+        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
     ) {
         debug!(
             "node {}: create apply entries [{}, {}], group = {}, replica = {}",
@@ -271,7 +274,7 @@ where
         }
     }
 
-    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply {
+    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply<RES> {
         let current_term = self.raft_group.raft.term;
         // TODO: min(persistent, committed)
         // let commit_index = self.raft_group.raft.raft_log.committed;
@@ -485,7 +488,7 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         gwr: &mut RaftGroupWriteRequest,
-        multi_groups_apply: &mut HashMap<u64, Apply>,
+        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
     ) {
         let group_id = self.group_id;
         let replica_id = gwr.replica_id;
@@ -568,7 +571,7 @@ where
     pub fn propose_write(
         &mut self,
         request: AppWriteRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
+        tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCb> {
         if let Err(err) = self.pre_propose_write(&request) {
             return Some(new_response_error_callback(tx, err));
@@ -663,7 +666,7 @@ where
     pub fn propose_membership_change(
         &mut self,
         req: MembershipChangeRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
+        tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCb> {
         // TODO: add pre propose check
 

@@ -44,13 +44,14 @@ type FixtureMultiRaft = MultiRaft<
     RaftMemStorage,
     MultiRaftMemoryStorage,
     FixtureStateMachine,
+    (),
 >;
 
 pub struct FixtureCluster {
     pub election_ticks: usize,
     pub nodes: Vec<Arc<FixtureMultiRaft>>,
     pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
-    pub apply_events: Vec<Option<Receiver<Vec<ApplyEvent>>>>,
+    pub apply_events: Vec<Option<Receiver<Vec<ApplyEvent<()>>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -257,7 +258,7 @@ impl FixtureCluster {
         self.events[to_index(node_id)].as_mut().unwrap()
     }
 
-    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<ApplyEvent>> {
+    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<ApplyEvent<()>>> {
         self.apply_events[to_index(node_id)].as_mut().unwrap()
     }
 
@@ -319,7 +320,7 @@ impl FixtureCluster {
         cluster: &mut FixtureCluster,
         node_id: u64,
         timeout: Duration,
-    ) -> Result<ApplyMembership, String> {
+    ) -> Result<ApplyMembership<()>, String> {
         let rx = cluster.mut_apply_event_rx(node_id);
         let wait_loop_fut = async {
             loop {
@@ -360,10 +361,10 @@ impl FixtureCluster {
 
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        rx: &mut Receiver<Vec<ApplyEvent>>,
+        rx: &mut Receiver<Vec<ApplyEvent<()>>>,
         timeout: Duration,
         size: usize,
-    ) -> Result<Vec<ApplyNormal>, String> {
+    ) -> Result<Vec<ApplyNormal<()>>, String> {
         let mut results_len = 0;
         let wait_loop_fut = async {
             let mut results = vec![];
