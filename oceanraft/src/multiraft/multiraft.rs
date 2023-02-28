@@ -134,8 +134,9 @@ where
         //     task_group.clone(),
         // );
 
-        let actor =
-            MultiRaftActor::<T, RS, MRS, RSM, RES>::new(&config, &transport, &storage, rsm, &event_tx);
+        let actor = MultiRaftActor::<T, RS, MRS, RSM, RES>::new(
+            &config, &transport, &storage, rsm, &event_tx,
+        );
 
         Self {
             // cfg: config,
@@ -266,32 +267,44 @@ where
         rx
     }
 
-    pub async fn group_manage(&self, msg: RaftGroupManagement) -> Result<(), Error> {
-        unimplemented!()
+    pub async fn group_manage(&self, request: RaftGroupManagement) -> Result<(), Error> {
+        let rx = self.group_manage_non_block(request);
+        rx.await.map_err(|_| {
+            Error::Internal("the sender that result the write was dropped".to_string())
+        })?
     }
 
-    pub fn group_manage_block(&self, msg: RaftGroupManagement) -> Result<(), Error> {
-        unimplemented!()
+    pub fn group_manage_block(&self, request: RaftGroupManagement) -> Result<(), Error> {
+        let rx = self.group_manage_non_block(request);
+        rx.blocking_recv().map_err(|_| {
+            Error::Internal("the sender that result the write was dropped".to_string())
+        })?
     }
 
     pub fn group_manage_non_block(
         &self,
-        msg: RaftGroupManagement,
+        request: RaftGroupManagement,
     ) -> oneshot::Receiver<Result<(), Error>> {
-        unimplemented!()
-    }
-
-    pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_error) = self.actor.admin_tx.send((msg, tx)).await {
-            panic!("manager group receiver dropped")
-        }
-
-        match rx.await {
-            Err(_error) => panic!("sender dopped"),
-            Ok(res) => res,
+        match self.actor.admin_tx.try_send((request, tx)) {
+            // FIXME: handle write queue full case
+            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"),
+            Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
+            Ok(_) => rx,
         }
     }
+
+    // pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
+    //     let (tx, rx) = oneshot::channel();
+    //     if let Err(_error) = self.actor.admin_tx.send((msg, tx)).await {
+    //         panic!("manager group receiver dropped")
+    //     }
+
+    //     match rx.await {
+    //         Err(_error) => panic!("sender dopped"),
+    //         Ok(res) => res,
+    //     }
+    // }
 
     #[inline]
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
