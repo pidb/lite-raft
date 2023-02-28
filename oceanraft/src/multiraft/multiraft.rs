@@ -113,7 +113,8 @@ where
         rsm: RSM,
         task_group: TaskGroup,
         event_tx: &Sender<Vec<Event>>,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        config.validate()?;
         // let (callback_event_tx, callback_event_rx) = channel(1);
 
         // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
@@ -138,13 +139,13 @@ where
             &config, &transport, &storage, rsm, &event_tx,
         );
 
-        Self {
+        Ok(Self {
             // cfg: config,
             // transport,
             // storage,
             task_group,
             actor,
-        }
+        })
     }
 
     pub fn start(&self, ticker: Option<Box<dyn Ticker>>) {

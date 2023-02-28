@@ -965,8 +965,9 @@ where
             applied: rs.hard_state.commit,
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
-            max_size_per_msg: 1024 * 1024,
-            max_inflight_msgs: 256,
+            max_size_per_msg: self.cfg.max_size_per_msg,
+            max_inflight_msgs: self.cfg.max_inflight_msgs,
+            batch_append: self.cfg.batch_append,
             ..Default::default()
         };
 

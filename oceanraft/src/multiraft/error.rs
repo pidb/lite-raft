@@ -40,7 +40,6 @@ impl PartialEq for MultiRaftStorageError {
     }
 }
 
-
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum RaftGroupError {
     // #[error("the proposal need leader role, the current leader at {0}")]
@@ -48,7 +47,6 @@ pub enum RaftGroupError {
 
     // #[error("bootstrap group ({0}) error, the voters of initial_state is empty in store ({1})")]
     // BootstrapError(u64, u64),
-
     #[error("raft group not exist, node_id = {1}, group_d = {1}")]
     NotExist(u64, u64),
 
@@ -58,8 +56,6 @@ pub enum RaftGroupError {
     #[error("the raft group ({1}) already exists in node ({0}")]
     Exists(u64, u64),
 }
-
-
 
 #[derive(thiserror::Error, Debug)]
 pub enum ProposalError {
@@ -88,15 +84,15 @@ impl PartialEq for ProposalError {
     fn eq(&self, other: &Self) -> bool {
         matches!(
             (self, other),
-            (ProposalError::NotLeader{..}, ProposalError::NotLeader{..})
-                | (ProposalError::Unexpected(..), ProposalError::Unexpected(..))
+            (
+                ProposalError::NotLeader { .. },
+                ProposalError::NotLeader { .. }
+            ) | (ProposalError::Unexpected(..), ProposalError::Unexpected(..))
                 | (ProposalError::Stale(..), ProposalError::Stale(..))
                 | (ProposalError::Other(..), ProposalError::Other(..)),
         )
-        
     }
 }
-
 
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
@@ -105,7 +101,7 @@ pub enum Error {
 
     #[error("the multiraft stopped")]
     Stop,
-    
+
     #[error("{0}")]
     Internal(String),
 
@@ -121,6 +117,10 @@ pub enum Error {
     #[error("{0}")]
     Proposal(#[from] ProposalError),
 
+    /// The configuration is invalid.
+    #[error("{0}")]
+    ConfigInvalid(String),
+
     // #[error("{0}")]
     // RaftGroup(#[from] ::raft::Error),
     /// A raft error occurred.
@@ -129,7 +129,6 @@ pub enum Error {
 
     #[error("{0}")]
     RaftGroup(#[from] RaftGroupError),
-
     // #[error(
     //     "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
     // )]
@@ -139,6 +138,3 @@ pub enum Error {
     // #[error("couldn't find replica id for this store ({1}) in group ({0})")]
     // ReplicaNotFound(u64, u64),
 }
-
-
-
