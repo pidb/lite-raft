@@ -71,6 +71,11 @@ use super::transport::Transport;
 use super::util::Ticker;
 use super::StateMachine;
 
+pub enum WriteRequest<RES: AppWriteResponse> {
+    Write(AppWriteRequest, oneshot::Sender<Result<RES, Error>>),
+    Membership(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>),
+}
+
 pub(crate) type ResponseCb = Box<dyn FnOnce() -> Result<(), Error> + Send + Sync + 'static>;
 
 pub(crate) fn new_response_callback<T: Send + Sync + 'static>(
@@ -123,10 +128,10 @@ where
 {
     pub shard: ShardState,
     // FIXME: queue should have one per-group.
-    pub write_propose_tx: Sender<(AppWriteRequest, oneshot::Sender<Result<RES, Error>>)>,
+    pub write_propose_tx: Sender<WriteRequest<RES>>,
     pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    pub membership_change_tx:
-        Sender<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
+    // pub membership_change_tx:
+    //     Sender<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         MultiRaftMessage,
@@ -157,7 +162,7 @@ where
 
         let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
         let (read_index_propose_tx, read_index_propose_rx) = channel(1);
-        let (membership_change_tx, membership_change_rx) = channel(1);
+        // let (membership_change_tx, membership_change_rx) = channel(1);
         let (admin_tx, admin_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(10);
@@ -178,7 +183,7 @@ where
             tick_interval: Duration::from_millis(cfg.tick_interval),
             write_propose_rx,
             read_index_propose_rx,
-            membership_change_rx,
+            // membership_change_rx,
             campaign_rx,
             raft_message_rx,
             admin_rx,
@@ -202,7 +207,7 @@ where
             raft_message_tx,
             write_propose_tx,
             read_index_propose_tx,
-            membership_change_tx,
+            // membership_change_tx,
             campaign_tx,
             admin_tx,
             join: Mutex::default(),
@@ -252,9 +257,9 @@ where
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    write_propose_rx: Receiver<(AppWriteRequest, oneshot::Sender<Result<RES, Error>>)>,
+    write_propose_rx: Receiver<WriteRequest<RES>>,
     read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
-    membership_change_rx: Receiver<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
+    // membership_change_rx: Receiver<(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>)>,
     admin_rx: Receiver<(RaftGroupManagement, oneshot::Sender<Result<(), Error>>)>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     event_tx: Sender<Vec<Event>>,
@@ -326,21 +331,21 @@ where
                     }
                 },
 
-                Some((req, tx)) = self.write_propose_rx.recv() => {
-                    let group_id = req.group_id;
-                    self.active_groups.insert(group_id);
-                    if let Some(cb) = self.propose_write_request(req, tx) {
+                Some(req) = self.write_propose_rx.recv() => {
+                    // let group_id = req.group_id;
+                    // self.active_groups.insert(group_id);
+                    if let Some(cb) = self.propose_write_request(req) {
                         self.response_cbs.push(cb);
                     }
                 },
 
-                Some((req, tx)) = self.membership_change_rx.recv() => {
-                    let group_id = req.group_id;
-                    self.active_groups.insert(group_id);
-                    if let Some(cb) = self.propose_membership_change_request(req, tx) {
-                        self.response_cbs.push(cb);
-                    }
-                },
+                // Some((req, tx)) = self.membership_change_rx.recv() => {
+                //     let group_id = req.group_id;
+                //     self.active_groups.insert(group_id);
+                //     if let Some(cb) = self.propose_membership_change_request(req, tx) {
+                //         self.response_cbs.push(cb);
+                //     }
+                // },
 
                 Some((req, tx)) = self.read_index_propose_rx.recv() => {
                     let group_id = req.group_id;
@@ -743,27 +748,48 @@ where
     #[tracing::instrument(
         level = Level::TRACE,
         name = "MultiRaftActorRuntime::propose_write_request",
-        skip(self, tx))
-    ]
-    fn propose_write_request(
-        &mut self,
-        request: AppWriteRequest,
-        tx: oneshot::Sender<Result<RES, Error>>,
-    ) -> Option<ResponseCb> {
-        let group_id = request.group_id;
-        match self.groups.get_mut(&group_id) {
-            None => {
-                warn!(
-                    "node {}: proposal failed, group {} does not exists",
-                    self.node_id, group_id,
-                );
-                return Some(new_response_error_callback(
-                    tx,
-                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                ));
+        skip_all
+    )]
+    fn propose_write_request(&mut self, req: WriteRequest<RES>) -> Option<ResponseCb> {
+        match req {
+            WriteRequest::Write(request, tx) => {
+                let group_id = request.group_id;
+                match self.groups.get_mut(&group_id) {
+                    None => {
+                        warn!(
+                            "node {}: proposal failed, group {} does not exists",
+                            self.node_id, group_id,
+                        );
+                        return Some(new_response_error_callback(
+                            tx,
+                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+                        ));
+                    }
+                    Some(group) => {
+                        self.active_groups.insert(group_id);
+                        group.propose_write(request, tx)
+                    }
+                }
             }
-            // TODO: handle nodes removed
-            Some(group) => group.propose_write(request, tx),
+            WriteRequest::Membership(request, tx) => {
+                let group_id = request.group_id;
+                match self.groups.get_mut(&group_id) {
+                    None => {
+                        warn!(
+                            "node {}: proposal membership failed, group {} does not exists",
+                            self.node_id, group_id,
+                        );
+                        return Some(new_response_error_callback(
+                            tx,
+                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+                        ));
+                    }
+                    Some(group) => {
+                        self.active_groups.insert(group_id);
+                        group.propose_membership_change(request, tx)
+                    }
+                }
+            }
         }
     }
 

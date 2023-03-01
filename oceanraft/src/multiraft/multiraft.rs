@@ -13,12 +13,12 @@ use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
 use super::multiraft_actor::ShardState;
+use super::multiraft_actor::WriteRequest;
 use super::response::AppWriteResponse;
 use super::transport::Transport;
 use super::util::Ticker;
 use super::StateMachine;
 
-use raft_proto::prelude::AdminMessage;
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::MembershipChangeRequest;
@@ -181,7 +181,11 @@ where
         request: AppWriteRequest,
     ) -> oneshot::Receiver<Result<RES, Error>> {
         let (tx, rx) = oneshot::channel();
-        match self.actor.write_propose_tx.try_send((request, tx)) {
+        match self
+            .actor
+            .write_propose_tx
+            .try_send(WriteRequest::Write(request, tx))
+        {
             // FIXME: handle write queue full case
             Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"),
             Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
@@ -234,7 +238,11 @@ where
         request: MembershipChangeRequest,
     ) -> oneshot::Receiver<Result<RES, Error>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.membership_change_tx.try_send((request, tx)) {
+        if let Err(_) = self
+            .actor
+            .write_propose_tx
+            .try_send(WriteRequest::Membership(request, tx))
+        {
             panic!("MultiRaftActor stopped")
         }
 
