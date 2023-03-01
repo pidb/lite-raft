@@ -7,8 +7,6 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use raft::prelude::AdminMessage;
-use raft::prelude::AdminMessageType;
 use raft::prelude::RaftGroupManagement;
 use raft::prelude::RaftGroupManagementType;
 use raft::Storage;
@@ -53,6 +51,7 @@ use super::apply_actor::ApplyActor;
 use super::apply_actor::Request as ApplyRequest;
 use super::apply_actor::Response as ApplyResponse;
 use super::config::Config;
+use super::error::ChannelError;
 use super::error::Error;
 use super::event::CommitEvent;
 use super::event::CommitMembership;
@@ -83,8 +82,11 @@ pub(crate) fn new_response_callback<T: Send + Sync + 'static>(
     res: Result<T, Error>,
 ) -> ResponseCb {
     Box::new(move || -> Result<(), Error> {
-        tx.send(res)
-            .map_err(|_| Error::Internal("receiver dropped".to_string()))
+        tx.send(res).map_err(|_| {
+            Error::Channel(ChannelError::ReceiverClosed(
+                "channel receiver closed for response client".to_owned(),
+            ))
+        })
     })
 }
 
@@ -93,8 +95,11 @@ pub(crate) fn new_response_error_callback<T: Send + Sync + 'static>(
     err: Error,
 ) -> ResponseCb {
     Box::new(move || -> Result<(), Error> {
-        tx.send(Err(err))
-            .map_err(|_| Error::Internal("receiver dropped".to_string()))
+        tx.send(Err(err)).map_err(|_| {
+            Error::Channel(ChannelError::ReceiverClosed(
+                "channel receiver closed for response client".to_owned(),
+            ))
+        })
     })
 }
 
@@ -964,11 +969,15 @@ where
         }
 
         if group_id == 0 {
-            return Err(Error::BadParameter(format!("bad group_id parameter (0)")));
+            return Err(Error::BadParameter(
+                "group id must be more than 0".to_owned(),
+            ));
         }
 
         if replica_id == 0 {
-            return Err(Error::BadParameter(format!("bad replica_id parameter (0)")));
+            return Err(Error::BadParameter(
+                "replica id must be more than 0".to_owned(),
+            ));
         }
 
         let group_storage = self.storage.group_storage(group_id, replica_id).await?;
@@ -1006,6 +1015,7 @@ where
             self.node_id, group_id, replica_id
         );
         let mut group = RaftGroup {
+            node_id: self.cfg.node_id,
             group_id,
             replica_id,
             raft_group,

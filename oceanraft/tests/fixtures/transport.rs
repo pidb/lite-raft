@@ -5,7 +5,6 @@ use std::sync::Arc;
 use oceanraft::multiraft::transport::Transport;
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::MultiRaftMessageSender;
-use oceanraft::multiraft::TransportError;
 use oceanraft::prelude::MultiRaftMessage;
 use oceanraft::prelude::MultiRaftMessageResponse;
 use oceanraft::util::TaskGroup;
@@ -50,7 +49,10 @@ impl<RD: MultiRaftMessageSender> LocalServer<RD> {
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
                         let res = dispatcher.send(msg).await;
-                        tx.send(res).unwrap(); // FIXME: handle error
+                        // send clinet response failed
+                        if let Err(_) = tx.send(res) {
+                            error!("channel receiver closed for client")
+                        }
                     },
                     _ = &mut stopper => {
 
@@ -88,14 +90,15 @@ impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
         node_id: u64,
         addr: &'life0 str,
         dispatcher: RD,
-    ) -> Result<(), Error> {
+    ) -> Result<(), String> {
         // check exists
         {
             let rl = self.servers.write().await;
             if rl.contains_key(&node_id) {
-                return Err(Error::Transport(TransportError::ServerAlreadyExists(
-                    node_id,
-                )));
+                return Err(format!(
+                    "node {}: the server {} already exists",
+                    node_id, addr
+                ));
             }
         }
 
@@ -206,44 +209,39 @@ where
                     to_node,
                     msg.get_msg().msg_type(),
                 );
-                return Err(Error::Transport(TransportError::Server(format!(
-                    "server {} disconnected",
-                    to_node
-                ))));
+                return;
             }
 
             // get server by to
             let rl = servers.read().await;
             if !rl.contains_key(&to_node) {
-                return Err(Error::Transport(TransportError::ServerNodeFound(to_node)));
+                error!(
+                    "node {}: send failed, to {} server not found",
+                    from_node, to_node
+                );
+                return;
             }
 
             // send reqeust
             let to_server = rl.get(&to_node).unwrap();
             if to_server.stopped {
-                // FIXME: should return some error
-                return Ok(MultiRaftMessageResponse {});
+                error!("server {} stopped", to_node);
+                return;
             }
 
             let (tx, rx) = oneshot::channel();
             if let Err(_) = to_server.tx.send((msg, tx)).await {
-                warn!(
+                error!(
                     "node {}: send msg failed, the {} node server stopped",
                     from_node, to_node
                 );
-                return Ok(MultiRaftMessageResponse {}); // FIXME: should return error
+                return;
             }
 
             // and receive response
-            if let Ok(res) = rx.await {
-                // info!("recv response ok()");
-                res
+            if let Ok(_res) = rx.await {
             } else {
-                warn!("node {}: receive response failed, the {} node server stopped or discard the request", from_node, to_node);
-                Err(Error::Transport(TransportError::Server(format!(
-                    "server ({}) stopped",
-                    to_node
-                ))))
+                error!("node {}: receive response failed, the {} node server stopped or discard the request", from_node, to_node);
             }
         };
         tokio::spawn(send_fn);

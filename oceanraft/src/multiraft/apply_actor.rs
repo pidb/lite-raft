@@ -7,13 +7,11 @@ use std::sync::Mutex;
 
 use raft_proto::prelude::Entry;
 use raft_proto::prelude::EntryType;
-
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
-
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -21,21 +19,19 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::config::Config;
+use crate::multiraft::ApplyEvent;
 use crate::multiraft::ApplyNoOp;
 use crate::multiraft::ApplyNormal;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
 use super::error::Error;
-use super::error::ProposalError;
-
-use super::response::AppWriteResponse;
-use super::ApplyMembership;
-use crate::multiraft::ApplyEvent;
-
+use super::error::WriteError;
 use super::event::CommitEvent;
 use super::proposal::Proposal;
 use super::raft_group::RaftGroupApplyState;
+use super::response::AppWriteResponse;
+use super::ApplyMembership;
 use super::StateMachine;
 
 /// State is used to safely shard the state
@@ -520,7 +516,7 @@ where
             } else {
                 // notify_stale_command(region_id, peer_id, self.term, head);
                 p.tx.map(|tx| {
-                    tx.send(Err(Error::Proposal(ProposalError::Stale(
+                    tx.send(Err(Error::Write(WriteError::Stale(
                         p.term, 0, /*FIXME: with term */
                     ))))
                 });
@@ -672,7 +668,7 @@ where
     fn response_stale_proposals(&mut self, index: u64, term: u64) {
         while let Some(p) = self.pending_senders.pop_normal(index, term) {
             p.tx.map(|tx| {
-                tx.send(Err(Error::Proposal(ProposalError::Stale(
+                tx.send(Err(Error::Write(WriteError::Stale(
                     p.term, 0, /*FIXME: with term */
                 ))))
             });

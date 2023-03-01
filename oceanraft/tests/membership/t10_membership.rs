@@ -179,12 +179,14 @@ async fn test_joint_consensus() {
         change.replica_id = (i + 1) as u64;
         changes.push(change);
     }
-    let rx = cluster.nodes[0].membership_change_non_block(MembershipChangeRequest {
-        group_id,
-        changes,
-        term: 0, // no check term
-        replicas: vec![],
-    });
+    let rx = cluster.nodes[0]
+        .membership_change_non_block(MembershipChangeRequest {
+            group_id,
+            changes,
+            term: 0, // no check term
+            replicas: vec![],
+        })
+        .unwrap();
 
     let check_fn = |event: &ApplyMembership<()>| {
         let mut cc = ConfChangeV2::default();

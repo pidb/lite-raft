@@ -27,7 +27,7 @@ use tracing::Level;
 
 use super::apply_actor::Apply;
 use super::error::Error;
-use super::error::ProposalError;
+use super::error::WriteError;
 use super::event::LeaderElectionEvent;
 use super::multiraft::NO_NODE;
 use super::multiraft_actor::new_response_error_callback;
@@ -75,6 +75,9 @@ pub struct RaftGroupWriteRequest {
 
 /// Represents a replica of a raft group.
 pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
+    /// Indicates the id of the node where the group resides.
+    pub node_id: u64,
+
     pub group_id: u64,
     pub replica_id: u64,
     pub raft_group: RawNode<RS>,
@@ -298,23 +301,17 @@ where
                     .proposals
                     .find_proposal(entry.term, entry.index, current_term)
                 {
-                    Err(err) => {
-                        // FIXME: don't panic
-                        error!("find proposal error {}", err);
+                    None => {
+                        trace!(
+                            "can't find entry ({}, {}) related proposal on replica {}",
+                            entry.index,
+                            entry.term,
+                            replica_id
+                        );
+                        continue;
                     }
-                    Ok(proposal) => match proposal {
-                        None => {
-                            trace!(
-                                "can't find entry ({}, {}) related proposal on replica {}",
-                                entry.index,
-                                entry.term,
-                                replica_id
-                            );
-                            continue;
-                        }
 
-                        Some(p) => proposals.push(p),
-                    },
+                    Some(p) => proposals.push(p),
                 };
             }
         }
@@ -442,7 +439,12 @@ where
 
         if !ready.entries().is_empty() {
             let entries = ready.take_entries();
-            debug!("node {}: append entries [{}, {}]", node_id, entries[0].index, entries[entries.len() -1].index);
+            debug!(
+                "node {}: append entries [{}, {}]",
+                node_id,
+                entries[0].index,
+                entries[entries.len() - 1].index
+            );
             if let Err(_error) = gs.append_entries(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
@@ -549,21 +551,21 @@ where
         RS: Storage,
     {
         if request.data.is_empty() {
-            return Err(Error::BadParameter(format!("write request data is empty")));
+            return Err(Error::BadParameter(
+                "write request data must not be empty".to_owned(),
+            ));
         }
 
         if !self.is_leader() {
-            return Err(Error::Proposal(ProposalError::NotLeader {
+            return Err(Error::Write(WriteError::NotLeader {
+                node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
             }));
         }
 
         if request.term != 0 && self.term() > request.term {
-            return Err(Error::Proposal(ProposalError::Stale(
-                request.term,
-                self.term(),
-            )));
+            return Err(Error::Write(WriteError::Stale(request.term, self.term())));
         }
 
         Ok(())
@@ -583,20 +585,14 @@ where
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(request.context, request.data) {
             return Some(new_response_error_callback(tx, Error::Raft(err)));
-            //tx.send(Err(Error::Proposal(ProposalError::Other(Box::new(err)))))
-            //    .unwrap();
-            //return;
         }
 
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(new_response_error_callback(
                 tx,
-                Error::Proposal(ProposalError::Unexpected(index)),
+                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
-            // tx.send(Err(Error::Proposal(ProposalError::Unexpected(index))))
-            //     .unwrap();
-            // return;
         }
 
         let proposal = Proposal {
@@ -606,8 +602,7 @@ where
             tx: Some(tx),
         };
 
-        // FIXME: should return error ResponseCb
-        self.proposals.push(proposal).unwrap();
+        self.proposals.push(proposal);
         None
     }
 
@@ -640,25 +635,25 @@ where
         RS: Storage,
     {
         if request.group_id == 0 {
-            return Err(Error::BadParameter(format!("group_id is 0")));
+            return Err(Error::BadParameter(
+                "group id must be more than 0".to_owned(),
+            ));
         }
 
         if request.changes.is_empty() {
-            return Err(Error::BadParameter(format!("empty changes")));
+            return Err(Error::BadParameter("group id must not be empty".to_owned()));
         }
 
         if !self.is_leader() {
-            return Err(Error::Proposal(ProposalError::NotLeader {
+            return Err(Error::Write(WriteError::NotLeader {
+                node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
             }));
         }
 
         if request.term != 0 && self.term() > request.term {
-            return Err(Error::Proposal(ProposalError::Stale(
-                request.term,
-                self.term(),
-            )));
+            return Err(Error::Write(WriteError::Stale(request.term, self.term())));
         }
 
         Ok(())
@@ -711,7 +706,7 @@ where
 
             return Some(new_response_error_callback(
                 tx,
-                Error::Proposal(ProposalError::Unexpected(index)),
+                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
         }
 
@@ -722,14 +717,7 @@ where
             tx: Some(tx),
         };
 
-        // FIXME: should return error ResponseCb
-        if let Err(err) = self.proposals.push(proposal) {
-            panic!(
-                "node {}: propose membership success, but push proposal error: {}",
-                0, /* TODO: add it*/ err
-            );
-            return Some(new_response_error_callback(tx, err));
-        }
+        self.proposals.push(proposal);
         None
     }
 
@@ -737,7 +725,7 @@ where
     pub(crate) fn remove_pending_proposals(&mut self) {
         let proposals = self.proposals.drain(..);
         for proposal in proposals.into_iter() {
-            let err = Err(Error::Proposal(super::ProposalError::GroupRemoved(
+            let err = Err(Error::RaftGroup(super::RaftGroupError::Deleted(
                 self.group_id,
                 self.replica_id,
             )));

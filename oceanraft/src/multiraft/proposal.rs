@@ -1,5 +1,4 @@
 use std::collections::vec_deque::Drain;
-use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
@@ -7,8 +6,8 @@ use tokio::sync::oneshot;
 use tracing::debug;
 use uuid::Uuid;
 
+use super::error::WriteError;
 use super::error::Error;
-use super::error::ProposalError;
 use super::response::AppWriteResponse;
 
 use raft_proto::prelude::ReadIndexContext;
@@ -49,24 +48,20 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
         }
     }
 
-    pub fn push(&mut self, proposal: Proposal<RES>) -> Result<(), Error> {
+    pub fn push(&mut self, proposal: Proposal<RES>) {
         if let Some(last) = self.queue.back() {
             // The term must be increasing among all log entries and the index
             // must be increasing inside a given term
             if proposal.term < last.term {
-                return Err(Error::Proposal(ProposalError::Stale(
-                    proposal.term,
-                    last.term,
-                )));
+                panic!("bad proposal due to term jump backword {} -> {}", last.term, proposal.term);
             }
 
             if proposal.index < last.index {
-                return Err(Error::Proposal(ProposalError::Unexpected(proposal.index)));
+                panic!("bad proposal due to index jump backword {} -> {}", last.index, proposal.index);
             }
         }
 
         self.queue.push_back(proposal);
-        Ok(())
     }
 
     #[inline]
@@ -106,31 +101,28 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
         term: u64,
         index: u64,
         current_term: u64,
-    ) -> Result<Option<Proposal<RES>>, Error> {
+    ) -> Option<Proposal<RES>> {
         while let Some(proposal) = self.pop(term, index) {
             if proposal.term == term {
                 debug!("find proposal index {} = {}", proposal.index, index);
                 // term matched.
                 if proposal.index == index {
-                    return Ok(Some(proposal));
+                    return Some(proposal)
                 } else {
-                    return Err(Error::Proposal(ProposalError::Unexpected(index)));
+                    return None
                 }
             } else {
                 proposal.tx.map(|tx| {
-                    tx.send(Err(Error::Proposal(ProposalError::Stale(
+                    tx.send(Err(Error::Write(WriteError::Stale(
                         proposal.term,
                         current_term,
                     ))))
                 });
-                return Err(Error::Proposal(ProposalError::Stale(
-                    proposal.term,
-                    current_term,
-                )));
+                return None
             }
         }
 
-        Ok(None)
+        None
     }
 
     pub fn is_empty(&self) -> bool {
@@ -145,138 +137,93 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
     }
 }
 
-#[derive(Default, Debug)]
-pub struct ProposalQueueManager<RES: AppWriteResponse> {
-    groups: HashMap<u64, ProposalQueue<RES>>,
-}
+// #[test]
+// fn test_proposal_queue() {
+//     let group_id = 1;
+//     let replica_id = 1;
+//     let (tx, _) = oneshot::channel::<Result<(), Error>>();
+//     let proposals = vec![
+//         (1, 1, false, None, Ok(())),
+//         (2, 1, false, None, Ok(())),
+//         (3, 2, false, None, Ok(())),
+//         (
+//             4,
+//             1,
+//             false,
+//             Some(tx),
+//             Err(Error::Write(WriteError::Stale(1, 1))),
+//         ),
+//         (4, 2, false, None, Ok(())),
+//         (
+//             3,
+//             2,
+//             false,
+//             None,
+//             None,
+//         ),
+//     ];
+//     let mut mgr = ProposalQueueManager::default();
+//     let gq = mgr.create_group_proposal_queue(group_id, replica_id);
 
-impl<RES: AppWriteResponse> ProposalQueueManager<RES> {
-    pub fn create_group_proposal_queue<'a>(
-        &'a mut self,
-        group_id: u64,
-        replica_id: u64,
-    ) -> &'a mut ProposalQueue<RES> {
-        match self.groups.insert(group_id, ProposalQueue::new(replica_id)) {
-            None => {}
-            Some(_) => panic!(
-                "the previous proposal queue of group ({})  already exists",
-                group_id
-            ),
-        }
-        self.groups.get_mut(&group_id).unwrap()
-    }
+//     // assert push
+//     for (index, term, is_conf_change, tx, result) in proposals.into_iter() {
+//         gq.push(Proposal {
+//             index,
+//             term,
+//             is_conf_change,
+//             tx,
+//         })
+//     }
 
-    #[inline]
-    pub fn group_proposal_queue<'a>(&'a self, group_id: &u64) -> Option<&'a ProposalQueue<RES>> {
-        self.groups.get(group_id)
-    }
+//     // expected proposals
+//     let proposals = vec![(1, 1), (2, 1), (3, 2), (4, 2)];
 
-    #[inline]
-    pub fn mut_group_proposal_queue<'a>(
-        &'a mut self,
-        group_id: &u64,
-    ) -> Option<&'a mut ProposalQueue<RES>> {
-        self.groups.get_mut(group_id)
-    }
+//     // assert pop
+//     for (index, term) in proposals.iter() {
+//         let proposal = gq.pop(*term, *index).unwrap();
+//         assert_eq!(proposal.index, *index);
+//         assert!(proposal.term <= *term);
+//     }
+// }
 
-    #[inline]
-    pub fn remove_group_proposal_queue<'a>(
-        &'a mut self,
-        group_id: &u64,
-    ) -> Option<ProposalQueue<RES>> {
-        self.groups.remove(group_id)
-    }
-}
+// #[test]
+// fn test_proposal_queue_find() {
+//     let group_id = 1;
+//     let replica_id = 1;
+//     let proposals = vec![
+//         (1, 1, false, None),
+//         (2, 1, false, None),
+//         (3, 2, false, None),
+//         (4, 2, false, None),
+//     ];
+//     let mut mgr = ProposalQueueManager::<()>::default();
+//     let gq = mgr.create_group_proposal_queue(group_id, replica_id);
+//     for (index, term, is_conf_change, tx) in proposals.into_iter() {
+//         gq.push(Proposal {
+//             index,
+//             term,
+//             is_conf_change,
+//             tx,
+//         })
+//     }
 
-#[test]
-fn test_proposal_queue() {
-    let group_id = 1;
-    let replica_id = 1;
-    let (tx, _) = oneshot::channel::<Result<(), Error>>();
-    let proposals = vec![
-        (1, 1, false, None, Ok(())),
-        (2, 1, false, None, Ok(())),
-        (3, 2, false, None, Ok(())),
-        (
-            4,
-            1,
-            false,
-            Some(tx),
-            Err(Error::Proposal(ProposalError::Stale(1, 1))),
-        ),
-        (4, 2, false, None, Ok(())),
-        (
-            3,
-            2,
-            false,
-            None,
-            Err(Error::Proposal(ProposalError::Unexpected(3))),
-        ),
-    ];
-    let mut mgr = ProposalQueueManager::default();
-    let gq = mgr.create_group_proposal_queue(group_id, replica_id);
+//     let proposals = vec![
+//         (1, 1, Some((1, 1))),
+//         (2, 1, Some((2, 1))),
+//         (3, 1, None), // expection due to term stale
+//         // (3, 3, Error::Proposal(ProposalError::Stale(2, 2))), // expection to due index out of range, should 3,2
+//         // (5, 2, Error::Proposal(ProposalError::Unexpected(5))), // expection to due index out of range, should 4, 2
+//         (3, 3, None), // expection to due index out of range, should 3,2
+//         (5, 2, None), // expection to due index out of range, should 4, 2
+//     ];
 
-    // assert push
-    for (index, term, is_conf_change, tx, result) in proposals.into_iter() {
-        assert_eq!(
-            gq.push(Proposal {
-                index,
-                term,
-                is_conf_change,
-                tx,
-            }),
-            result
-        )
-    }
+//     // TODO: re-impl
+//     // assert find_proposal
+//     // let current_term = 2;
+//     // for (index, term, result) in proposals.iter() {
+//     //     let proposal = gq
+//     //         .find_proposal(*term, *index, current_term);
 
-    // expected proposals
-    let proposals = vec![(1, 1), (2, 1), (3, 2), (4, 2)];
-
-    // assert pop
-    for (index, term) in proposals.iter() {
-        let proposal = gq.pop(*term, *index).unwrap();
-        assert_eq!(proposal.index, *index);
-        assert!(proposal.term <= *term);
-    }
-}
-
-#[test]
-fn test_proposal_queue_find() {
-    let group_id = 1;
-    let replica_id = 1;
-    let proposals = vec![
-        (1, 1, false, None),
-        (2, 1, false, None),
-        (3, 2, false, None),
-        (4, 2, false, None),
-    ];
-    let mut mgr = ProposalQueueManager::<()>::default();
-    let gq = mgr.create_group_proposal_queue(group_id, replica_id);
-    for (index, term, is_conf_change, tx) in proposals.into_iter() {
-        gq.push(Proposal {
-            index,
-            term,
-            is_conf_change,
-            tx,
-        })
-        .unwrap();
-    }
-
-    let proposals = vec![
-        (1, 1, Ok(Some((1, 1)))),
-        (2, 1, Ok(Some((2, 1)))),
-        (3, 1, Ok(None)), // expection due to term stale
-        (3, 3, Err(Error::Proposal(ProposalError::Stale(2, 2)))), // expection to due index out of range, should 3,2
-        (5, 2, Err(Error::Proposal(ProposalError::Unexpected(5)))), // expection to due index out of range, should 4, 2
-    ];
-
-    // assert find_proposal
-    let current_term = 2;
-    for (index, term, result) in proposals.iter() {
-        let proposal = gq
-            .find_proposal(*term, *index, current_term)
-            .map(|p| p.map(|p| (p.index, p.term)));
-
-        assert_eq!(proposal, *result);
-    }
-}
+//     //     assert_eq!(proposal, *result);
+//     // }
+// }

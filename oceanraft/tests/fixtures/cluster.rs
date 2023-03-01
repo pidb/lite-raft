@@ -357,7 +357,9 @@ impl FixtureCluster {
             context: vec![],
             data,
         };
-        self.nodes[to_index(node_id)].write_non_block(request)
+        self.nodes[to_index(node_id)]
+            .write_non_block(request)
+            .unwrap()
     }
 
     // Wait normal apply.
