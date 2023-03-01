@@ -106,8 +106,11 @@ impl FixtureCluster {
             let node_id = i + 1;
             let config = Config {
                 node_id,
+                batch_append: false,
                 election_tick: 2,
                 heartbeat_tick: 1,
+                max_size_per_msg: 0,
+                max_inflight_msgs: 256,
                 tick_interval: 3_600_000, // hour ms
                 batch_apply: false,
                 batch_size: 0,
@@ -127,7 +130,8 @@ impl FixtureCluster {
                 rsm,
                 task_group.clone(),
                 &event_tx,
-            );
+            )
+            .unwrap();
 
             transport
                 .listen(

@@ -442,6 +442,7 @@ where
 
         if !ready.entries().is_empty() {
             let entries = ready.take_entries();
+            debug!("node {}: append entries [{}, {}]", node_id, entries[0].index, entries[entries.len() -1].index);
             if let Err(_error) = gs.append_entries(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
