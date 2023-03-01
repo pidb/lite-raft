@@ -12,10 +12,9 @@ mod event;
 mod node;
 mod raft_group;
 mod replica_cache;
+mod response;
 mod rsm;
 pub mod storage;
-mod response;
-
 // pub use transport_local::LocalTransport;
 
 pub use config::Config;
