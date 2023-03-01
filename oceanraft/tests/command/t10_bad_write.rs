@@ -1,5 +1,5 @@
 use oceanraft::multiraft::Error;
-use oceanraft::multiraft::ProposalError;
+use oceanraft::multiraft::WriteError;
 use oceanraft::util::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
@@ -45,7 +45,8 @@ async fn test_no_leader() {
         let node_id = i + 1;
         let data = "data".as_bytes().to_vec();
         let rx = cluster.write_command(node_id, plan.group_id, data);
-        let expected_err = Error::Proposal(ProposalError::NotLeader {
+        let expected_err = Error::Write(WriteError::NotLeader {
+            node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
         });
@@ -90,7 +91,8 @@ async fn test_bad_group() {
         let data = "data".as_bytes().to_vec();
        
         let rx = cluster.write_command(node_id, plan.group_id, data);
-        let expected_err = Error::Proposal(ProposalError::NotLeader {
+        let expected_err = Error::Write(WriteError::NotLeader {
+            node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
         });

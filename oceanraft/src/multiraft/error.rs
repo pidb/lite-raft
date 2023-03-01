@@ -3,18 +3,6 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// RaftCoreError is raft::Error re-exported.
 pub type RaftCoreError = raft::Error;
 
-#[derive(thiserror::Error, Debug, Clone, PartialEq)]
-pub enum TransportError {
-    #[error("the node {0} of server not found")]
-    ServerNodeFound(u64),
-
-    #[error("the node {0} of server already exists")]
-    ServerAlreadyExists(u64),
-
-    #[error("server error: {0}")]
-    Server(String),
-}
-
 /// An error with the storage.
 #[derive(Debug, thiserror::Error)]
 pub enum MultiRaftStorageError {
@@ -57,84 +45,67 @@ pub enum RaftGroupError {
     Exists(u64, u64),
 }
 
-#[derive(thiserror::Error, Debug)]
-pub enum ProposalError {
-    #[error("not leader")] // TODO: more error info
-    NotLeader {
-        // node_id: u64, TODO: support node id
-        group_id: u64,
-        replica_id: u64,
-        // reditect_node: Option<> TODO: support redirect hint
-    },
-
-    #[error("unexpected at index = {0}")]
-    Unexpected(u64),
-
-    #[error("the proposal is stale, proposal term = {0}, current term = {1}")]
-    Stale(u64, u64),
-
-    #[error("group = {0}, replcia = {1} removed")]
-    GroupRemoved(u64, u64),
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum ChannelError {
+    #[error("{0}")]
+    Full(String),
 
     #[error("{0}")]
-    Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+    SenderClosed(String),
+
+    #[error("{0}")]
+    ReceiverClosed(String),
 }
 
-impl PartialEq for ProposalError {
-    fn eq(&self, other: &Self) -> bool {
-        matches!(
-            (self, other),
-            (
-                ProposalError::NotLeader { .. },
-                ProposalError::NotLeader { .. }
-            ) | (ProposalError::Unexpected(..), ProposalError::Unexpected(..))
-                | (ProposalError::Stale(..), ProposalError::Stale(..))
-                | (ProposalError::Other(..), ProposalError::Other(..)),
-        )
-    }
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum WriteError {
+    // TODO: more error info
+    #[error("node {node_id:?} not leader: group = {group_id:?}, replica = {replica_id:?}")]
+    NotLeader {
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+    },
+
+    #[error("stale write: expected is term {0}, current term is {1}")]
+    Stale(u64, u64),
+
+    #[error("propose got unexpected index, expected index is {0}, got {1}")]
+    UnexpectedIndex(u64, u64),
+}
+
+#[derive(thiserror::Error, Debug, PartialEq)]
+pub enum NodeActorError {
+    #[error("the multiraft actor stopped")]
+    Stopped,
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
 pub enum Error {
+    /// The configuration is invalid.
+    #[error("{0}")]
+    ConfigInvalid(String),
+
     #[error("{0}")]
     BadParameter(String),
 
-    #[error("the multiraft stopped")]
-    Stop,
+    #[error("{0}")]
+    Channel(#[from] ChannelError),
 
     #[error("{0}")]
-    Internal(String),
+    Write(#[from] WriteError),
+
+    #[error("{0}")]
+    NodeActor(#[from] NodeActorError),
 
     /// Raft storage error occurred.
     #[error("{0}")]
     Store(#[from] MultiRaftStorageError),
 
-    /// Transport error occurred.
-    #[error("{0}")]
-    Transport(#[from] TransportError),
-
-    /// Proposal error occurred.
-    #[error("{0}")]
-    Proposal(#[from] ProposalError),
-
-    /// The configuration is invalid.
-    #[error("{0}")]
-    ConfigInvalid(String),
-
-    // #[error("{0}")]
-    // RaftGroup(#[from] ::raft::Error),
     /// A raft error occurred.
     #[error("{0}")]
     Raft(#[from] RaftCoreError),
 
     #[error("{0}")]
     RaftGroup(#[from] RaftGroupError),
-    // #[error(
-    //     "inconsistent replica id: passed {0}, but found {1} by scanning conf_state for store {2}"
-    // )]
-    // InconsistentReplicaId(u64, u64, u64),
-
-    // // the tuple is (group_id, store_id)s
-    // #[error("couldn't find replica id for this store ({1}) in group ({0})")]
-    // ReplicaNotFound(u64, u64),
 }

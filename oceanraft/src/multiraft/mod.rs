@@ -19,7 +19,8 @@ pub mod storage;
 
 pub use config::Config;
 pub use error::{
-    Error, MultiRaftStorageError, ProposalError, RaftCoreError, RaftGroupError, TransportError,
+    Error, MultiRaftStorageError, RaftCoreError, RaftGroupError,
+    WriteError,
 };
 pub use event::{
     ApplyEvent, ApplyMembership, ApplyNoOp, ApplyNormal, CommitEvent, Event, LeaderElectionEvent,

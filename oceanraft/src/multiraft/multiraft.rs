@@ -9,6 +9,7 @@ use raft::Storage;
 use crate::util::TaskGroup;
 
 use super::config::Config;
+use super::error::ChannelError;
 use super::error::Error;
 use super::event::Event;
 use super::multiraft_actor::MultiRaftActor;
@@ -62,17 +63,20 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
     fn send<'life0>(&'life0 self, msg: MultiRaftMessage) -> Self::SendFuture<'life0> {
         async move {
             if self.shard.stopped() {
-                return Err(Error::Stop);
+                return Err(Error::NodeActor(super::error::NodeActorError::Stopped));
             }
             let (tx, rx) = oneshot::channel();
-            self.tx.send((msg, tx)).await.unwrap(); // FIXME: handle error
-            match rx.await {
-                Err(_err) => {
-                    // FIXME: handle error
-                    Ok(MultiRaftMessageResponse {})
-                }
-                Ok(res) => res,
-            }
+            let _ = self.tx.send((msg, tx)).await.map_err(|_| {
+                Error::Channel(ChannelError::ReceiverClosed(
+                    "channel receiver closed for raft message".to_owned(),
+                ))
+            })?;
+
+            rx.await.map_err(|_| {
+                Error::Channel(ChannelError::ReceiverClosed(
+                    "channel sender closed for raft message".to_owned(),
+                ))
+            })?
         }
     }
 }
@@ -163,47 +167,96 @@ where
     }
 
     pub async fn write(&self, request: AppWriteRequest) -> Result<RES, Error> {
-        let rx = self.write_non_block(request);
+        let rx = self.write_non_block(request)?;
         rx.await.map_err(|_| {
-            Error::Internal("the sender that result the write was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the write was dropped".to_owned(),
+            ))
         })?
     }
 
     pub fn write_block(&self, request: AppWriteRequest) -> Result<RES, Error> {
-        let rx = self.write_non_block(request);
+        let rx = self.write_non_block(request)?;
         rx.blocking_recv().map_err(|_| {
-            Error::Internal("the sender that result the write was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the write was dropped".to_owned(),
+            ))
         })?
     }
 
     pub fn write_non_block(
         &self,
         request: AppWriteRequest,
-    ) -> oneshot::Receiver<Result<RES, Error>> {
+    ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self
             .actor
             .write_propose_tx
             .try_send(WriteRequest::Write(request, tx))
         {
-            // FIXME: handle write queue full case
-            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"),
-            Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
-            Ok(_) => rx,
+            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                "channel no avaiable capacity for write".to_owned(),
+            ))),
+            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
+                "channel receiver closed for write".to_owned(),
+            ))),
+            Ok(_) => Ok(rx),
+        }
+    }
+
+    pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
+        let rx = self.membership_change_non_block(request)?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the membership change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
+        let rx = self.membership_change_non_block(request)?;
+        rx.blocking_recv().map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the membership change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    pub fn membership_change_non_block(
+        &self,
+        request: MembershipChangeRequest,
+    ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
+        let (tx, rx) = oneshot::channel();
+        match self
+            .actor
+            .write_propose_tx
+            .try_send(WriteRequest::Membership(request, tx))
+        {
+            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                "channel no available capacity for memberhsip".to_owned(),
+            ))),
+            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
+                "channel receiver closed for membership".to_owned(),
+            ))),
+            Ok(_) => Ok(rx),
         }
     }
 
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
         let rx = self.read_index_non_block(request);
         rx.await.map_err(|_| {
-            Error::Internal("the sender that result the read_index was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the read_index change was dropped".to_owned(),
+            ))
         })?
     }
 
     pub fn read_index_block(&self, request: AppReadIndexRequest) -> Result<(), Error> {
         let rx = self.read_index_non_block(request);
         rx.blocking_recv().map_err(|_| {
-            Error::Internal("the sender that result the read_index was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the read_index change was dropped".to_owned(),
+            ))
         })?
     }
 
@@ -219,36 +272,6 @@ where
         rx
     }
 
-    pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
-        let rx = self.membership_change_non_block(request);
-        rx.await.map_err(|_| {
-            Error::Internal("the sender that result the membership change was dropped".to_string())
-        })?
-    }
-
-    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
-        let rx = self.membership_change_non_block(request);
-        rx.blocking_recv().map_err(|_| {
-            Error::Internal("the sender that result the membership change was dropped".to_string())
-        })?
-    }
-
-    pub fn membership_change_non_block(
-        &self,
-        request: MembershipChangeRequest,
-    ) -> oneshot::Receiver<Result<RES, Error>> {
-        let (tx, rx) = oneshot::channel();
-        if let Err(_) = self
-            .actor
-            .write_propose_tx
-            .try_send(WriteRequest::Membership(request, tx))
-        {
-            panic!("MultiRaftActor stopped")
-        }
-
-        rx
-    }
-
     /// Campaign and wait raft group by given `group_id`.
     ///
     /// `campaign` is synchronous and waits for the campaign to submitted a
@@ -256,7 +279,9 @@ where
     pub async fn campaign_group(&self, group_id: u64) -> Result<(), Error> {
         let rx = self.campaign_group_non_block(group_id);
         rx.await.map_err(|_| {
-            Error::Internal("the sender that result the campaign was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the campaign group change was dropped".to_owned(),
+            ))
         })?
     }
 
@@ -277,43 +302,38 @@ where
     }
 
     pub async fn group_manage(&self, request: RaftGroupManagement) -> Result<(), Error> {
-        let rx = self.group_manage_non_block(request);
+        let rx = self.group_manage_non_block(request)?;
         rx.await.map_err(|_| {
-            Error::Internal("the sender that result the write was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
         })?
     }
 
     pub fn group_manage_block(&self, request: RaftGroupManagement) -> Result<(), Error> {
-        let rx = self.group_manage_non_block(request);
+        let rx = self.group_manage_non_block(request)?;
         rx.blocking_recv().map_err(|_| {
-            Error::Internal("the sender that result the write was dropped".to_string())
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
         })?
     }
 
     pub fn group_manage_non_block(
         &self,
         request: RaftGroupManagement,
-    ) -> oneshot::Receiver<Result<(), Error>> {
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self.actor.admin_tx.try_send((request, tx)) {
-            // FIXME: handle write queue full case
-            Err(TrySendError::Full(_msg)) => panic!("MultiRaftActor write queue is full"),
-            Err(TrySendError::Closed(_)) => panic!("MultiRaftActor stopped"),
-            Ok(_) => rx,
+            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                "channel no available capacity for group management".to_owned(),
+            ))),
+            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::SenderClosed(
+                "channel closed for group management".to_owned(),
+            ))),
+            Ok(_) => Ok(rx),
         }
     }
-
-    // pub async fn admin(&self, msg: AdminMessage) -> Result<(), Error> {
-    //     let (tx, rx) = oneshot::channel();
-    //     if let Err(_error) = self.actor.admin_tx.send((msg, tx)).await {
-    //         panic!("manager group receiver dropped")
-    //     }
-
-    //     match rx.await {
-    //         Err(_error) => panic!("sender dopped"),
-    //         Ok(res) => res,
-    //     }
-    // }
 
     #[inline]
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
