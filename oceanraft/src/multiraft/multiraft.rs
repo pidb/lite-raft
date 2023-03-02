@@ -102,9 +102,9 @@ where
     // _m4: PhantomData<MRS>,
 }
 
-impl<T, RS, MRS, RSM, RES> MultiRaft<T, RS, MRS, RSM, RES>
+impl<TR, RS, MRS, RSM, RES> MultiRaft<TR, RS, MRS, RSM, RES>
 where
-    T: Transport + Clone,
+    TR: Transport + Clone,
     RS: Storage + Send + Sync + Clone,
     MRS: MultiRaftStorage<RS>,
     RSM: StateMachine<RES>,
@@ -112,7 +112,7 @@ where
 {
     pub fn new(
         config: Config,
-        transport: T,
+        transport: TR,
         storage: MRS,
         rsm: RSM,
         task_group: TaskGroup,
@@ -139,7 +139,7 @@ where
         //     task_group.clone(),
         // );
 
-        let actor = MultiRaftActor::<T, RS, MRS, RSM, RES>::new(
+        let actor = MultiRaftActor::<TR, RS, MRS, RSM, RES>::new(
             &config, &transport, &storage, rsm, &event_tx,
         );
 
@@ -152,7 +152,9 @@ where
         })
     }
 
-    pub fn start(&self, ticker: Option<Box<dyn Ticker>>) {
+    pub fn start<T>(&self, ticker: Option<T>) 
+    where
+        T: Ticker{
         // let (callback_event_tx, callback_event_rx) = channel(1);
 
         // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
