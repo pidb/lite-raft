@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
@@ -5,6 +7,7 @@ use tokio::sync::oneshot;
 use futures::Future;
 
 use raft::Storage;
+use tokio::time::timeout;
 
 use crate::util::TaskGroup;
 
@@ -152,9 +155,10 @@ where
         })
     }
 
-    pub fn start<T>(&self, ticker: Option<T>) 
+    pub fn start<T>(&self, ticker: Option<T>)
     where
-        T: Ticker{
+        T: Ticker,
+    {
         // let (callback_event_tx, callback_event_rx) = channel(1);
 
         // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
@@ -166,6 +170,24 @@ where
 
         self.actor.start(&self.task_group, ticker);
         // TODO: start apply and multiraft actor
+    }
+
+    pub async fn write_timeout(
+        &self,
+        request: AppWriteRequest,
+        duration: Duration,
+    ) -> Result<RES, Error> {
+        let rx = self.write_non_block(request)?;
+        match timeout(duration, rx).await {
+            Err(_) => Err(Error::Timeout(
+                "wait for the write to complete timeout".to_owned(),
+            )),
+            Ok(res) => res.map_err(|_| {
+                Error::Channel(ChannelError::SenderClosed(
+                    "the sender that result the write was dropped".to_owned(),
+                ))
+            })?,
+        }
     }
 
     pub async fn write(&self, request: AppWriteRequest) -> Result<RES, Error> {
@@ -203,6 +225,24 @@ where
                 "channel receiver closed for write".to_owned(),
             ))),
             Ok(_) => Ok(rx),
+        }
+    }
+
+    pub async fn membership_change_timeout(
+        &self,
+        request: MembershipChangeRequest,
+        duration: Duration,
+    ) -> Result<RES, Error> {
+        let rx = self.membership_change_non_block(request)?;
+        match timeout(duration, rx).await {
+            Err(_) => Err(Error::Timeout(
+                "wait for the membership change to complete timeout".to_owned(),
+            )),
+            Ok(res) => res.map_err(|_| {
+                Error::Channel(ChannelError::SenderClosed(
+                    "the sender that result the membership change was dropped".to_owned(),
+                ))
+            })?,
         }
     }
 
@@ -244,8 +284,26 @@ where
         }
     }
 
+    pub async fn read_index_timeout(
+        &self,
+        request: AppReadIndexRequest,
+        duration: Duration,
+    ) -> Result<(), Error> {
+        let rx = self.read_index_non_block(request)?;
+        match timeout(duration, rx).await {
+            Err(_) => Err(Error::Timeout(
+                "wait for the read index to complete timeout".to_owned(),
+            )),
+            Ok(res) => res.map_err(|_| {
+                Error::Channel(ChannelError::SenderClosed(
+                    "the sender that result the read index was dropped".to_owned(),
+                ))
+            })?,
+        }
+    }
+
     pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
-        let rx = self.read_index_non_block(request);
+        let rx = self.read_index_non_block(request)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the read_index change was dropped".to_owned(),
@@ -254,10 +312,10 @@ where
     }
 
     pub fn read_index_block(&self, request: AppReadIndexRequest) -> Result<(), Error> {
-        let rx = self.read_index_non_block(request);
+        let rx = self.read_index_non_block(request)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the read_index change was dropped".to_owned(),
+                "the sender that result the read_index was dropped".to_owned(),
             ))
         })?
     }
@@ -265,13 +323,17 @@ where
     pub fn read_index_non_block(
         &self,
         request: AppReadIndexRequest,
-    ) -> oneshot::Receiver<Result<(), Error>> {
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.read_index_propose_tx.try_send((request, tx)) {
-            panic!("MultiRaftActor stopped")
+        match self.actor.read_index_propose_tx.try_send((request, tx)) {
+            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                "channel no available capacity for read_index".to_owned(),
+            ))),
+            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
+                "channel receiver closed for read_index".to_owned(),
+            ))),
+            Ok(_) => Ok(rx),
         }
-
-        rx
     }
 
     /// Campaign and wait raft group by given `group_id`.
