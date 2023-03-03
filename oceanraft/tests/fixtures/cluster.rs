@@ -250,7 +250,7 @@ impl FixtureCluster {
     /// Start all nodes of the `FixtureCluster`.
     pub fn start(&self) {
         for (i, node) in self.nodes.iter().enumerate() {
-            node.start(Some(Box::new(self.tickers[i].clone())));
+            node.start(Some(self.tickers[i].clone()));
         }
     }
 

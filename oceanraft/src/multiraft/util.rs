@@ -10,6 +10,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
+use tokio::time::interval_at;
 #[allow(unused)]
 use tokio::time::Instant;
 use tokio::time::Interval;
@@ -19,11 +20,31 @@ pub fn compute_entry_size(ent: &Entry) -> usize {
     Message::encoded_len(ent)
 }
 
+
+/// Ticker periodically sends tick and provides recv future. 
+/// Ticker doesn't care how the tick is sent.
+/// 
+/// Note: Abstract this trait because need to manually send the 
+/// tick for testing, and in most cases you should use `tokio::time::Interval`.
+/// the lib providers its implementation.
 pub trait Ticker: Send + 'static {
+    /// New an implementer of a new `Ticker` trait with a defined sized requirement.
+    /// 
+    /// `start` specifies the time after which the periodic tick is allowed to start. 
+    /// `pediod` presentation periodic tick.
+    fn new(start: std::time::Instant, period: Duration) -> Self
+    where
+        Self: Sized;
+
+    /// Recv tick, returns a boxed future.
     fn recv(&mut self) -> BoxFuture<'_, std::time::Instant>;
 }
 
 impl Ticker for Interval {
+    fn new(start: std::time::Instant, period: Duration) -> Self {
+        interval_at(Instant::from_std(start), period)
+    }
+
     fn recv(&mut self) -> BoxFuture<'_, std::time::Instant> {
         Box::pin(async {
             let ins = self.tick().await;
@@ -64,6 +85,14 @@ impl ManualTick {
 }
 
 impl Ticker for ManualTick {
+    fn new(_start: std::time::Instant, _period: Duration) -> Self {
+        let (tx, rx) = unbounded_channel();
+        Self {
+            tx,
+            rx: Arc::new(Mutex::new(rx)),
+        }
+    }
+
     fn recv(&mut self) -> BoxFuture<'_, std::time::Instant> {
         Box::pin(async {
             let mut rx = { self.rx.lock().await };
@@ -80,14 +109,18 @@ impl Ticker for ManualTick {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tokio_ticker() {
     let start = tokio::time::Instant::now();
-    let mut interval =
-        tokio::time::interval_at(start + Duration::from_millis(10), Duration::from_millis(10));
-    interval.recv().await; // approximately 10ms have elapsed
+
+    let mut default_ticker = Interval::new(
+        std::time::Instant::now() + Duration::from_millis(10),
+        Duration::from_millis(10),
+    );
+
+    default_ticker.recv().await; // approximately 10ms have elapsed
     assert!(start.elapsed() >= Duration::from_millis(10));
 
     tokio::time::sleep(Duration::from_millis(20)).await; // approximately 30ms have elapsed
-    interval.reset();
-    interval.recv().await; // approximately 40ms have elapsed
+    default_ticker.reset();
+    default_ticker.recv().await; // approximately 40ms have elapsed
     assert!(start.elapsed() >= Duration::from_millis(40));
 }
 
@@ -95,6 +128,7 @@ async fn test_tokio_ticker() {
 async fn test_manual_ticker() {
     let start = Instant::now();
     let mut ticker = ManualTick::new();
+
     for _ in 0..10 {
         ticker.non_blocking_tick();
         tokio::time::sleep(Duration::from_millis(10)).await;

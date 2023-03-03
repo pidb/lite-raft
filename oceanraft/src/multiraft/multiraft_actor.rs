@@ -148,9 +148,9 @@ where
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
-impl<T, RS, MRS, RSM, RES> MultiRaftActor<T, RS, MRS, RSM, RES>
+impl<TR, RS, MRS, RSM, RES> MultiRaftActor<TR, RS, MRS, RSM, RES>
 where
-    T: Transport + Clone,
+    TR: Transport + Clone,
     RS: Storage + Clone + Sync + Send + 'static,
     MRS: MultiRaftStorage<RS>,
     RES: AppWriteResponse,
@@ -158,7 +158,7 @@ where
 {
     pub fn new(
         cfg: &Config,
-        transport: &T,
+        transport: &TR,
         storage: &MRS,
         rsm: RSM,
         event_tx: &Sender<Vec<Event>>,
@@ -177,7 +177,7 @@ where
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
 
-        let runtime = MultiRaftActorRuntime::<T, RS, MRS, RES> {
+        let runtime = MultiRaftActorRuntime::<TR, RS, MRS, RES> {
             cfg: cfg.clone(),
             // activity_groups: HashSet::new(),
             state: state.clone(),
@@ -221,7 +221,10 @@ where
         }
     }
 
-    pub fn start(&self, task_group: &TaskGroup, ticker: Option<Box<dyn Ticker>>) {
+    pub fn start<T>(&self, task_group: &TaskGroup, ticker: Option<T>)
+    where
+        T: Ticker,
+    {
         self.apply.start(task_group);
         let runtime = { self.runtime.lock().unwrap().take().unwrap() };
 
@@ -290,14 +293,17 @@ where
         skip_all,
         fields(node_id=self.node_id)
     )]
-    async fn main_loop(mut self, mut stopper: Stopper, ticker: Option<Box<dyn Ticker>>) {
+    async fn main_loop<TK>(mut self, mut stopper: Stopper, ticker: Option<TK>)
+    where
+        TK: Ticker,
+    {
         info!("node {}: start multiraft main_loop", self.node_id);
 
-        let mut ticker: Box<dyn Ticker> = ticker.map_or(
-            Box::new(interval_at(
-                tokio::time::Instant::now() + self.tick_interval,
+        let mut ticker = ticker.map_or(
+            TK::new(
+                std::time::Instant::now() + self.tick_interval,
                 self.tick_interval,
-            )),
+            ),
             |t| t,
         );
 
