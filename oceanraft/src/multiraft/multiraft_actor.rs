@@ -32,7 +32,6 @@ use raft_proto::prelude::MultiRaftMessageResponse;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::SingleMembershipChange;
 
-use tokio::time::interval_at;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -42,6 +41,7 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::error::RaftGroupError;
+use crate::multiraft::proposal::ReadIndexQueue;
 use crate::multiraft::raft_group::Status;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
@@ -166,7 +166,7 @@ where
         let state = Arc::new(State::default());
 
         let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
-        let (read_index_propose_tx, read_index_propose_rx) = channel(1);
+        let (read_index_propose_tx, read_index_propose_rx) = channel(1000);
         // let (membership_change_tx, membership_change_rx) = channel(1);
         let (admin_tx, admin_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
@@ -435,9 +435,16 @@ where
         &mut self,
         msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
-        match msg.msg.as_ref().expect("invalid msg").msg_type() {
-            MessageType::MsgHeartbeat => self.fanout_heartbeat(msg).await,
-            MessageType::MsgHeartbeatResponse => self.fanout_heartbeat_response(msg).await,
+        let rmsg = msg.msg.as_ref().expect("invalid msg");
+        // for a heartbeat message, fanout is executed only if context in
+        // the heartbeat message is empty.
+        match rmsg.msg_type() {
+            MessageType::MsgHeartbeat if rmsg.context.is_empty() => {
+                self.fanout_heartbeat(msg).await
+            }
+            MessageType::MsgHeartbeatResponse if rmsg.context.is_empty() => {
+                self.fanout_heartbeat_response(msg).await
+            }
             _ => self.handle_raft_message(msg).await,
         }
     }
@@ -1031,6 +1038,7 @@ where
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
             status: Status::None,
+            read_index_queue: ReadIndexQueue::new(),
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -1311,6 +1319,7 @@ where
                             &mut multi_groups_write,
                             &mut applys,
                             &mut self.pending_events,
+                            &mut self.response_cbs,
                         )
                         .await;
                 }

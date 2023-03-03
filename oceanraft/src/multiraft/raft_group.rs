@@ -5,6 +5,7 @@ use raft::prelude::Entry;
 use raft::prelude::MembershipChangeRequest;
 use raft::LightReady;
 use raft::RawNode;
+use raft::ReadState;
 use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
@@ -15,6 +16,7 @@ use raft_proto::prelude::ConfChange;
 use raft_proto::prelude::ConfChangeSingle;
 use raft_proto::prelude::ConfChangeV2;
 use raft_proto::prelude::ConfState;
+use raft_proto::prelude::ReadIndexContext;
 use raft_proto::prelude::ReplicaDesc;
 use raft_proto::prelude::Snapshot;
 use tokio::sync::oneshot;
@@ -24,18 +26,21 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 use tracing::Level;
+use uuid::Uuid;
 
 use super::apply_actor::Apply;
 use super::error::Error;
 use super::error::WriteError;
 use super::event::LeaderElectionEvent;
 use super::multiraft::NO_NODE;
+use super::multiraft_actor::new_response_callback;
 use super::multiraft_actor::new_response_error_callback;
 use super::multiraft_actor::ResponseCb;
 use super::node::NodeManager;
 use super::proposal::Proposal;
 use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexProposal;
+use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
 use super::response::AppWriteResponse;
 use super::storage::MultiRaftStorage;
@@ -88,6 +93,7 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     pub committed_term: u64,
     pub state: RaftGroupState,
     pub status: Status,
+    pub read_index_queue: ReadIndexQueue,
 }
 
 //===----------------------------------------------------------------------===//
@@ -138,6 +144,7 @@ where
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
         multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
         pending_events: &mut Vec<Event>,
+        pending_cbs: &mut Vec<ResponseCb>,
     ) {
         debug!(
             "node {}: group = {} is now ready for processing",
@@ -214,6 +221,10 @@ where
         if let Some(ss) = rd.ss() {
             self.handle_soft_state_change(node_id, ss, replica_cache, pending_events)
                 .await;
+        }
+
+        if !rd.read_states().is_empty() {
+            self.on_reads_ready(rd.take_read_states(), pending_cbs)
         }
 
         // make apply task if need to apply commit entries
@@ -336,6 +347,13 @@ where
         // trace!("make apply {:?}", apply);
 
         apply
+    }
+
+    fn on_reads_ready(&mut self, rss: Vec<ReadState>, _: &mut Vec<ResponseCb>) {
+        self.read_index_queue.advance_reads(rss);
+        while let Some(p) = self.read_index_queue.pop_front() {
+            p.tx.map(|tx| tx.send(Ok(())));
+        }
     }
 
     // Dispatch soft state changed related events.
@@ -611,13 +629,15 @@ where
         request: AppReadIndexRequest,
         tx: oneshot::Sender<Result<(), Error>>,
     ) -> Option<ResponseCb> {
-        let uuid = uuid::Uuid::new_v4();
-        let term = self.term();
+        let uuid = Uuid::new_v4();
         let read_context = match request.context {
-            None => vec![],
+            None => ReadIndexContext {
+                uuid: uuid.clone().as_bytes().to_vec(),
+                data: vec![],
+            }
+            .encode_length_delimited_to_vec(),
             Some(ctx) => ctx.encode_length_delimited_to_vec(),
         };
-
         self.raft_group.read_index(read_context);
 
         let proposal = ReadIndexProposal {
@@ -626,7 +646,7 @@ where
             context: None,
             tx: Some(tx),
         };
-
+        self.read_index_queue.push_back(proposal);
         None
     }
 
@@ -778,4 +798,12 @@ fn to_ccv2(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChangeV2) {
     // TODO: consider setting transaction type
     cc.set_changes(sc);
     (req.encode_to_vec(), cc)
+}
+
+#[inline]
+fn create_read_index_context() -> ReadIndexContext {
+    ReadIndexContext {
+        uuid: Uuid::new_v4().to_bytes_le().to_vec(),
+        data: vec![],
+    }
 }
