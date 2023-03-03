@@ -2,13 +2,16 @@ use std::collections::vec_deque::Drain;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
+use prost::Message;
+use raft::ReadState;
 use tokio::sync::oneshot;
 use tracing::debug;
 use uuid::Uuid;
 
-use super::error::WriteError;
 use super::error::Error;
+use super::error::WriteError;
 use super::response::AppWriteResponse;
+use tracing::error;
 
 use raft_proto::prelude::ReadIndexContext;
 
@@ -18,6 +21,70 @@ pub struct ReadIndexProposal {
     pub context: Option<ReadIndexContext>,
     // if some, the R is sent to client via tx.
     pub tx: Option<oneshot::Sender<Result<(), Error>>>,
+}
+
+pub struct ReadIndexQueue {
+    ready_cnt: usize,
+    handle_cnt: usize,
+    queue: VecDeque<ReadIndexProposal>,
+}
+
+impl ReadIndexQueue {
+    pub fn new() -> ReadIndexQueue {
+        Self {
+            ready_cnt: 0,
+            handle_cnt: 0,
+            queue: VecDeque::new(),
+        }
+    }
+
+    #[inline]
+    #[allow(unused)]
+    pub fn push_front(&mut self, proposal: ReadIndexProposal) {
+        self.queue.push_back(proposal);
+        self.ready_cnt += 1;
+        self.handle_cnt -= 1;
+    }
+
+    #[inline]
+    pub(crate) fn push_back(&mut self, proposal: ReadIndexProposal) {
+        self.queue.push_back(proposal)
+    }
+
+    pub(crate) fn pop_front(&mut self) -> Option<ReadIndexProposal> {
+        if self.ready_cnt == 0 {
+            return None;
+        }
+
+        self.ready_cnt -= 1;
+        self.handle_cnt += 1;
+        Some(
+            self.queue
+                .pop_front()
+                .expect("read index queue empty but ready_cnt > 0"),
+        )
+    }
+
+    pub(crate) fn advance_reads(&mut self, rss: Vec<ReadState>) {
+        for rs in rss {
+            let mut rctx = ReadIndexContext::default();
+            let _ = rctx
+                .merge_length_delimited(rs.request_ctx.as_ref())
+                .unwrap();
+
+            let rctx_uuid = Uuid::from_bytes(rctx.get_uuid().try_into().unwrap());
+            // let rctx_uuid = Uuid::parse(&rctx.uuid).unwrap();
+            match self.queue.get_mut(self.ready_cnt) {
+                Some(read) if read.uuid == rctx_uuid => {
+                    read.read_index = Some(rs.index);
+                    read.context = Some(rctx);
+                    self.ready_cnt += 1;
+                }
+                Some(read) => error!("unexpected uuid {} detected", read.uuid),
+                None => error!("ready read {} but can not got related proposal", rs.index),
+            }
+        }
+    }
 }
 
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -53,11 +120,17 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
             // The term must be increasing among all log entries and the index
             // must be increasing inside a given term
             if proposal.term < last.term {
-                panic!("bad proposal due to term jump backword {} -> {}", last.term, proposal.term);
+                panic!(
+                    "bad proposal due to term jump backword {} -> {}",
+                    last.term, proposal.term
+                );
             }
 
             if proposal.index < last.index {
-                panic!("bad proposal due to index jump backword {} -> {}", last.index, proposal.index);
+                panic!(
+                    "bad proposal due to index jump backword {} -> {}",
+                    last.index, proposal.index
+                );
             }
         }
 
@@ -107,9 +180,9 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
                 debug!("find proposal index {} = {}", proposal.index, index);
                 // term matched.
                 if proposal.index == index {
-                    return Some(proposal)
+                    return Some(proposal);
                 } else {
-                    return None
+                    return None;
                 }
             } else {
                 proposal.tx.map(|tx| {
@@ -118,7 +191,7 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
                         current_term,
                     ))))
                 });
-                return None
+                return None;
             }
         }
 

@@ -31,39 +31,52 @@ pub async fn send_messages<TR, RS, MRS>(
 {
     assert_ne!(from_node_id, 0);
     for msg in msgs {
-        match msg.msg_type() {
+        // if the context in the heartbeat message is not empty,
+        // the read index heartbeat confirmation is being performed
+        // and we cannot skip the message.
+        let skip = match msg.msg_type() {
             MessageType::MsgHeartbeat => {
-                trace!(
-                    "node {}: drop group = {}, {} -> {} individual heartbeat",
-                    from_node_id,
-                    group_id,
-                    msg.from,
-                    msg.to
-                );
-                continue;
+                if msg.context.is_empty() {
+                    trace!(
+                        "node {}: drop group = {}, {} -> {} individual heartbeat",
+                        from_node_id,
+                        group_id,
+                        msg.from,
+                        msg.to
+                    );
+                    true
+                } else {
+                    false
+                }
             }
 
             MessageType::MsgHeartbeatResponse => {
-                trace!(
-                    "node {}: drop group = {}, {} -> {} individual heartbeat response",
-                    from_node_id,
-                    group_id,
-                    msg.from,
-                    msg.to
-                );
-                continue;
+                if msg.context.is_empty() {
+                    trace!(
+                        "node {}: drop group = {}, {} -> {} individual heartbeat response",
+                        from_node_id,
+                        group_id,
+                        msg.from,
+                        msg.to
+                    );
+                    true
+                } else {
+                    false
+                }
             }
-            _ => {
-                send_message(
-                    from_node_id,
-                    transport,
-                    replica_cache,
-                    node_mgr,
-                    group_id,
-                    msg,
-                )
-                .await
-            }
+            _ => false,
+        };
+
+        if !skip {
+            send_message(
+                from_node_id,
+                transport,
+                replica_cache,
+                node_mgr,
+                group_id,
+                msg,
+            )
+            .await
         }
     }
 }

@@ -66,19 +66,6 @@ message MultiRaftMessageResponse {
 }
 
 
-// enum RaftGroupManagementMessageType {
-//     MsgInitialGroup = 0;
-//     MsgCreateGroup = 1;
-//     MsgRemoveGoup = 2;
-// }
-
-// message RaftGroupManagementMessage {
-//     RaftGroupManagementMessageType msg_type = 1;
-//     uint64 group_id = 2;
-//     uint64 replica_id = 3;
-//     repeated ReplicaDesc replicas = 4;
-// }
-
 enum RaftGroupManagementType {
     MsgCreateGroup = 0;
     MsgRemoveGoup = 1;
