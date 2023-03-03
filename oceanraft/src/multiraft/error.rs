@@ -90,6 +90,9 @@ pub enum Error {
     BadParameter(String),
 
     #[error("{0}")]
+    Timeout(String),
+
+    #[error("{0}")]
     Channel(#[from] ChannelError),
 
     #[error("{0}")]
