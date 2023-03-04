@@ -35,7 +35,9 @@ use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
 
-use crate::fixtures::transport::LocalTransport;
+use oceanraft::multiraft::transport::LocalTransport;
+
+// use crate::fixtures::transport::LocalTransport;
 
 use super::rsm::FixtureStateMachine;
 
