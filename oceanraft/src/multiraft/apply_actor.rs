@@ -210,7 +210,7 @@ where
     // otherwise pending in FIFO order.
     //
     // Note: This method provides scalability for us to make more flexible apply decisions in the future.
-    async fn batch_requests(&mut self, requests: Vec<Request<RES>>) {
+    fn batch_requests(&mut self, requests: Vec<Request<RES>>) {
         // let mut pending_applys: HashMap<u64, Vec<Apply>> = HashMap::new();
         let mut batch_applys: HashMap<u64, Option<Apply<RES>>> = HashMap::new();
 
@@ -325,7 +325,7 @@ where
                         requests.push(request);
                     }
 
-                    self.batch_requests(requests).await;
+                    self.batch_requests(requests);
                     self.delegate_handle_applys().await;
                 },
                 // Ok(_) = self.multiraft_event_rx.changed() =>  {

@@ -287,6 +287,51 @@ where
     MRS: MultiRaftStorage<RS>,
     RES: AppWriteResponse,
 {
+    fn new(cfg: &Config, transport: &T, storage: &MRS, event_tx: &Sender<Vec<Event>>) -> Self {
+        let state = Arc::new(State::default());
+        let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
+        let (read_index_propose_tx, read_index_propose_rx) = channel(1000);
+        // let (membership_change_tx, membership_change_rx) = channel(1);
+        let (admin_tx, admin_rx) = channel(1);
+        let (campaign_tx, campaign_rx) = channel(1);
+        let (raft_message_tx, raft_message_rx) = channel(10);
+
+        let (callback_tx, callback_rx) = unbounded_channel();
+
+        let (apply_request_tx, apply_request_rx) = unbounded_channel();
+        let (apply_response_tx, apply_response_rx) = unbounded_channel();
+
+        let runtime = MultiRaftActorRuntime::<T, RS, MRS, RES> {
+            cfg: cfg.clone(),
+            // activity_groups: HashSet::new(),
+            state: state.clone(),
+            node_id: cfg.node_id,
+            node_manager: NodeManager::new(),
+            event_tx: event_tx.clone(),
+            groups: HashMap::new(),
+            tick_interval: Duration::from_millis(cfg.tick_interval),
+            write_propose_rx,
+            read_index_propose_rx,
+            // membership_change_rx,
+            campaign_rx,
+            raft_message_rx,
+            admin_rx,
+            storage: storage.clone(),
+            transport: transport.clone(),
+            apply_request_tx,
+            apply_response_rx,
+            commit_rx: callback_rx,
+            active_groups: HashSet::new(),
+            sync_replica_cache: true,
+            replica_cache: ReplicaCache::new(storage.clone()),
+            pending_events: Vec::new(),
+            response_cbs: Vec::new(),
+            _m1: PhantomData,
+        };
+
+        runtime
+    }
+
     #[tracing::instrument(
         name = "MultiRaftActorRuntime::main_loop"
         level = Level::TRACE,
@@ -1218,6 +1263,7 @@ where
         node_manager: &mut NodeManager,
         replica_cache: &mut ReplicaCache<RS, MRS>,
     ) {
+        assert_eq!(change.change_type(), ConfChangeType::AddNode);
         let group_id = group.group_id;
         node_manager.add_group(change.node_id, group_id);
 
@@ -1468,4 +1514,168 @@ fn spawn_handle_response_events(node_id: u64, tx: &Sender<Vec<Event>>, events: V
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc::channel;
+
+    use super::MultiRaftActorRuntime;
+    use crate::memstore::MultiRaftMemoryStorage;
+    use crate::memstore::RaftMemStorage;
+    use crate::multiraft::config::Config;
+    use crate::multiraft::node::NodeManager;
+    use crate::multiraft::proposal::ProposalQueue;
+    use crate::multiraft::proposal::ReadIndexQueue;
+    use crate::multiraft::raft_group::RaftGroup;
+    use crate::multiraft::raft_group::RaftGroupState;
+    use crate::multiraft::raft_group::Status;
+    use crate::multiraft::replica_cache::ReplicaCache;
+    use crate::multiraft::storage::MultiRaftStorage;
+    use crate::multiraft::transport::LocalTransport;
+    use crate::multiraft::Error;
+    use crate::multiraft::MultiRaftMessageSenderImpl;
+    use raft_proto::prelude::ConfChangeType;
+    use raft_proto::prelude::ReplicaDesc;
+    use raft_proto::prelude::SingleMembershipChange;
+
+    type TestMultiRaftActorRuntime = MultiRaftActorRuntime<
+        LocalTransport<MultiRaftMessageSenderImpl>,
+        RaftMemStorage,
+        MultiRaftMemoryStorage,
+        (),
+    >;
+    fn new_raft_group(
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+        store: &RaftMemStorage,
+    ) -> Result<RaftGroup<RaftMemStorage, ()>, Error> {
+        let raft_cfg = raft::Config {
+            id: replica_id,
+            ..Default::default()
+        };
+
+        let raft_group = raft::RawNode::with_default_logger(&raft_cfg, store.clone())
+            .map_err(|err| Error::Raft(err))?;
+
+        Ok(RaftGroup {
+            node_id,
+            group_id,
+            replica_id,
+            raft_group,
+            node_ids: vec![node_id],
+            proposals: ProposalQueue::new(replica_id),
+            leader: ReplicaDesc::default(), // TODO: init leader from storage
+            committed_term: 0,              // TODO: init committed term from storage
+            state: RaftGroupState::default(),
+            status: Status::None,
+            read_index_queue: ReadIndexQueue::new(),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_membership_add_remove() {
+        // let cfg = Config {
+        //     node_id: 1,
+        //     batch_append: false,
+        //     election_tick: 2,
+        //     heartbeat_tick: 1,
+        //     max_size_per_msg: 0,
+        //     max_inflight_msgs: 256,
+        //     tick_interval: 3_600_000, // hour ms
+        //     batch_apply: false,
+        //     batch_size: 0,
+        //     write_proposal_queue_size: 1000,
+        // };
+
+        // let transport = LocalTransport::new();
+        // let (event_tx, _) = channel(1);
+        // let mut worker = TestMultiRaftActorRuntime::new(&cfg, &transport, &storage, &event_tx);
+        let raft_store = RaftMemStorage::new();
+        let mut node_manager = NodeManager::new();
+        let storage = MultiRaftMemoryStorage::new(1);
+        let mut replica_cache = ReplicaCache::new(storage);
+        let mut raft_group = new_raft_group(1, 1, 1, &raft_store).unwrap();
+        let group_id = 1;
+
+        // add five changes
+        let mut changes = vec![];
+        let first_node_id = 2;
+        for i in 0..4 {
+            let node_id = first_node_id + i;
+            let replica_id = first_node_id + i;
+            let mut change = SingleMembershipChange::default();
+            change.node_id = node_id;
+            change.replica_id = replica_id;
+            change.set_change_type(raft::prelude::ConfChangeType::AddNode);
+            TestMultiRaftActorRuntime::membership_add(
+                1,
+                &mut raft_group,
+                &change,
+                &mut node_manager,
+                &mut replica_cache,
+            )
+            .await;
+            changes.push(change);
+        }
+
+        for change in changes.iter() {
+            let node = node_manager.get_node(&change.node_id).unwrap();
+            assert_eq!(node.group_map.contains_key(&group_id), true);
+
+            let rep = replica_cache
+                .replica_desc(group_id, change.replica_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                rep,
+                ReplicaDesc {
+                    node_id: change.node_id,
+                    replica_id: change.replica_id,
+                }
+            );
+        }
+
+        assert_eq!(raft_group.node_ids, vec![1, 2, 3, 4, 5]);
+
+        let mut changes = vec![];
+        let first_node_id = 2;
+        for i in 0..4 {
+            let node_id = first_node_id + i;
+            let replica_id = first_node_id + i;
+            let mut change = SingleMembershipChange::default();
+            change.node_id = node_id;
+            change.replica_id = replica_id;
+            change.set_change_type(raft::prelude::ConfChangeType::RemoveNode);
+            TestMultiRaftActorRuntime::membership_remove(
+                1,
+                &mut raft_group,
+                &change,
+                &mut node_manager,
+                &mut replica_cache,
+            )
+            .await;
+            changes.push(change);
+        }
+
+        for change in changes.iter() {
+            // TODO: if node group is empty, should remove node item from map
+            let node = node_manager.get_node(&change.node_id).unwrap();
+            assert_eq!(node.group_map.contains_key(&group_id), false);
+
+            assert_eq!(
+                replica_cache
+                    .replica_desc(group_id, change.replica_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                true
+            );
+        }
+
+        assert_eq!(raft_group.node_ids, vec![1]);
+    }
 }
