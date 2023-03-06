@@ -11,18 +11,6 @@ use tokio::time::timeout;
 
 use crate::util::TaskGroup;
 
-use super::config::Config;
-use super::error::ChannelError;
-use super::error::Error;
-use super::event::Event;
-use super::multiraft_actor::MultiRaftActor;
-use super::multiraft_actor::ShardState;
-use super::multiraft_actor::WriteRequest;
-use super::response::AppWriteResponse;
-use super::transport::Transport;
-use super::util::Ticker;
-use super::StateMachine;
-
 use raft_proto::prelude::AppReadIndexRequest;
 use raft_proto::prelude::AppWriteRequest;
 use raft_proto::prelude::MembershipChangeRequest;
@@ -30,7 +18,19 @@ use raft_proto::prelude::MultiRaftMessage;
 use raft_proto::prelude::MultiRaftMessageResponse;
 use raft_proto::prelude::RaftGroupManagement;
 
+use super::config::Config;
+use super::error::ChannelError;
+use super::error::Error;
+use super::event::EventChannel;
+use super::event::EventReceiver;
+use super::msg::AdminMessage;
+use super::msg::WriteMessage;
+use super::node::NodeActor;
+use super::response::AppWriteResponse;
 use super::storage::MultiRaftStorage;
+use super::transport::Transport;
+use super::util::Ticker;
+use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
@@ -51,7 +51,6 @@ pub trait MultiRaftMessageSender: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct MultiRaftMessageSenderImpl {
-    shard: ShardState,
     tx: Sender<(
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
@@ -65,62 +64,60 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 
     fn send<'life0>(&'life0 self, msg: MultiRaftMessage) -> Self::SendFuture<'life0> {
         async move {
-            if self.shard.stopped() {
-                return Err(Error::NodeActor(super::error::NodeActorError::Stopped));
-            }
             let (tx, rx) = oneshot::channel();
-            let _ = self.tx.send((msg, tx)).await.map_err(|_| {
-                Error::Channel(ChannelError::ReceiverClosed(
+            match self.tx.try_send((msg, tx)) {
+                Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
                     "channel receiver closed for raft message".to_owned(),
-                ))
-            })?;
-
-            rx.await.map_err(|_| {
-                Error::Channel(ChannelError::ReceiverClosed(
-                    "channel sender closed for raft message".to_owned(),
-                ))
-            })?
+                ))),
+                Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                    "channel receiver fulled for raft message".to_owned(),
+                ))),
+                Ok(_) => rx.await.map_err(|_| {
+                    Error::Channel(ChannelError::ReceiverClosed(
+                        "channel sender closed for raft message".to_owned(),
+                    ))
+                })?,
+            }
         }
     }
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<T, RS, MRS, RSM, RES>
-where
-    T: Transport + Clone,
-    RS: Storage + Send + Sync + Clone + 'static,
-    MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
-{
+pub struct MultiRaft<RES: AppWriteResponse> {
     // ctx: Context,
     // cfg: Config,
     // transport: T,
     // storage: MRS,
     task_group: TaskGroup,
-    actor: MultiRaftActor<T, RS, MRS, RSM, RES>,
+    actor: NodeActor<RES>,
     // apply_actor: ApplyActor,
     // _m2: PhantomData<T>,
     // _m3: PhantomData<RS>,
     // _m4: PhantomData<MRS>,
+    event_bcast: EventChannel,
 }
 
-impl<TR, RS, MRS, RSM, RES> MultiRaft<TR, RS, MRS, RSM, RES>
+impl<RES> MultiRaft<RES>
 where
-    TR: Transport + Clone,
-    RS: Storage + Send + Sync + Clone,
-    MRS: MultiRaftStorage<RS>,
-    RSM: StateMachine<RES>,
     RES: AppWriteResponse,
 {
-    pub fn new(
+    pub fn new<TR, RS, MRS, RSM, TK>(
         config: Config,
         transport: TR,
         storage: MRS,
         rsm: RSM,
         task_group: TaskGroup,
-        event_tx: &Sender<Vec<Event>>,
-    ) -> Result<Self, Error> {
+        // event_tx: &Sender<Vec<Event>>,
+        ticker: Option<TK>,
+    ) -> Result<Self, Error>
+    where
+        TR: Transport + Clone,
+        RS: Storage + Send + Sync + Clone + 'static,
+        MRS: MultiRaftStorage<RS>,
+        RSM: StateMachine<RES>,
+        RES: AppWriteResponse,
+        TK: Ticker,
+    {
         config.validate()?;
         // let (callback_event_tx, callback_event_rx) = channel(1);
 
@@ -142,35 +139,49 @@ where
         //     task_group.clone(),
         // );
 
-        let actor = MultiRaftActor::<TR, RS, MRS, RSM, RES>::new(
-            &config, &transport, &storage, rsm, &event_tx,
+        // TODO: provide capactiy
+        let event_bcast = EventChannel::new(config.event_capacity);
+        let actor = NodeActor::spawn(
+            &config,
+            &transport,
+            &storage,
+            rsm,
+            // event_tx,
+            &event_bcast,
+            &task_group,
+            ticker,
         );
+
+        // let actor = MultiRaftActor::<TR, RS, MRS, RSM, RES>::new(
+        //     &config, &transport, &storage, rsm, &event_tx,
+        // );
 
         Ok(Self {
             // cfg: config,
             // transport,
             // storage,
-            task_group,
+            event_bcast,
             actor,
+            task_group,
         })
     }
 
-    pub fn start<T>(&self, ticker: Option<T>)
-    where
-        T: Ticker,
-    {
-        // let (callback_event_tx, callback_event_rx) = channel(1);
+    // pub fn start<T>(&self, ticker: Option<T>)
+    // where
+    //     T: Ticker,
+    // {
+    //     // let (callback_event_tx, callback_event_rx) = channel(1);
 
-        // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
-        //     config.clone(),
-        //     event_tx.clone(),
-        //     callback_event_tx,
-        //     task_group.clone(),
-        // );
+    //     // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
+    //     //     config.clone(),
+    //     //     event_tx.clone(),
+    //     //     callback_event_tx,
+    //     //     task_group.clone(),
+    //     // );
 
-        self.actor.start(&self.task_group, ticker);
-        // TODO: start apply and multiraft actor
-    }
+    //     self.actor.start(&self.task_group, ticker);
+    //     // TODO: start apply and multiraft actor
+    // }
 
     pub async fn write_timeout(
         &self,
@@ -216,7 +227,7 @@ where
         match self
             .actor
             .write_propose_tx
-            .try_send(WriteRequest::Write(request, tx))
+            .try_send(WriteMessage::Write(request, tx))
         {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no avaiable capacity for write".to_owned(),
@@ -272,7 +283,7 @@ where
         match self
             .actor
             .write_propose_tx
-            .try_send(WriteRequest::Membership(request, tx))
+            .try_send(WriteMessage::Membership(request, tx))
         {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for memberhsip".to_owned(),
@@ -388,7 +399,11 @@ where
         request: RaftGroupManagement,
     ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
-        match self.actor.admin_tx.try_send((request, tx)) {
+        match self
+            .actor
+            .admin_tx
+            .try_send(AdminMessage::Group(request, tx))
+        {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for group management".to_owned(),
             ))),
@@ -402,8 +417,14 @@ where
     #[inline]
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
         MultiRaftMessageSenderImpl {
-            shard: self.actor.shard.clone(),
             tx: self.actor.raft_message_tx.clone(),
         }
+    }
+
+    #[inline]
+    /// Creates a new Receiver connected to event channel Sender.
+    /// Note: The Receiver **does not** turn this channel into a broadcast channel.
+    pub fn subscribe(&self) -> EventReceiver {
+        self.event_bcast.subscribe()
     }
 }

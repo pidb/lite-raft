@@ -1,4 +1,3 @@
-#![feature(type_alias_impl_trait)]
 mod cluster;
 mod tracing_log;
 mod checker;

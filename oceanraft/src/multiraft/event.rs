@@ -1,41 +1,4 @@
-use prost::Message as _;
-use raft::RaftState;
-use raft_proto::ConfChangeI;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::oneshot;
-
-use crate::prelude::ConfChange;
-use crate::prelude::ConfChangeV2;
-use crate::prelude::Entry;
-use crate::prelude::EntryType;
-use crate::prelude::MembershipChangeRequest;
-
 use super::error::Error;
-use super::response::AppWriteResponse;
-
-/// Commit membership change results.
-///
-/// If proposed change is ConfChange, the ConfChangeV2 is converted
-/// from ConfChange. If ConfChangeV2 is used, changes contains multiple
-/// requests, otherwise changes contains only one request.
-#[derive(Debug)]
-pub struct CommitMembership {
-    pub entry_index: u64,
-    pub conf_change: ConfChangeV2,
-    pub change_request: MembershipChangeRequest,
-}
-
-#[derive(Debug)]
-pub enum CommitEvent {
-    None,
-    Membership((CommitMembership, oneshot::Sender<Result<(), Error>>)),
-}
-
-impl Default for CommitEvent {
-    fn default() -> Self {
-        CommitEvent::None
-    }
-}
 
 /// A LeaderElectionEvent is send when leader changed.
 #[derive(Debug, Clone)]
@@ -49,128 +12,94 @@ pub struct LeaderElectionEvent {
     pub leader_id: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Event {
     LederElection(LeaderElectionEvent),
-}
-
-#[derive(Debug)]
-pub struct ApplyNoOp {
-    pub group_id: u64,
-    pub entry_index: u64,
-    pub entry_term: u64,
-}
-
-#[derive(Debug)]
-pub struct ApplyNormal<RES: AppWriteResponse> {
-    pub group_id: u64,
-    pub entry: Entry,
-    pub is_conf_change: bool,
-    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
-}
-
-#[derive(Debug)]
-pub struct ApplyMembership<RES: AppWriteResponse> {
-    pub group_id: u64,
-    pub entry: Entry,
-    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
-    pub commit_tx: UnboundedSender<CommitEvent>,
-}
-
-impl<RES: AppWriteResponse> ApplyMembership<RES> {
-    pub fn parse(&self) -> CommitMembership {
-        match self.entry.entry_type() {
-            EntryType::EntryNormal => unreachable!(),
-            EntryType::EntryConfChange => {
-                let mut conf_change = ConfChange::default();
-                conf_change.merge(self.entry.data.as_ref()).unwrap();
-
-                let mut change_request = MembershipChangeRequest::default();
-                change_request.merge(self.entry.context.as_ref()).unwrap();
-
-                CommitMembership {
-                    entry_index: self.entry.index,
-                    conf_change: conf_change.into_v2(),
-                    change_request,
-                }
-            }
-            EntryType::EntryConfChangeV2 => {
-                let mut conf_change = ConfChangeV2::default();
-                conf_change.merge(self.entry.data.as_ref()).unwrap();
-
-                let mut change_request = MembershipChangeRequest::default();
-                change_request.merge(self.entry.context.as_ref()).unwrap();
-
-                CommitMembership {
-                    entry_index: self.entry.index,
-                    conf_change,
-                    change_request,
-                }
-            }
-        }
-    }
-
-    /// Commit membership change to multiraft.
-    ///
-    /// Note: it's must be called because multiraft need apply membersip change to raft.
-    pub async fn done(&self) {
-        let (tx, rx) = oneshot::channel();
-        let commit = self.parse();
-        // FIXME: don't unwrap
-        self.commit_tx
-            .send(CommitEvent::Membership((commit, tx)))
-            .unwrap();
-        // FIXME: don't unwrap
-        rx.await.unwrap();
-    }
-}
-
-#[derive(Debug)]
-pub enum ApplyEvent<RES: AppWriteResponse> {
-    NoOp(ApplyNoOp),
-    Normal(ApplyNormal<RES>),
-    Membership(ApplyMembership<RES>),
-}
-
-impl<RES: AppWriteResponse> ApplyEvent<RES> {
-    pub(crate) fn entry_index(&self) -> u64 {
-        match self {
-            Self::NoOp(noop) => noop.entry_index,
-            Self::Normal(normal) => normal.entry.index,
-            Self::Membership(membership) => membership.entry.index,
-        }
-    }
-
-    #[allow(unused)]
-    pub(crate) fn entry_term(&self) -> u64 {
-        match self {
-            Self::NoOp(noop) => noop.entry_term,
-            Self::Normal(normal) => normal.entry.term,
-            Self::Membership(membership) => membership.entry.term,
-        }
-    }
-}
-
-/// MultiRaftEvent is sent by a multiraft actor, and the receiver
-/// performs specific actions within the system.
-#[derive(Debug, Clone)]
-pub enum MultiRaftEvent {
-    /// Default value.
-    None,
 
     /// Sent when consensus group is created.
-    CreateGroup {
+    GroupCreate {
         group_id: u64,
         replica_id: u64,
-        commit_index: u64,
-        commit_term: u64,
-        applied_index: u64,
-        applied_term: u64,
+        // commit_index: u64,
+        // commit_term: u64,
+        // applied_index: u64,
+        // applied_term: u64,
     },
 }
 
-impl Default for MultiRaftEvent {
-    fn default() -> Self {
-        Self::None
+#[derive(Clone)]
+pub struct EventReceiver {
+    rx: flume::Receiver<Event>,
+}
+
+impl EventReceiver {
+    /// Wait for an incoming value from the channel associated with this receiver, returning an
+    /// error if all senders have been dropped or the deadline has passed.
+    #[inline]
+    pub async fn recv(&self) -> Result<Event, Error> {
+        self.rx.recv_async().await.map_err(|_| {
+            Error::Channel(super::error::ChannelError::SenderClosed(
+                "channel of event sender is closed".to_owned(),
+            ))
+        })
+    }
+}
+
+pub struct EventChannel {
+    tx: flume::Sender<Event>,
+    rx: flume::Receiver<Event>,
+    cap: usize,
+    events: Vec<Event>,
+}
+
+impl Clone for EventChannel {
+    fn clone(&self) -> Self {
+        Self {
+            cap: self.cap,
+            events: vec![],
+            // tx: self.tx.clone(),
+            tx: self.tx.clone(),
+            rx: self.rx.clone(),
+        }
+    }
+}
+
+impl EventChannel {
+    pub fn new(cap: usize) -> Self {
+        let (tx2, rx2) = flume::bounded(cap);
+        Self {
+            cap,
+            events: Vec::with_capacity(cap),
+            tx: tx2,
+            rx: rx2,
+        }
+    }
+
+    pub fn push(&mut self, event: Event) {
+        self.events.push(event);
+    }
+
+    #[inline]
+    pub fn subscribe(&self) -> EventReceiver {
+        EventReceiver {
+            rx: self.rx.clone(),
+        }
+    }
+
+    pub fn flush(&mut self) {
+        if self.events.is_empty() {
+            return;
+        }
+
+        let events = self.events.drain(..).collect::<Vec<_>>();
+        let tx = self.tx.clone();
+        let _ = tokio::spawn(async move {
+            for event in events {
+                match tx.send_async(event).await {
+                    Ok(_) => {}
+                    Err(_) => {}
+                }
+            }
+        });
     }
 }

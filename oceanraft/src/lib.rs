@@ -8,5 +8,6 @@ pub mod util;
 // pub use multiraft::MultiRaftMessageSender;
 pub mod prelude {
     pub use raft_proto::prelude::*;
+    pub use raft_proto::ConfChangeI;
     pub use crate::multiraft::{MultiRaft};
 }

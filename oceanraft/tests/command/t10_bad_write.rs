@@ -24,7 +24,7 @@ async fn test_no_leader() {
     // }
 
     let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let mut plan = MakeGroupPlan {
         group_id: 1,
@@ -71,7 +71,7 @@ async fn test_bad_group() {
     let task_group = TaskGroup::new();
 
     let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let mut plan = MakeGroupPlan {
         group_id: 1,

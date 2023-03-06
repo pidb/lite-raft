@@ -1,4 +1,3 @@
-use raft::StorageError;
 use raft_proto::prelude::ConfState;
 use raft_proto::prelude::RaftGroupDesc;
 use raft_proto::prelude::ReplicaDesc;

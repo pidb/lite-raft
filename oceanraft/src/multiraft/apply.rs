@@ -1,17 +1,15 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use std::sync::Mutex;
 
-use raft_proto::prelude::Entry;
 use raft_proto::prelude::EntryType;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
+use tokio::task::JoinError;
 use tokio::task::JoinHandle;
+use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
@@ -19,121 +17,63 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::config::Config;
-use crate::multiraft::ApplyEvent;
+use crate::multiraft::error::Error;
+use crate::multiraft::error::WriteError;
+use crate::multiraft::proposal::Proposal;
+use crate::multiraft::response::AppWriteResponse;
+use crate::multiraft::Apply;
+use crate::multiraft::ApplyMembership;
 use crate::multiraft::ApplyNoOp;
 use crate::multiraft::ApplyNormal;
+use crate::multiraft::StateMachine;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
-use super::error::Error;
-use super::error::WriteError;
-use super::event::CommitEvent;
-use super::proposal::Proposal;
-use super::raft_group::RaftGroupApplyState;
-use super::response::AppWriteResponse;
-use super::ApplyMembership;
-use super::StateMachine;
+use super::group::RaftGroupApplyState;
+use super::msg::ApplyCommitMessage;
+use super::msg::ApplyData;
+use super::msg::ApplyMessage;
+use super::msg::ApplyResultMessage;
 
-/// State is used to safely shard the state
-/// of an actor between threads.
+#[allow(unused)]
+pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
-#[derive(Default)]
-struct State {
-    stopped: AtomicBool,
+pub struct ApplyActor {
+    join: Option<JoinHandle<()>>,
 }
 
-pub struct ApplyActor<RSM, RES>
-where
-    RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
-{
-    // cfg: Config,
-    state: Arc<State>,
-    runtime: Mutex<Option<ApplyActorRuntime<RSM, RES>>>,
-    join: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl<RSM, RES> ApplyActor<RSM, RES>
-where
-    RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
-{
-    pub fn new(
+impl ApplyActor {
+    pub(crate) fn spawn<RES, RSM>(
         cfg: &Config,
         rsm: RSM,
-        request_rx: UnboundedReceiver<(Span, Request<RES>)>,
-        response_tx: UnboundedSender<Response>,
-        commit_tx: UnboundedSender<CommitEvent>,
-    ) -> Self {
-        let state = Arc::new(State::default());
-        let runtime = ApplyActorRuntime::new(cfg, &state, rsm, request_rx, response_tx, commit_tx);
-
-        Self {
-            state,
-            runtime: Mutex::new(Some(runtime)),
-            join: Mutex::default(),
-        }
-    }
-
-    pub fn start(&self, task_group: &TaskGroup) {
-        let runtime = {
-            let mut wl = self.runtime.lock().unwrap();
-            wl.take().unwrap()
-        };
-
+        request_rx: UnboundedReceiver<(Span, ApplyMessage<RES>)>,
+        response_tx: UnboundedSender<ApplyResultMessage>,
+        commit_tx: UnboundedSender<ApplyCommitMessage>,
+        task_group: &TaskGroup,
+    ) -> Self
+    where
+        RES: AppWriteResponse,
+        RSM: StateMachine<RES>,
+    {
+        let worker = ApplyWorker::new(cfg, rsm, request_rx, response_tx, commit_tx);
         let stopper = task_group.stopper();
         let jh = task_group.spawn(async move {
-            runtime.main_loop(stopper).await;
+            worker.main_loop(stopper).await;
         });
 
-        *self.join.lock().unwrap() = Some(jh);
+        Self { join: Some(jh) }
     }
-}
 
-const MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
-
-#[derive(Debug)]
-pub struct Apply<RES>
-where
-    RES: AppWriteResponse,
-{
-    pub replica_id: u64,
-    pub group_id: u64,
-    pub term: u64,
-    pub commit_index: u64,
-    pub commit_term: u64,
-    pub entries: Vec<Entry>,
-    pub entries_size: usize,
-    pub proposals: Vec<Proposal<RES>>,
-}
-
-impl<RES> Apply<RES>
-where
-    RES: AppWriteResponse,
-{
-    fn try_batch(&mut self, that: &mut Apply<RES>, max_batch_size: usize) -> bool {
-        assert_eq!(self.replica_id, that.replica_id);
-        assert_eq!(self.group_id, that.group_id);
-        assert!(that.term >= self.term);
-        assert!(that.commit_index >= self.commit_index);
-        assert!(that.commit_term >= self.commit_term);
-        if max_batch_size == 0 || self.entries_size + that.entries_size > max_batch_size {
-            return false;
+    pub async fn join(&mut self) -> Result<(), JoinError> {
+        if let Some(jh) = self.join.take() {
+            return jh.await;
         }
-        self.term = that.term;
-        self.commit_index = that.commit_index;
-        self.commit_term = that.commit_term;
-        self.entries.append(&mut that.entries);
-        self.entries_size += that.entries_size;
-        self.proposals.append(&mut that.proposals);
-        return true;
+
+        Ok(())
     }
 }
 
-#[derive(Debug)]
-pub struct ApplyResult {}
-
-pub struct ApplyActorRuntime<RSM, RES>
+pub struct ApplyWorker<RSM, RES>
 where
     RSM: StateMachine<RES>,
     RES: AppWriteResponse,
@@ -141,62 +81,44 @@ where
     multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
     node_id: u64,
     cfg: Config,
-    state: Arc<State>,
-    rx: UnboundedReceiver<(tracing::span::Span, Request<RES>)>,
-    tx: UnboundedSender<Response>,
-    pending_applys: HashMap<u64, Vec<Apply<RES>>>,
+    rx: UnboundedReceiver<(tracing::span::Span, ApplyMessage<RES>)>,
+    tx: UnboundedSender<ApplyResultMessage>,
+    pending_applys: HashMap<u64, Vec<ApplyData<RES>>>,
     ctx: ApplyContext<RSM, RES>,
     delegate: ApplyDelegate<RSM, RES>,
-    batch_apply: bool,
-    batch_size: usize,
 }
 
-pub enum Request<RES: AppWriteResponse> {
-    Apply { applys: HashMap<u64, Apply<RES>> },
-}
-
-#[derive(Debug)]
-pub struct Response {
-    pub group_id: u64,
-    pub apply_state: RaftGroupApplyState,
-}
-
-impl<RSM, RES> ApplyActorRuntime<RSM, RES>
+impl<RSM, RES> ApplyWorker<RSM, RES>
 where
     RSM: StateMachine<RES>,
     RES: AppWriteResponse,
 {
     fn new(
         cfg: &Config,
-        state: &Arc<State>,
         rsm: RSM,
-        request_rx: UnboundedReceiver<(Span, Request<RES>)>,
-        response_tx: UnboundedSender<Response>,
-        commit_tx: UnboundedSender<CommitEvent>,
+        request_rx: UnboundedReceiver<(Span, ApplyMessage<RES>)>,
+        response_tx: UnboundedSender<ApplyResultMessage>,
+        commit_tx: UnboundedSender<ApplyCommitMessage>,
     ) -> Self {
         Self {
-            state: state.clone(),
             multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
             node_id: cfg.node_id,
             cfg: cfg.clone(),
             // ctx: ctx.clone(),
             rx: request_rx,
             tx: response_tx,
+            pending_applys: HashMap::new(),
+            delegate: ApplyDelegate::new(cfg.node_id),
             ctx: ApplyContext {
                 rsm,
                 commit_tx,
                 _m: PhantomData,
             },
-            batch_apply: cfg.batch_apply,
-            batch_size: cfg.batch_size, // TODO: per-group
-            // task_group: task_group.clone(),
-            pending_applys: HashMap::new(),
-            delegate: ApplyDelegate::new(cfg.node_id),
         }
     }
 
     #[inline]
-    fn insert_pending_apply(&mut self, group_id: u64, apply: Apply<RES>) {
+    fn insert_pending_apply(&mut self, group_id: u64, apply: ApplyData<RES>) {
         match self.pending_applys.get_mut(&group_id) {
             Some(applys) => applys.push(apply),
             None => {
@@ -210,14 +132,14 @@ where
     // otherwise pending in FIFO order.
     //
     // Note: This method provides scalability for us to make more flexible apply decisions in the future.
-    fn batch_requests(&mut self, requests: Vec<Request<RES>>) {
+    fn batch_requests(&mut self, requests: Vec<ApplyMessage<RES>>) {
         // let mut pending_applys: HashMap<u64, Vec<Apply>> = HashMap::new();
-        let mut batch_applys: HashMap<u64, Option<Apply<RES>>> = HashMap::new();
+        let mut batch_applys: HashMap<u64, Option<ApplyData<RES>>> = HashMap::new();
 
         // let mut batcher = Batcher::new(self.cfg.batch_apply, self.cfg.batch_size);
         for request in requests {
             match request {
-                Request::Apply { applys } => {
+                ApplyMessage::Apply { applys } => {
                     for (group_id, mut apply) in applys.into_iter() {
                         if !self.cfg.batch_apply {
                             self.insert_pending_apply(group_id, apply);
@@ -268,7 +190,13 @@ where
                 .await
                 .unwrap();
             // TODO: batch send?
-            self.tx.send(response).unwrap();
+            // FIXME: handle error
+            if let Err(_) = self.tx.send(response) {
+                error!(
+                    "node {}: send response failed, the node actor dropped",
+                    self.node_id
+                );
+            }
             // futs.push(tokio::spawn(async move {
             //     // TODO: new delegate
             //     // let mut response = Response {
@@ -328,14 +256,9 @@ where
                     self.batch_requests(requests);
                     self.delegate_handle_applys().await;
                 },
-                // Ok(_) = self.multiraft_event_rx.changed() =>  {
-                //     debug!("multiraft_event_rx changed");
-                //     self.handle_multiraft_event();
-                // }
             }
         }
 
-        // info!("node ({}) apply actor stop", self.node_id);
         self.do_stop();
     }
 
@@ -419,6 +342,16 @@ where
     pub fn take_conf_change(&mut self) -> Option<PendingSender<RES>> {
         self.conf_change.take()
     }
+
+    pub fn remove_stales(&mut self, index: u64, term: u64) {
+        while let Some(p) = self.pop_normal(index, term) {
+            p.tx.map(|tx| {
+                tx.send(Err(Error::Write(WriteError::Stale(
+                    p.term, 0, /*FIXME: with term */
+                ))))
+            });
+        }
+    }
 }
 
 struct ApplyContext<RSM, RES>
@@ -427,7 +360,7 @@ where
     RSM: StateMachine<RES>,
 {
     rsm: RSM,
-    commit_tx: UnboundedSender<CommitEvent>,
+    commit_tx: UnboundedSender<ApplyCommitMessage>,
     _m: PhantomData<RES>,
 }
 
@@ -463,7 +396,12 @@ where
             // becomes leader again with the stale pending conf change, will enter
             // this block, so we notify leadership may have been changed.
             // TODO: notify stale command
-            unimplemented!()
+            sender.tx.map(|tx| {
+                tx.send(Err(Error::Write(WriteError::Stale(
+                    sender.term,
+                    0, /*FIXME: with term */
+                ))))
+            });
         }
 
         self.pending_senders.set_conf_change(sender);
@@ -528,7 +466,7 @@ where
     async fn handle_apply(
         &mut self,
         ctx: &mut ApplyContext<RSM, RES>,
-        mut apply: Apply<RES>,
+        mut apply: ApplyData<RES>,
         apply_state: &mut RaftGroupApplyState,
     ) {
         let group_id = apply.group_id;
@@ -576,8 +514,8 @@ where
                             "node {}: group = {} skip no-op entry index = {}, term = {}",
                             self.node_id, group_id, entry_index, entry_term
                         );
-                        self.response_stale_proposals(entry_index, entry_term);
-                        ApplyEvent::NoOp(ApplyNoOp {
+                        self.pending_senders.remove_stales(entry_index, entry_term);
+                        Apply::NoOp(ApplyNoOp {
                             group_id: group_id,
                             entry_index,
                             entry_term,
@@ -592,7 +530,7 @@ where
                             .find_pending(entry.term, entry.index, false)
                             .map_or(None, |p| p.tx);
 
-                        ApplyEvent::Normal(ApplyNormal {
+                        Apply::Normal(ApplyNormal {
                             group_id,
                             is_conf_change: false,
                             entry,
@@ -606,7 +544,7 @@ where
                         .find_pending(entry.term, entry.index, true)
                         .map_or(None, |p| p.tx);
 
-                    ApplyEvent::Membership(ApplyMembership {
+                    Apply::Membership(ApplyMembership {
                         group_id,
                         entry,
                         tx,
@@ -645,34 +583,18 @@ where
     async fn handle_applys(
         &mut self,
         group_id: u64,
-        applys: Vec<Apply<RES>>,
+        applys: Vec<ApplyData<RES>>,
         apply_state: &mut RaftGroupApplyState,
         ctx: &mut ApplyContext<RSM, RES>,
-    ) -> Result<Response, Error> {
-        // let mut results = vec![];
+    ) -> Result<ApplyResultMessage, Error> {
         for apply in applys {
             self.handle_apply(ctx, apply, apply_state).await;
         }
 
-        Ok(Response {
+        Ok(ApplyResultMessage {
             group_id,
             apply_state: apply_state.clone(),
         })
-    }
-
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "ApplyActorRuntime::response_stale_proposals",
-    //     skip_all
-    // )]
-    fn response_stale_proposals(&mut self, index: u64, term: u64) {
-        while let Some(p) = self.pending_senders.pop_normal(index, term) {
-            p.tx.map(|tx| {
-                tx.send(Err(Error::Write(WriteError::Stale(
-                    p.term, 0, /*FIXME: with term */
-                ))))
-            });
-        }
     }
 }
 
@@ -718,10 +640,8 @@ where
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
     use futures::Future;
+    use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::multiraft::util::compute_entry_size;
@@ -730,20 +650,19 @@ mod test {
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
 
-    use super::Apply;
-    use super::ApplyActorRuntime;
-    use super::Request;
-    use super::State;
+    use super::ApplyData;
+    use super::ApplyMessage;
+    use super::ApplyWorker;
 
     struct NoOpStateMachine {}
 
     impl StateMachine<()> for NoOpStateMachine {
-        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::ApplyEvent<()>>>> + 'life0
+        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::Apply<()>>>> + 'life0
         where
             Self: 'life0;
         fn apply(
             &mut self,
-            _: std::vec::IntoIter<crate::multiraft::ApplyEvent<()>>,
+            _: std::vec::IntoIter<crate::multiraft::Apply<()>>,
         ) -> Self::ApplyFuture<'_> {
             async move { None }
         }
@@ -772,9 +691,9 @@ mod test {
         ent_start: u64,
         ent_end: u64,
         entry_size: usize,
-    ) -> Apply<()> {
+    ) -> ApplyData<()> {
         let entries = new_entries(ent_start, ent_end, term, entry_size);
-        Apply {
+        ApplyData {
             group_id,
             replica_id,
             term,
@@ -786,11 +705,10 @@ mod test {
         }
     }
 
-    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyActorRuntime<NoOpStateMachine, ()> {
+    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyWorker<NoOpStateMachine, ()> {
         let (_request_tx, request_rx) = unbounded_channel();
         let (response_tx, _response_rx) = unbounded_channel();
         let (callback_tx, _callback_rx) = unbounded_channel();
-        let state = Arc::new(State::default());
         let cfg = Config {
             batch_apply,
             batch_size,
@@ -798,7 +716,7 @@ mod test {
         };
 
         let rsm = NoOpStateMachine {};
-        ApplyActorRuntime::new(&cfg, &state, rsm, request_rx, response_tx, callback_tx)
+        ApplyWorker::new(&cfg, rsm, request_rx, response_tx, callback_tx)
     }
     #[test]
     fn test_batch_pendings() {
@@ -815,7 +733,7 @@ mod test {
                 //  3, [[3,3,3]]
                 //  4, [4, [4,4]]
                 //  5, [5, [5,5]]
-                Request::Apply {
+                ApplyMessage::Apply {
                     applys: HashMap::from([
                         (1, new_apply(1, 1, 1, 1, 3, 50)), // [1 * 50, 2 * 50]
                         (2, new_apply(2, 1, 1, 1, 3, 50)), // [1 * 50, 2 * 50]
@@ -824,7 +742,7 @@ mod test {
                         (5, new_apply(5, 1, 1, 1, 2, 400)),
                     ]),
                 },
-                Request::Apply {
+                ApplyMessage::Apply {
                     applys: HashMap::from([
                         (1, new_apply(1, 1, 1, 3, 5, 50)), // [3 * 50, 4 * 50]
                         (2, new_apply(2, 1, 1, 3, 5, 50)), // [3 * 50, 4 * 50]
@@ -833,7 +751,7 @@ mod test {
                         (5, new_apply(5, 1, 1, 2, 4, 100)),
                     ]),
                 },
-                Request::Apply {
+                ApplyMessage::Apply {
                     applys: HashMap::from([
                         (1, new_apply(1, 1, 1, 5, 8, 50)), // [5 * 50, 6 * 50, 7 * 50]
                         (2, new_apply(2, 1, 1, 5, 8, 50)), // [5 * 50, 6 * 50, 7 * 50]

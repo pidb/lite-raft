@@ -135,7 +135,7 @@ async fn send_message<TR, RS, MRS>(
         msg.to
     );
     if !node_mgr.contains_node(&to_replica.node_id) {
-        node_mgr.add_node(to_replica.node_id, group_id);
+        node_mgr.add_group(to_replica.node_id, group_id);
     }
 
     let msg = MultiRaftMessage {
