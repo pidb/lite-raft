@@ -6,14 +6,14 @@ use prost::Message;
 use raft::ReadState;
 use tokio::sync::oneshot;
 use tracing::debug;
+use tracing::error;
 use uuid::Uuid;
+
+use crate::prelude::ReadIndexContext;
 
 use super::error::Error;
 use super::error::WriteError;
 use super::response::AppWriteResponse;
-use tracing::error;
-
-use raft_proto::prelude::ReadIndexContext;
 
 pub struct ReadIndexProposal {
     pub uuid: Uuid,

@@ -7,7 +7,6 @@ use std::time::Duration;
 use raft::prelude::RaftGroupManagement;
 use raft::prelude::RaftGroupManagementType;
 use raft::Storage;
-
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::Receiver;
@@ -15,19 +14,6 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-use tokio::task::JoinError;
-use tokio::task::JoinHandle;
-
-use raft_proto::prelude::AppReadIndexRequest;
-use raft_proto::prelude::ConfChangeType;
-use raft_proto::prelude::MembershipChangeRequest;
-use raft_proto::prelude::Message;
-use raft_proto::prelude::MessageType;
-use raft_proto::prelude::MultiRaftMessage;
-use raft_proto::prelude::MultiRaftMessageResponse;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::SingleMembershipChange;
-
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -36,26 +22,23 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::multiraft::error::RaftGroupError;
-use crate::multiraft::proposal::ReadIndexQueue;
+use crate::prelude::AppReadIndexRequest;
+use crate::prelude::ConfChangeType;
+use crate::prelude::MembershipChangeRequest;
+use crate::prelude::Message;
+use crate::prelude::MessageType;
+use crate::prelude::MultiRaftMessage;
+use crate::prelude::MultiRaftMessageResponse;
+use crate::prelude::ReplicaDesc;
+use crate::prelude::SingleMembershipChange;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
-use crate::multiraft::config::Config;
-use crate::multiraft::error::ChannelError;
-use crate::multiraft::error::Error;
-use crate::multiraft::multiraft::NO_GORUP;
-use crate::multiraft::multiraft::NO_NODE;
-// use crate::multiraft::node_manager::NodeManager;
-use crate::multiraft::proposal::ProposalQueue;
-
-use crate::multiraft::replica_cache::ReplicaCache;
-use crate::multiraft::response::AppWriteResponse;
-use crate::multiraft::storage::MultiRaftStorage;
-use crate::multiraft::transport::Transport;
-use crate::multiraft::util::Ticker;
-
 use super::apply::ApplyActor;
+use super::config::Config;
+use super::error::ChannelError;
+use super::error::Error;
+use super::error::RaftGroupError;
 use super::event::Event;
 use super::event::EventChannel;
 use super::group::RaftGroup;
@@ -69,7 +52,16 @@ use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
 use super::msg::WriteMessage;
+use super::multiraft::NO_GORUP;
+use super::multiraft::NO_NODE;
+use super::proposal::ProposalQueue;
+use super::proposal::ReadIndexQueue;
+use super::replica_cache::ReplicaCache;
+use super::response::AppWriteResponse;
 use super::rsm::StateMachine;
+use super::storage::MultiRaftStorage;
+use super::transport::Transport;
+use super::util::Ticker;
 
 pub(crate) type ResponseCallback = Box<dyn FnOnce() -> Result<(), Error> + Send + Sync + 'static>;
 
@@ -224,8 +216,8 @@ pub struct NodeActor<RES: AppWriteResponse> {
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     pub admin_tx: Sender<AdminMessage>,
+    #[allow(unused)]
     apply: ApplyActor,
-    join: Option<JoinHandle<()>>,
 }
 
 impl<RES: AppWriteResponse> NodeActor<RES> {
@@ -284,7 +276,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         );
 
         let stopper = task_group.stopper();
-        let jh = task_group.spawn(async move {
+        task_group.spawn(async move {
             worker.main_loop(stopper, ticker).await;
         });
 
@@ -295,22 +287,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             campaign_tx,
             admin_tx,
             apply,
-            join: Some(jh),
         }
-    }
-
-    #[inline]
-    async fn join(&mut self) -> Result<(), JoinError> {
-        if self.join.is_none() {
-            return Ok(());
-        }
-
-        if let Err(err) = self.apply.join().await {
-            error!("join apply error: {}", err);
-        }
-
-        let jh = { self.join.take().unwrap() };
-        jh.await
     }
 }
 
@@ -1516,7 +1493,9 @@ where
         level = Level::TRACE,
         skip_all
     )]
-    fn do_stop(mut self) {}
+    fn do_stop(self) {
+        info!("node {}: node actor stopped now", self.node_id);
+    }
 }
 
 // fn spawn_handle_response_events(node_id: u64, tx: &Sender<Vec<Event>>, events: Vec<Event>) {

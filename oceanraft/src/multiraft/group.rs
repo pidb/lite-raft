@@ -10,15 +10,6 @@ use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
 use raft::Storage;
-use raft_proto::prelude::AppReadIndexRequest;
-use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::ConfChange;
-use raft_proto::prelude::ConfChangeSingle;
-use raft_proto::prelude::ConfChangeV2;
-use raft_proto::prelude::ConfState;
-use raft_proto::prelude::ReadIndexContext;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::Snapshot;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
@@ -28,31 +19,36 @@ use tracing::warn;
 use tracing::Level;
 use uuid::Uuid;
 
-// use crate::multiraft::actor::apply::ApplyData;
+use crate::prelude::AppReadIndexRequest;
+use crate::prelude::AppWriteRequest;
+use crate::prelude::ConfChange;
+use crate::prelude::ConfChangeSingle;
+use crate::prelude::ConfChangeV2;
+use crate::prelude::ConfState;
+use crate::prelude::ReadIndexContext;
+use crate::prelude::ReplicaDesc;
+use crate::prelude::Snapshot;
 
-use crate::multiraft::error::Error;
-use crate::multiraft::error::WriteError;
-use crate::multiraft::error::RaftGroupError;
-use crate::multiraft::event::LeaderElectionEvent;
-use crate::multiraft::multiraft::NO_NODE;
-
+use super::error::Error;
+use super::error::RaftGroupError;
+use super::error::WriteError;
 use super::event::EventChannel;
-use super::node::ResponseCallback;
-
-use crate::multiraft::proposal::Proposal;
-use crate::multiraft::proposal::ProposalQueue;
-use crate::multiraft::proposal::ReadIndexProposal;
-use crate::multiraft::proposal::ReadIndexQueue;
-use crate::multiraft::replica_cache::ReplicaCache;
-use crate::multiraft::response::AppWriteResponse;
-use crate::multiraft::storage::MultiRaftStorage;
-use crate::multiraft::transport;
-use crate::multiraft::util;
-use crate::multiraft::Event;
-
-use super::node::NodeManager;
+use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
+use super::multiraft::NO_NODE;
+use super::node::NodeManager;
+use super::node::ResponseCallback;
 use super::node::ResponseCallbackQueue;
+use super::proposal::Proposal;
+use super::proposal::ProposalQueue;
+use super::proposal::ReadIndexProposal;
+use super::proposal::ReadIndexQueue;
+use super::replica_cache::ReplicaCache;
+use super::response::AppWriteResponse;
+use super::storage::MultiRaftStorage;
+use super::transport;
+use super::util;
+use super::Event;
 
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct RaftGroupApplyState {
@@ -610,7 +606,10 @@ where
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(request.context, request.data) {
-            return Some(ResponseCallbackQueue::new_error_callback(tx, Error::Raft(err)));
+            return Some(ResponseCallbackQueue::new_error_callback(
+                tx,
+                Error::Raft(err),
+            ));
         }
 
         let index = self.last_index() + 1;
@@ -720,7 +719,10 @@ where
                 "node {}: propose membership change error: error = {}",
                 0, /* TODO: add it*/ err
             );
-            return Some(ResponseCallbackQueue::new_error_callback(tx, Error::Raft(err)));
+            return Some(ResponseCallbackQueue::new_error_callback(
+                tx,
+                Error::Raft(err),
+            ));
         }
 
         let index = self.last_index() + 1;

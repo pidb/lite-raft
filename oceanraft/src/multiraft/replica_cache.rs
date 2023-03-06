@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use raft::Storage;
-use raft_proto::prelude::RaftGroupDesc;
-use raft_proto::prelude::ReplicaDesc;
+
+use crate::prelude::RaftGroupDesc;
+use crate::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::storage::MultiRaftStorage;

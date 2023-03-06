@@ -1,22 +1,19 @@
 use std::time::Duration;
 
+use futures::Future;
+use raft::Storage;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-
-use futures::Future;
-
-use raft::Storage;
 use tokio::time::timeout;
 
+use crate::prelude::AppReadIndexRequest;
+use crate::prelude::AppWriteRequest;
+use crate::prelude::MembershipChangeRequest;
+use crate::prelude::MultiRaftMessage;
+use crate::prelude::MultiRaftMessageResponse;
+use crate::prelude::RaftGroupManagement;
 use crate::util::TaskGroup;
-
-use raft_proto::prelude::AppReadIndexRequest;
-use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::MembershipChangeRequest;
-use raft_proto::prelude::MultiRaftMessage;
-use raft_proto::prelude::MultiRaftMessageResponse;
-use raft_proto::prelude::RaftGroupManagement;
 
 use super::config::Config;
 use super::error::ChannelError;
@@ -119,27 +116,6 @@ where
         TK: Ticker,
     {
         config.validate()?;
-        // let (callback_event_tx, callback_event_rx) = channel(1);
-
-        // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
-        //     config.clone(),
-        //     event_tx.clone(),
-        //     callback_event_tx,
-        //     task_group.clone(),
-        // );
-
-        // let multiraft_actor = MultiRaftActor::<T, RS, MRS>::new(
-        //     &config,
-        //     transport,
-        //     storage,
-        //     event_tx.clone(),
-        //     callback_event_rx,
-        //     apply_actor_tx.clone(),
-        //     apply_actor_rx,
-        //     task_group.clone(),
-        // );
-
-        // TODO: provide capactiy
         let event_bcast = EventChannel::new(config.event_capacity);
         let actor = NodeActor::spawn(
             &config,
@@ -152,36 +128,12 @@ where
             ticker,
         );
 
-        // let actor = MultiRaftActor::<TR, RS, MRS, RSM, RES>::new(
-        //     &config, &transport, &storage, rsm, &event_tx,
-        // );
-
         Ok(Self {
-            // cfg: config,
-            // transport,
-            // storage,
             event_bcast,
             actor,
             task_group,
         })
     }
-
-    // pub fn start<T>(&self, ticker: Option<T>)
-    // where
-    //     T: Ticker,
-    // {
-    //     // let (callback_event_tx, callback_event_rx) = channel(1);
-
-    //     // let (apply_actor, apply_actor_tx, apply_actor_rx) = apply_actor::spawn(
-    //     //     config.clone(),
-    //     //     event_tx.clone(),
-    //     //     callback_event_tx,
-    //     //     task_group.clone(),
-    //     // );
-
-    //     self.actor.start(&self.task_group, ticker);
-    //     // TODO: start apply and multiraft actor
-    // }
 
     pub async fn write_timeout(
         &self,
@@ -426,5 +378,10 @@ where
     /// Note: The Receiver **does not** turn this channel into a broadcast channel.
     pub fn subscribe(&self) -> EventReceiver {
         self.event_bcast.subscribe()
+    }
+
+    pub async fn stop(&self) {
+        self.task_group.stop();
+        self.task_group.joinner().await;
     }
 }

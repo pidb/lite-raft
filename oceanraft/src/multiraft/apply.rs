@@ -2,13 +2,10 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 
-use raft_proto::prelude::EntryType;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-use tokio::task::JoinError;
-use tokio::task::JoinHandle;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
@@ -16,31 +13,30 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::multiraft::config::Config;
-use crate::multiraft::error::Error;
-use crate::multiraft::error::WriteError;
-use crate::multiraft::proposal::Proposal;
-use crate::multiraft::response::AppWriteResponse;
-use crate::multiraft::Apply;
-use crate::multiraft::ApplyMembership;
-use crate::multiraft::ApplyNoOp;
-use crate::multiraft::ApplyNormal;
-use crate::multiraft::StateMachine;
+use crate::prelude::EntryType;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
+use super::config::Config;
+use super::error::Error;
+use super::error::WriteError;
 use super::group::RaftGroupApplyState;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
+use super::proposal::Proposal;
+use super::response::AppWriteResponse;
+use super::Apply;
+use super::ApplyMembership;
+use super::ApplyNoOp;
+use super::ApplyNormal;
+use super::StateMachine;
 
 #[allow(unused)]
 pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
-pub struct ApplyActor {
-    join: Option<JoinHandle<()>>,
-}
+pub struct ApplyActor {}
 
 impl ApplyActor {
     pub(crate) fn spawn<RES, RSM>(
@@ -57,19 +53,11 @@ impl ApplyActor {
     {
         let worker = ApplyWorker::new(cfg, rsm, request_rx, response_tx, commit_tx);
         let stopper = task_group.stopper();
-        let jh = task_group.spawn(async move {
+        task_group.spawn(async move {
             worker.main_loop(stopper).await;
         });
 
-        Self { join: Some(jh) }
-    }
-
-    pub async fn join(&mut self) -> Result<(), JoinError> {
-        if let Some(jh) = self.join.take() {
-            return jh.await;
-        }
-
-        Ok(())
+        Self {}
     }
 }
 
@@ -226,6 +214,7 @@ where
         loop {
             tokio::select! {
                 _ = &mut stopper => {
+                    self.do_stop();
                     break
                 },
                 // TODO: handle error
@@ -258,8 +247,6 @@ where
                 },
             }
         }
-
-        self.do_stop();
     }
 
     #[tracing::instrument(
@@ -267,7 +254,9 @@ where
         name = "ApplyActorRuntime::do_stop", 
         skip_all
     )]
-    fn do_stop(mut self) {}
+    fn do_stop(self) {
+        info!("node {}: apply actor stopped now", self.node_id);
+    }
 }
 
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;

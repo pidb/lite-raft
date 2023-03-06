@@ -1,8 +1,5 @@
 use std::time::Duration;
 
-use tokio::time::timeout_at;
-use tokio::time::Instant;
-
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_group;
 use crate::fixtures::FixtureCluster;
@@ -16,14 +13,8 @@ use crate::fixtures::WriteChecker;
     tracing_span = "debug"
 )]
 async fn test_group_stale_write() {
-    // defer! {
-    //     task_group.stop();
-    //     // FIXME: use sync wait
-    //     // task_group.joinner().awa`it;
-    // }
-
     let node_nums = 3;
-    let (_task_group, mut cluster) = quickstart_group(node_nums).await;
+    let (_, mut cluster) = quickstart_group(node_nums).await;
 
     let group_id = 1;
 
@@ -98,4 +89,5 @@ async fn test_group_stale_write() {
         // TODO: assertiong response type
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
+    cluster.stop().await;
 }

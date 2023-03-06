@@ -406,6 +406,12 @@ impl FixtureCluster {
             tokio::time::sleep(delay).await
         }
     }
+
+    pub async fn stop(&mut self) {
+        for node in std::mem::take(&mut self.nodes).into_iter() {
+            node. stop().await
+        }
+    }
 }
 
 /// Multiple consensus groups are quickly started. Node and consensus group ids start from 1.

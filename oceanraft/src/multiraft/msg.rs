@@ -79,6 +79,7 @@ pub struct ApplyResultMessage {
 /// requests, otherwise changes contains only one request.
 #[derive(Debug)]
 pub(crate) struct CommitMembership {
+    #[allow(unused)]
     pub(crate) entry_index: u64,
     pub(crate) conf_change: ConfChangeV2,
     pub(crate) change_request: MembershipChangeRequest,
