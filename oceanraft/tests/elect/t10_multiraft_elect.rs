@@ -33,7 +33,7 @@ async fn test_initial_leader_elect() {
     for i in 0..3 {
         let task_group = TaskGroup::new();
         let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-        cluster.start();
+        // cluster.start();
         let mut plan = MakeGroupPlan {
             group_id: 1,
             first_node_id: 1,

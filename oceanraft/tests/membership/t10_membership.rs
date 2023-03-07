@@ -35,7 +35,7 @@ async fn check_cc<F>(
             .as_str(),
         );
     check(&event);
-    event.done().await;
+    event.done().await.unwrap();
     // TODO: as method called
     println!("event tx is none? = {}", event.tx.is_none());
     event.tx.map(|tx| tx.send(Ok(())));
@@ -55,7 +55,7 @@ async fn test_single_step() {
     // }
 
     let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let group_id = 1;
     let node_id = 1;
@@ -153,7 +153,7 @@ async fn test_joint_consensus() {
     // }
 
     let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let group_id = 1;
     let node_id = 1;
@@ -234,7 +234,7 @@ async fn test_joint_consensus() {
 async fn test_remove() {
     let task_group = TaskGroup::new();
     let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let group_id = 1;
     let node_id = 1;

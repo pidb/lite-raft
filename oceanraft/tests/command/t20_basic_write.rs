@@ -14,7 +14,7 @@ use crate::fixtures::WriteChecker;
 async fn test_group_write() {
     let node_nums = 3;
     let command_nums = 10;
-    let (_task_group, mut cluster) = quickstart_group(node_nums).await;
+    let (_, mut cluster) = quickstart_group(node_nums).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
@@ -55,16 +55,7 @@ async fn test_group_write() {
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
 
-    // FIXME
-    // _task_group.stop();
-    // if let Err(_) = timeout_at(
-    //     Instant::now() + Duration::from_millis(100000),
-    //     _task_group.joinner(),
-    // )
-    // .await
-    // {
-    //     panic!("wait cluster taks stop error")
-    // }
+    cluster.stop().await;
 }
 
 #[async_entry::test(
@@ -76,7 +67,7 @@ async fn test_multigroup_write() {
     let group_nums = 3;
     let node_nums = 3;
     let command_nums = 10;
-    let (_task_group, mut cluster) = quickstart_multi_groups(node_nums, group_nums).await;
+    let (_, mut cluster) = quickstart_multi_groups(node_nums, group_nums).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
@@ -94,11 +85,6 @@ async fn test_multigroup_write() {
             cluster.tickers[0].non_blocking_tick();
         }
     }
-
-    // for _ in 0..1000 {
-    //     cluster.tickers[0].non_blocking_tick();
-    //     // tokio::time::sleep(Duration::from_millis(1)).await;
-    // }
 
     let events = FixtureCluster::wait_for_command_apply(
         cluster.mut_apply_event_rx(1),
@@ -119,14 +105,5 @@ async fn test_multigroup_write() {
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
 
-    // FIXME
-    // _task_group.stop();
-    // if let Err(_) = timeout_at(
-    //     Instant::now() + Duration::from_millis(100000),
-    //     _task_group.joinner(),
-    // )
-    // .await
-    // {
-    //     panic!("wait cluster taks stop error")
-    // }
+    cluster.stop().await;
 }

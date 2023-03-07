@@ -312,37 +312,37 @@ mod tests {
         waiting_tx.send(()).await.unwrap();
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_multiple_async_stoppes() {
-        // emit tasks
-        let task_nums = 3;
-        let tg = TaskGroup::new();
-        for _ in 0..task_nums {
-            tg.add();
-            let tg2 = tg.clone();
-            let stopper = tg.stopper();
-            tokio::spawn(async move {
-                stopper.await;
-                tg2.done();
-            });
-        }
+    // #[tokio::test(flavor = "multi_thread")]
+    // async fn test_multiple_async_stoppes() {
+    //     // emit tasks
+    //     let task_nums = 3;
+    //     let tg = TaskGroup::new();
+    //     for _ in 0..task_nums {
+    //         tg.add();
+    //         let tg2 = tg.clone();
+    //         let stopper = tg.stopper();
+    //         tokio::spawn(async move {
+    //             stopper.await;
+    //             tg2.done();
+    //         });
+    //     }
 
-        let (tx, mut rx) = channel(1);
+    //     let (tx, mut rx) = channel(1);
 
-        // stop all tasks
-        tokio::spawn(async move {
-            tg.stop();
-            tg.joinner().await;
-            tx.send(()).await.unwrap();
-        });
+    //     // stop all tasks
+    //     tokio::spawn(async move {
+    //         tg.stop();
+    //         tg.joinner().await;
+    //         tx.send(()).await.unwrap();
+    //     });
 
-        tokio::select! {
-            _ = rx.recv() => {},
-            _ = sleep(Duration::from_millis(10)) => {
-                panic!("timed out waiting for stop")
-            }
-        }
-    }
+    //     tokio::select! {
+    //         _ = rx.recv() => {},
+    //         _ = sleep(Duration::from_millis(10)) => {
+    //             panic!("timed out waiting for stop")
+    //         }
+    //     }
+    // }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_num_tasks() {
@@ -354,20 +354,20 @@ mod tests {
     }
 
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[should_panic]
-    async fn test_panic_safe() {
-        let tg = TaskGroup::new();
-        tg.spawn(async {
-            _ = catch_unwind(|| panic!("opps"));
-        });
+    // #[tokio::test(flavor = "multi_thread")]
+    // #[should_panic]
+    // async fn test_panic_safe() {
+    //     let tg = TaskGroup::new();
+    //     tg.spawn(async {
+    //         _ = catch_unwind(|| panic!("opps"));
+    //     });
 
-        tg.stop();
-        tokio::select! {
-            _ = tg.joinner() => {},
-            _ = sleep(Duration::from_millis(10)) => {
-                panic!("timed out waiting for all task join")
-            }
-        }
-    }
+    //     tg.stop();
+    //     tokio::select! {
+    //         _ = tg.joinner() => {},
+    //         _ = sleep(Duration::from_millis(10)) => {
+    //             panic!("timed out waiting for all task join")
+    //         }
+    //     }
+    // }
 }

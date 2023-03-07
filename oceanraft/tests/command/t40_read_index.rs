@@ -24,7 +24,7 @@ struct KVCommand {
 async fn test_group_read_index() {
     let node_nums = 3;
     let command_nums = 10;
-    let (_task_group, mut cluster) = quickstart_group(node_nums).await;
+    let (_, mut cluster) = quickstart_group(node_nums).await;
 
     let mut recvs = vec![];
     let group_id = 1;
@@ -86,6 +86,7 @@ async fn test_group_read_index() {
         };
         assert_eq!(*applied_kvs.get(&kv_cmd.key).unwrap(), kv_cmd);
     }
+    cluster.stop().await;
     // write -> 1 -> 2 -> 3
     // read  -> commit_index = 1
     // ready -> read -> pending

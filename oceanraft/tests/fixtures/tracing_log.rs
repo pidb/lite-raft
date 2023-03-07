@@ -5,10 +5,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::Once;
 
-use tracing::Value;
 
 use lazy_static::lazy_static;
-use opentelemetry::global;
 use tracing::Event;
 use tracing::Subscriber;
 use tracing_appender::non_blocking::WorkerGuard;

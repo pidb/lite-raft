@@ -11,6 +11,10 @@ pub struct Config {
     pub heartbeat_tick: usize,
     pub tick_interval: u64, // ms
 
+    /// Whenever `ReplicaDesc` is cached, if true will be written to disk
+    /// at the same time (fsync).
+    pub replica_sync: bool,
+
     /// Limit the max size of each append message. Smaller value lowers
     /// the raft recovery cost(initial probing and message lost during normal operation).
     /// On the other side, it might affect the throughput during normal replication.
@@ -29,6 +33,9 @@ pub struct Config {
     pub batch_apply: bool,
 
     pub batch_size: usize,
+
+    pub event_capacity: usize,
+
     /// The size of the FIFO queue for write requests, default is `1`.
     ///
     /// > Note: Consensus groups handles write proposals sequentially.
@@ -42,6 +49,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             node_id: 0,
+            event_capacity: 1,
             election_tick: 1,
             heartbeat_tick: 3,
             tick_interval: 10,
@@ -50,6 +58,7 @@ impl Default for Config {
             batch_append: false,
             batch_apply: false,
             batch_size: 0,
+            replica_sync: true,
             write_proposal_queue_size: 1,
         }
     }

@@ -15,16 +15,8 @@ use crate::fixtures::MakeGroupPlan;
     tracing_span = "debug"
 )]
 async fn test_no_leader() {
-    
-    let task_group = TaskGroup::new();
-    // defer! {
-    //     task_group.stop();
-    //     // FIXME: use sync wait
-    //     // task_group.joinner().awa`it;
-    // }
-
-    let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-    cluster.start();
+    let mut cluster = FixtureCluster::make(3, TaskGroup::new()).await;
+    // cluster.start();
 
     let mut plan = MakeGroupPlan {
         group_id: 1,
@@ -56,6 +48,8 @@ async fn test_no_leader() {
             Err(err) => assert_eq!(expected_err, err),
         }
     }
+
+    cluster.stop().await;
 }
 
 //
@@ -71,7 +65,7 @@ async fn test_bad_group() {
     let task_group = TaskGroup::new();
 
     let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     let mut plan = MakeGroupPlan {
         group_id: 1,
@@ -101,4 +95,5 @@ async fn test_bad_group() {
             Err(err) => assert_eq!(expected_err, err),
         }
     }
+    cluster.stop().await;
 }

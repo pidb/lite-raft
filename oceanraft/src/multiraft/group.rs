@@ -10,15 +10,6 @@ use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
 use raft::Storage;
-use raft_proto::prelude::AppReadIndexRequest;
-use raft_proto::prelude::AppWriteRequest;
-use raft_proto::prelude::ConfChange;
-use raft_proto::prelude::ConfChangeSingle;
-use raft_proto::prelude::ConfChangeV2;
-use raft_proto::prelude::ConfState;
-use raft_proto::prelude::ReadIndexContext;
-use raft_proto::prelude::ReplicaDesc;
-use raft_proto::prelude::Snapshot;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
@@ -28,15 +19,26 @@ use tracing::warn;
 use tracing::Level;
 use uuid::Uuid;
 
-use super::apply_actor::Apply;
+use crate::prelude::AppReadIndexRequest;
+use crate::prelude::AppWriteRequest;
+use crate::prelude::ConfChange;
+use crate::prelude::ConfChangeSingle;
+use crate::prelude::ConfChangeV2;
+use crate::prelude::ConfState;
+use crate::prelude::ReadIndexContext;
+use crate::prelude::ReplicaDesc;
+use crate::prelude::Snapshot;
+
 use super::error::Error;
+use super::error::RaftGroupError;
 use super::error::WriteError;
+use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
+use super::msg::ApplyData;
 use super::multiraft::NO_NODE;
-use super::multiraft_actor::new_response_callback;
-use super::multiraft_actor::new_response_error_callback;
-use super::multiraft_actor::ResponseCb;
 use super::node::NodeManager;
+use super::node::ResponseCallback;
+use super::node::ResponseCallbackQueue;
 use super::proposal::Proposal;
 use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexProposal;
@@ -142,9 +144,9 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
-        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
-        pending_events: &mut Vec<Event>,
-        pending_cbs: &mut Vec<ResponseCb>,
+        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
+        event_bcast: &mut EventChannel,
+        // pending_events: &mut Vec<Event>,
     ) {
         debug!(
             "node {}: group = {} is now ready for processing",
@@ -219,12 +221,12 @@ where
         }
 
         if let Some(ss) = rd.ss() {
-            self.handle_soft_state_change(node_id, ss, replica_cache, pending_events)
+            self.handle_soft_state_change(node_id, ss, replica_cache, event_bcast)
                 .await;
         }
 
         if !rd.read_states().is_empty() {
-            self.on_reads_ready(rd.take_read_states(), pending_cbs)
+            self.on_reads_ready(rd.take_read_states())
         }
 
         // make apply task if need to apply commit entries
@@ -261,7 +263,7 @@ where
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
-        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
+        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
     ) {
         debug!(
             "node {}: create apply entries [{}, {}], group = {}, replica = {}",
@@ -288,7 +290,7 @@ where
         }
     }
 
-    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> Apply<RES> {
+    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> ApplyData<RES> {
         let current_term = self.raft_group.raft.term;
         // TODO: min(persistent, committed)
         // let commit_index = self.raft_group.raft.raft_log.committed;
@@ -333,7 +335,7 @@ where
             .iter()
             .map(|ent| util::compute_entry_size(ent))
             .sum::<usize>();
-        let apply = Apply {
+        let apply = ApplyData {
             replica_id,
             group_id: self.group_id,
             term: current_term,
@@ -349,7 +351,7 @@ where
         apply
     }
 
-    fn on_reads_ready(&mut self, rss: Vec<ReadState>, _: &mut Vec<ResponseCb>) {
+    fn on_reads_ready(&mut self, rss: Vec<ReadState>) {
         self.read_index_queue.advance_reads(rss);
         while let Some(p) = self.read_index_queue.pop_front() {
             p.tx.map(|tx| tx.send(Ok(())));
@@ -362,11 +364,12 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        pending_events: &mut Vec<Event>,
+        // pending_events: &mut Vec<Event>,
+        event_bcast: &mut EventChannel,
     ) {
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
             return self
-                .handle_leader_change(node_id, ss, replica_cache, pending_events)
+                .handle_leader_change(node_id, ss, replica_cache, event_bcast)
                 .await;
         }
     }
@@ -382,7 +385,8 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        pending_events: &mut Vec<Event>,
+        // pending_events: &mut Vec<Event>,
+        event_bcast: &mut EventChannel,
     ) {
         let group_id = self.group_id;
         let replica_desc = match replica_cache
@@ -423,7 +427,7 @@ where
         );
         let replica_id = replica_desc.replica_id;
         self.leader = replica_desc; // always set because node_id maybe NO_NODE.
-        pending_events.push(Event::LederElection(LeaderElectionEvent {
+        event_bcast.push(Event::LederElection(LeaderElectionEvent {
             group_id: self.group_id,
             leader_id: ss.leader_id,
             replica_id,
@@ -509,7 +513,7 @@ where
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
         gwr: &mut RaftGroupWriteRequest,
-        multi_groups_apply: &mut HashMap<u64, Apply<RES>>,
+        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
     ) {
         let group_id = self.group_id;
         let replica_id = gwr.replica_id;
@@ -593,21 +597,24 @@ where
         &mut self,
         request: AppWriteRequest,
         tx: oneshot::Sender<Result<RES, Error>>,
-    ) -> Option<ResponseCb> {
+    ) -> Option<ResponseCallback> {
         if let Err(err) = self.pre_propose_write(&request) {
-            return Some(new_response_error_callback(tx, err));
+            return Some(ResponseCallbackQueue::new_error_callback(tx, err));
         }
         let term = self.term();
 
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(request.context, request.data) {
-            return Some(new_response_error_callback(tx, Error::Raft(err)));
+            return Some(ResponseCallbackQueue::new_error_callback(
+                tx,
+                Error::Raft(err),
+            ));
         }
 
         let index = self.last_index() + 1;
         if next_index == index {
-            return Some(new_response_error_callback(
+            return Some(ResponseCallbackQueue::new_error_callback(
                 tx,
                 Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
@@ -628,7 +635,7 @@ where
         &mut self,
         request: AppReadIndexRequest,
         tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Option<ResponseCb> {
+    ) -> Option<ResponseCallback> {
         let uuid = Uuid::new_v4();
         let read_context = match request.context {
             None => ReadIndexContext {
@@ -683,11 +690,11 @@ where
         &mut self,
         req: MembershipChangeRequest,
         tx: oneshot::Sender<Result<RES, Error>>,
-    ) -> Option<ResponseCb> {
+    ) -> Option<ResponseCallback> {
         // TODO: add pre propose check
 
         if let Err(err) = self.pre_propose_membership(&req) {
-            return Some(new_response_error_callback(tx, err));
+            return Some(ResponseCallbackQueue::new_error_callback(tx, err));
         }
 
         let term = self.term();
@@ -712,7 +719,10 @@ where
                 "node {}: propose membership change error: error = {}",
                 0, /* TODO: add it*/ err
             );
-            return Some(new_response_error_callback(tx, Error::Raft(err)));
+            return Some(ResponseCallbackQueue::new_error_callback(
+                tx,
+                Error::Raft(err),
+            ));
         }
 
         let index = self.last_index() + 1;
@@ -724,7 +734,7 @@ where
                 index - 1,
             );
 
-            return Some(new_response_error_callback(
+            return Some(ResponseCallbackQueue::new_error_callback(
                 tx,
                 Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
@@ -745,7 +755,7 @@ where
     pub(crate) fn remove_pending_proposals(&mut self) {
         let proposals = self.proposals.drain(..);
         for proposal in proposals.into_iter() {
-            let err = Err(Error::RaftGroup(super::RaftGroupError::Deleted(
+            let err = Err(Error::RaftGroup(RaftGroupError::Deleted(
                 self.group_id,
                 self.replica_id,
             )));
@@ -798,12 +808,4 @@ fn to_ccv2(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChangeV2) {
     // TODO: consider setting transaction type
     cc.set_changes(sc);
     (req.encode_to_vec(), cc)
-}
-
-#[inline]
-fn create_read_index_context() -> ReadIndexContext {
-    ReadIndexContext {
-        uuid: Uuid::new_v4().to_bytes_le().to_vec(),
-        data: vec![],
-    }
 }

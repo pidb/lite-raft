@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use futures::Future;
 
 use oceanraft::multiraft::ApplyNormal;
 use tokio::sync::mpsc::channel;
@@ -12,10 +11,8 @@ use tokio::time::timeout_at;
 use tokio::time::Instant;
 
 use oceanraft::memstore::MultiRaftMemoryStorage;
-use oceanraft::memstore::RaftMemStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
-use oceanraft::multiraft::storage::RaftStorage;
-use oceanraft::multiraft::ApplyEvent;
+use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::ApplyMembership;
 use oceanraft::multiraft::Config;
 use oceanraft::multiraft::Error;
@@ -23,11 +20,8 @@ use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
 use oceanraft::multiraft::ManualTick;
 use oceanraft::multiraft::MultiRaftMessageSenderImpl;
-use oceanraft::prelude::AdminMessage;
-use oceanraft::prelude::AdminMessageType;
 use oceanraft::prelude::AppWriteRequest;
 use oceanraft::prelude::ConfState;
-use oceanraft::prelude::HardState;
 use oceanraft::prelude::MultiRaft;
 use oceanraft::prelude::RaftGroupManagement;
 use oceanraft::prelude::RaftGroupManagementType;
@@ -41,19 +35,18 @@ use oceanraft::multiraft::transport::LocalTransport;
 
 use super::rsm::FixtureStateMachine;
 
-type FixtureMultiRaft = MultiRaft<
-    LocalTransport<MultiRaftMessageSenderImpl>,
-    RaftMemStorage,
-    MultiRaftMemoryStorage,
-    FixtureStateMachine,
-    (),
->;
+// type FixtureMultiRaft = MultiRaft<
+//     LocalTransport<MultiRaftMessageSenderImpl>,
+//     RaftMemStorage,
+//     MultiRaftMemoryStorage,
+//     FixtureStateMachine,
+//     (),
+// >;
 
 pub struct FixtureCluster {
     pub election_ticks: usize,
-    pub nodes: Vec<Arc<FixtureMultiRaft>>,
-    pub events: Vec<Option<Receiver<Vec<Event>>>>, // FIXME: should hidden this field
-    pub apply_events: Vec<Option<Receiver<Vec<ApplyEvent<()>>>>>,
+    pub nodes: Vec<Arc<MultiRaft<()>>>,
+    pub apply_events: Vec<Option<Receiver<Vec<Apply<()>>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -98,7 +91,6 @@ impl FixtureCluster {
     pub async fn make(n: u64, task_group: TaskGroup) -> FixtureCluster {
         let mut nodes = vec![];
         let mut storages = vec![];
-        let mut events = vec![];
         let mut tickers = vec![];
 
         let mut apply_events = vec![];
@@ -110,6 +102,7 @@ impl FixtureCluster {
                 node_id,
                 batch_append: false,
                 election_tick: 2,
+                event_capacity: 100,
                 heartbeat_tick: 1,
                 max_size_per_msg: 0,
                 max_inflight_msgs: 256,
@@ -117,21 +110,23 @@ impl FixtureCluster {
                 batch_apply: false,
                 batch_size: 0,
                 write_proposal_queue_size: 1000,
+                replica_sync: true,
             };
-
-            let (event_tx, event_rx) = channel(1);
+            let ticker = ManualTick::new();
+            // let (event_tx, event_rx) = channel(1);
 
             let (apply_event_tx, apply_event_rx) = channel(100);
 
             let rsm = FixtureStateMachine::new(apply_event_tx);
             let storage = MultiRaftMemoryStorage::new(config.node_id);
-            let node = FixtureMultiRaft::new(
+            let node = MultiRaft::new(
                 config,
                 transport.clone(),
                 storage.clone(),
                 rsm,
                 task_group.clone(),
-                &event_tx,
+                // &event_tx,
+                Some(ticker.clone()),
             )
             .unwrap();
 
@@ -145,13 +140,13 @@ impl FixtureCluster {
                 .unwrap();
 
             nodes.push(Arc::new(node));
-            events.push(Some(event_rx));
+            // events.push(Some(event_rx));
             apply_events.push(Some(apply_event_rx));
             storages.push(storage);
-            tickers.push(ManualTick::new());
+            tickers.push(ticker.clone());
         }
         Self {
-            events,
+            // events,
             apply_events,
             storages,
             nodes,
@@ -250,25 +245,25 @@ impl FixtureCluster {
     }
 
     /// Start all nodes of the `FixtureCluster`.
-    pub fn start(&self) {
-        for (i, node) in self.nodes.iter().enumerate() {
-            node.start(Some(self.tickers[i].clone()));
-        }
-    }
+    // pub fn start(&self) {
+    //     for (i, node) in self.nodes.iter().enumerate() {
+    //         node.start(Some(self.tickers[i].clone()));
+    //     }
+    // }
 
     /// Get mutable event receiver by given `node_id`.
-    pub fn mut_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Event>> {
-        self.events[to_index(node_id)].as_mut().unwrap()
-    }
+    // pub fn mut_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Event>> {
+    //     self.events[to_index(node_id)].as_mut().unwrap()
+    // }
 
-    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<ApplyEvent<()>>> {
+    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<()>>> {
         self.apply_events[to_index(node_id)].as_mut().unwrap()
     }
 
     /// Remove event rx from cluster events.
-    pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
-        std::mem::take(&mut self.events[index]).unwrap()
-    }
+    // pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
+    //     std::mem::take(&mut self.events[index]).unwrap()
+    // }
 
     /// Gets a `ReplicaDesc` of the consensus group on the node by given `node_id` and `group_id`.
     pub async fn replica_desc(&self, node_id: u64, group_id: u64) -> ReplicaDesc {
@@ -296,20 +291,22 @@ impl FixtureCluster {
         node_id: u64,
         // rx: &mut Option<Receiver<Vec<Event>>>,
     ) -> Result<LeaderElectionEvent, String> {
-        let rx = cluster.mut_event_rx(node_id);
+        // let rx = cluster.mut_event_rx(node_id);
+        let mut rx = cluster.nodes[to_index(node_id)].subscribe();
+
         let wait_loop_fut = async {
             loop {
-                let events = match rx.recv().await {
-                    None => return Err(String::from("the event sender dropped")),
-                    Some(evs) => evs,
+                let event = match rx.recv().await {
+                    Err(err) => return Err(err.to_string()), // TODO: handle lagged
+                    Ok(event) => event,
                 };
 
-                for event in events {
-                    match event {
-                        Event::LederElection(leader_elect) => return Ok(leader_elect),
-                        _ => {}
-                    }
+                // for event in events {
+                match event {
+                    Event::LederElection(leader_elect) => return Ok(leader_elect),
+                    _ => {},
                 }
+                // }
             }
         };
         match timeout_at(Instant::now() + Duration::from_millis(100), wait_loop_fut).await {
@@ -334,7 +331,7 @@ impl FixtureCluster {
 
                 for event in events {
                     match event {
-                        ApplyEvent::Membership(membership) => return Ok(membership),
+                        Apply::Membership(membership) => return Ok(membership),
                         _ => {}
                     }
                 }
@@ -366,7 +363,7 @@ impl FixtureCluster {
 
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        rx: &mut Receiver<Vec<ApplyEvent<()>>>,
+        rx: &mut Receiver<Vec<Apply<()>>>,
         timeout: Duration,
         size: usize,
     ) -> Result<Vec<ApplyNormal<()>>, String> {
@@ -386,7 +383,7 @@ impl FixtureCluster {
                 // check all events type should apply
                 for event in events {
                     match event {
-                        ApplyEvent::Normal(data) => results.push(data),
+                        Apply::Normal(data) => results.push(data),
                         // Event::ApplyNormal(event) => results.push(event),
                         _ => {}
                     }
@@ -409,6 +406,12 @@ impl FixtureCluster {
             tokio::time::sleep(delay).await
         }
     }
+
+    pub async fn stop(&mut self) {
+        for node in std::mem::take(&mut self.nodes).into_iter() {
+            node. stop().await
+        }
+    }
 }
 
 /// Multiple consensus groups are quickly started. Node and consensus group ids start from 1.
@@ -420,7 +423,7 @@ pub async fn quickstart_multi_groups(
     // FIXME: each node has task group, if not that joinner can block.
     let task_group = TaskGroup::new();
     let mut cluster = FixtureCluster::make(node_nums as u64, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     // create multi groups
     for i in 0..group_nums {
@@ -456,7 +459,7 @@ pub async fn quickstart_group(node_nums: usize) -> (TaskGroup, FixtureCluster) {
     // FIXME: each node has task group, if not that joinner can block.
     let task_group = TaskGroup::new();
     let mut cluster = FixtureCluster::make(node_nums as u64, task_group.clone()).await;
-    cluster.start();
+    // cluster.start();
 
     // create multi groups
     let group_id = 1;

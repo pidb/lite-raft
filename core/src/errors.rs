@@ -61,7 +61,6 @@ impl PartialEq for Error {
             (Error::ConfigInvalid(ref e1), Error::ConfigInvalid(ref e2)) => e1 == e2,
             (Error::RequestSnapshotDropped, Error::RequestSnapshotDropped) => true,
             (Error::ConfChangeError(e1), Error::ConfChangeError(e2)) => e1 == e2,
-            (Error::ConfigInvalid(e1), Error::ConfigInvalid(e2)) => e1 == e2,
             _ => false,
         }
     }
