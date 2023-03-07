@@ -22,6 +22,9 @@ pub enum AdminMessage {
     Group(RaftGroupManagement, oneshot::Sender<Result<(), Error>>),
 }
 
+#[allow(unused)]
+pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 pub struct ApplyData<RES>
 where
@@ -96,4 +99,3 @@ impl Default for ApplyCommitMessage {
         ApplyCommitMessage::None
     }
 }
-

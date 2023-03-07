@@ -63,6 +63,10 @@ use super::storage::MultiRaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
 
+/// Shrink queue if queue capacity more than and len less than
+/// this value.
+const SHRINK_CACHE_CAPACITY: usize = 64;
+
 pub(crate) type ResponseCallback = Box<dyn FnOnce() -> Result<(), Error> + Send + Sync + 'static>;
 
 pub(crate) struct ResponseCallbackQueue {
@@ -103,27 +107,22 @@ impl ResponseCallbackQueue {
     }
 
     #[inline]
-    #[allow(unused)]
     pub(crate) fn push_back(&mut self, cb: ResponseCallback) {
         self.cbs.push_back(cb);
     }
 
-    #[inline]
-    #[allow(unused)]
-    pub(crate) fn push_frot(&mut self, cb: ResponseCallback) {
-        self.cbs.push_front(cb);
-    }
-
-    #[inline]
-    #[allow(unused)]
-    pub(crate) fn pop_front(&mut self) -> Option<ResponseCallback> {
-        self.cbs.pop_front()
+    fn try_gc(&mut self) {
+        // TODO: think move the shrink_to_fit operation  to background task?
+        if self.cbs.capacity() > SHRINK_CACHE_CAPACITY && self.cbs.len() < SHRINK_CACHE_CAPACITY {
+            self.cbs.shrink_to_fit();
+        }
     }
 
     pub(crate) fn flush(&mut self) {
-        let drainner = self.cbs.drain(..).collect::<Vec<_>>();
+        let cbs = self.cbs.drain(..).collect::<Vec<_>>();
+        self.try_gc();
         tokio::spawn(async move {
-            for cb in drainner {
+            for cb in cbs {
                 if let Err(err) = cb() {
                     warn!("{}", err)
                 }

@@ -15,6 +15,10 @@ use super::error::Error;
 use super::error::WriteError;
 use super::response::AppWriteResponse;
 
+/// Shrink queue if queue capacity more than and len less than
+/// this value.
+const SHRINK_CACHE_CAPACITY: usize = 64;
+
 pub struct ReadIndexProposal {
     pub uuid: Uuid,
     pub read_index: Option<u64>,
@@ -51,6 +55,13 @@ impl ReadIndexQueue {
         self.queue.push_back(proposal)
     }
 
+    fn try_gc(&mut self) {
+        // TODO: think move the shrink_to_fit operation  to background task?
+        if self.queue.capacity() > SHRINK_CACHE_CAPACITY && self.queue.len() < SHRINK_CACHE_CAPACITY
+        {
+            self.queue.shrink_to_fit();
+        }
+    }
     pub(crate) fn pop_front(&mut self) -> Option<ReadIndexProposal> {
         if self.ready_cnt == 0 {
             return None;
@@ -58,11 +69,12 @@ impl ReadIndexQueue {
 
         self.ready_cnt -= 1;
         self.handle_cnt += 1;
-        Some(
-            self.queue
-                .pop_front()
-                .expect("read index queue empty but ready_cnt > 0"),
-        )
+        let item = self
+            .queue
+            .pop_front()
+            .expect("read index queue empty but ready_cnt > 0");
+        self.try_gc();
+        Some(item)
     }
 
     pub(crate) fn advance_reads(&mut self, rss: Vec<ReadState>) {
@@ -86,8 +98,6 @@ impl ReadIndexQueue {
         }
     }
 }
-
-const SHRINK_CACHE_CAPACITY: usize = 64;
 
 #[derive(Debug)]
 pub struct Proposal<RES: AppWriteResponse> {
@@ -137,6 +147,14 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
         self.queue.push_back(proposal);
     }
 
+    fn try_gc(&mut self) {
+        // TODO: think move the shrink_to_fit operation  to background task?
+        if self.queue.capacity() > SHRINK_CACHE_CAPACITY && self.queue.len() < SHRINK_CACHE_CAPACITY
+        {
+            self.queue.shrink_to_fit();
+        }
+    }
+
     #[inline]
     pub fn drain<R>(&mut self, range: R) -> Drain<'_, Proposal<RES>>
     where
@@ -150,6 +168,7 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
     /// (term, index) parameter, None is returned.
     fn pop(&mut self, term: u64, index: u64) -> Option<Proposal<RES>> {
         self.queue.pop_front().and_then(|p| {
+            self.try_gc();
             // Comparing the term first then the index, because the term is
             // increasing among all log entries and the index is increasing
             // inside a given term
@@ -200,13 +219,6 @@ impl<RES: AppWriteResponse> ProposalQueue<RES> {
 
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
-    }
-
-    pub fn shrink(&mut self) {
-        if self.queue.capacity() > SHRINK_CACHE_CAPACITY && self.queue.len() < SHRINK_CACHE_CAPACITY
-        {
-            self.queue.shrink_to_fit();
-        }
     }
 }
 

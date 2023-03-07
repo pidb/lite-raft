@@ -35,7 +35,7 @@ async fn check_cc<F>(
             .as_str(),
         );
     check(&event);
-    event.done().await;
+    event.done().await.unwrap();
     // TODO: as method called
     println!("event tx is none? = {}", event.tx.is_none());
     event.tx.map(|tx| tx.send(Ok(())));

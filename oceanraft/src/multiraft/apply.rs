@@ -33,9 +33,6 @@ use super::ApplyNoOp;
 use super::ApplyNormal;
 use super::StateMachine;
 
-#[allow(unused)]
-pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
-
 pub struct ApplyActor {}
 
 impl ApplyActor {
@@ -259,6 +256,8 @@ where
     }
 }
 
+/// Shrink queue if queue capacity more than and len less than
+/// this value.
 const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
 struct PendingSender<RES>
@@ -505,7 +504,7 @@ where
                         );
                         self.pending_senders.remove_stales(entry_index, entry_term);
                         Apply::NoOp(ApplyNoOp {
-                            group_id: group_id,
+                            group_id,
                             entry_index,
                             entry_term,
                         })

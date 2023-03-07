@@ -1,22 +1,22 @@
 use std::vec::IntoIter;
 
 use futures::Future;
-use tokio::sync::oneshot;
-use tokio::sync::mpsc::UnboundedSender;
 use prost::Message;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
 
-use crate::prelude::ConfChangeI;
+use crate::multiraft::error::ChannelError;
 use crate::prelude::ConfChange;
+use crate::prelude::ConfChangeI;
+use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::EntryType;
-use crate::prelude::ConfChangeV2;
 use crate::prelude::MembershipChangeRequest;
 
+use super::error::Error;
 use super::msg::ApplyCommitMessage;
 use super::msg::CommitMembership;
-use super::error::Error;
 use super::response::AppWriteResponse;
-
 
 #[derive(Debug)]
 pub struct ApplyNoOp {
@@ -77,15 +77,28 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
     /// Commit membership change to multiraft.
     ///
     /// Note: it's must be called because multiraft need apply membersip change to raft.
-    pub async fn done(&self) {
+    pub async fn done(&self) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         let commit = self.parse();
-        // FIXME: don't unwrap
-        self.commit_tx
+        match self
+            .commit_tx
             .send(ApplyCommitMessage::Membership((commit, tx)))
-            .unwrap();
-        // FIXME: don't unwrap
-        rx.await.unwrap();
+        {
+            Ok(_) => {}
+            Err(_) => {
+                return Err(Error::Channel(ChannelError::ReceiverClosed(
+                    "node actor dropped".to_owned(),
+                )));
+            }
+        }
+
+        if let Err(_) = rx.await {
+            return Err(Error::Channel(ChannelError::SenderClosed(
+                "node actor dropped".to_owned(),
+            )));
+        }
+
+        Ok(())
     }
 }
 

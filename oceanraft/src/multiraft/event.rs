@@ -27,6 +27,10 @@ pub enum Event {
     },
 }
 
+/// Shrink queue if queue capacity more than and len less than
+/// this value.
+const SHRINK_CACHE_CAPACITY: usize = 64;
+
 #[derive(Clone)]
 pub struct EventReceiver {
     rx: flume::Receiver<Event>,
@@ -49,15 +53,14 @@ pub struct EventChannel {
     tx: flume::Sender<Event>,
     rx: flume::Receiver<Event>,
     cap: usize,
-    events: Vec<Event>,
+    cache: Vec<Event>,
 }
 
 impl Clone for EventChannel {
     fn clone(&self) -> Self {
         Self {
             cap: self.cap,
-            events: vec![],
-            // tx: self.tx.clone(),
+            cache: Vec::with_capacity(self.cap),
             tx: self.tx.clone(),
             rx: self.rx.clone(),
         }
@@ -66,17 +69,18 @@ impl Clone for EventChannel {
 
 impl EventChannel {
     pub fn new(cap: usize) -> Self {
-        let (tx2, rx2) = flume::bounded(cap);
+        let (tx, rx) = flume::bounded(cap);
         Self {
             cap,
-            events: Vec::with_capacity(cap),
-            tx: tx2,
-            rx: rx2,
+            tx,
+            rx,
+            cache: Vec::with_capacity(cap),
         }
     }
 
+    #[inline]
     pub fn push(&mut self, event: Event) {
-        self.events.push(event);
+        self.cache.push(event);
     }
 
     #[inline]
@@ -86,12 +90,20 @@ impl EventChannel {
         }
     }
 
+    fn try_gc(&mut self) {
+        // TODO: think move the shrink_to_fit operation  to background task?
+        if self.cache.capacity() > SHRINK_CACHE_CAPACITY && self.cache.len() < SHRINK_CACHE_CAPACITY
+        {
+            self.cache.shrink_to_fit();
+        }
+    }
+
     pub fn flush(&mut self) {
-        if self.events.is_empty() {
+        if self.cache.is_empty() {
             return;
         }
 
-        let events = self.events.drain(..).collect::<Vec<_>>();
+        let events = self.cache.drain(..).collect::<Vec<_>>();
         let tx = self.tx.clone();
         let _ = tokio::spawn(async move {
             for event in events {
