@@ -104,6 +104,7 @@ impl EventChannel {
         }
 
         let events = self.cache.drain(..).collect::<Vec<_>>();
+        self.try_gc();
         let tx = self.tx.clone();
         let _ = tokio::spawn(async move {
             for event in events {

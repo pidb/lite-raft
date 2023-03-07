@@ -84,7 +84,7 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
             .commit_tx
             .send(ApplyCommitMessage::Membership((commit, tx)))
         {
-            Ok(_) => {}
+            Ok(_) => {},
             Err(_) => {
                 return Err(Error::Channel(ChannelError::ReceiverClosed(
                     "node actor dropped".to_owned(),

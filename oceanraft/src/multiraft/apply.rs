@@ -215,7 +215,7 @@ where
                     break
                 },
                 // TODO: handle error
-                Some((span, incoming_request)) = self.rx.recv() =>  {
+                Some((_span, incoming_request)) = self.rx.recv() =>  {
                     let mut requests = vec![];
                     requests.push(incoming_request);
                     // try to receive more requests until channel buffer
