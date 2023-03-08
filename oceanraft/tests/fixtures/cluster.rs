@@ -108,7 +108,7 @@ impl FixtureCluster {
                 tick_interval: 3_600_000, // hour ms
                 batch_apply: false,
                 batch_size: 0,
-                write_proposal_queue_size: 1000,
+                proposal_queue_size: 1000,
                 replica_sync: true,
             };
             let ticker = ManualTick::new();

@@ -16,7 +16,6 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 use tracing::Level;
-use uuid::Uuid;
 
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;

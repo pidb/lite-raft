@@ -42,7 +42,7 @@ pub struct Config {
     /// > the write proposal queue are used to concurrently write to multiple consensus groups.
     /// > The request queue is shared among all groups on the node, which means
     /// that the value is set based on the number of consensus groups on the node.
-    pub write_proposal_queue_size: usize,
+    pub proposal_queue_size: usize,
 }
 
 impl Default for Config {
@@ -59,7 +59,7 @@ impl Default for Config {
             batch_apply: false,
             batch_size: 0,
             replica_sync: true,
-            write_proposal_queue_size: 1,
+            proposal_queue_size: 1,
         }
     }
 }
@@ -93,7 +93,7 @@ impl Config {
             ));
         }
 
-        if self.write_proposal_queue_size == 0 {
+        if self.proposal_queue_size == 0 {
             return Err(Error::ConfigInvalid(
                 "write queue size must be greater than 0".to_owned(),
             ));

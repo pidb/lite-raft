@@ -233,7 +233,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         RSM: StateMachine<RES>,
         TK: Ticker,
     {
-        let (propose_tx, propose_rx) = channel(cfg.write_proposal_queue_size);
+        let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
         let (admin_tx, admin_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(10);
@@ -275,7 +275,6 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         Self {
             raft_message_tx,
             propose_tx,
-            // read_index_propose_tx,
             campaign_tx,
             admin_tx,
             apply,
@@ -324,7 +323,6 @@ where
         transport: &TR,
         storage: &MRS,
         propose_rx: Receiver<ProposeMessage<RES>>,
-        // read_index_propose_rx: Receiver<ReadIndexData>,
         campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
         raft_message_rx: Receiver<(
             MultiRaftMessage,
@@ -828,7 +826,7 @@ where
                     }
                 }
             }
-            ProposeMessage::Membership(request, tx) => {
+            ProposeMessage::MembershipData(request, tx) => {
                 let group_id = request.group_id;
                 match self.groups.get_mut(&group_id) {
                     None => {

@@ -77,6 +77,20 @@ impl ReadIndexQueue {
 
     pub(crate) fn advance_reads(&mut self, rss: Vec<ReadState>) {
         for mut rs in rss {
+            // usnafe of safety:
+            // The decode method is unsafe due to a number of unchecked invariants.
+            //
+            // Decoding arbitrary &[u8] data can result in invalid utf8 strings, enums
+            // with invalid discriminants, etc. decode does perform bounds checks, as part
+            // of determining if enough data are present to completely decode, and while it
+            // should only write within the bounds of its &mut [u8] argument, the use of invalid
+            // utf8 and enums are undefined behavior.
+            //
+            // Please do not decode data that was not encoded by the corresponding implementation.
+            //
+            // In addition, decode does not ensure that the bytes representing types will be
+            // correctly aligned. On several platforms unaligned reads are undefined behavior,
+            // but on several other platforms they are only a performance penalty.
             let (rctx, remaining) =
                 unsafe { abomonation::decode::<ReadIndexContext>(&mut rs.request_ctx).unwrap() };
             assert_eq!(remaining.len(), 0);

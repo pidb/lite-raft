@@ -43,7 +43,7 @@ pub struct ReadIndexData {
 pub enum ProposeMessage<RES: AppWriteResponse> {
     WriteData(WriteData<RES>),
     ReadIndexData(ReadIndexData),
-    Membership(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
+    MembershipData(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
 }
 
 pub enum AdminMessage {

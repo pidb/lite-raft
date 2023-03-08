@@ -260,7 +260,7 @@ where
         match self
             .actor
             .propose_tx
-            .try_send(ProposeMessage::Membership(request, tx))
+            .try_send(ProposeMessage::MembershipData(request, tx))
         {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for memberhsip".to_owned(),
