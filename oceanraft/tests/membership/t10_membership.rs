@@ -4,7 +4,7 @@ use oceanraft::multiraft::ApplyMembership;
 use oceanraft::prelude::ConfChange;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfChangeV2;
-use oceanraft::prelude::MembershipChangeRequest;
+use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::util::TaskGroup;
 use protobuf::Message;
@@ -80,7 +80,7 @@ async fn test_single_step() {
             change.set_change_type(ConfChangeType::AddNode);
             change.node_id = (i + 1) as u64;
             change.replica_id = (i + 1) as u64;
-            let req = MembershipChangeRequest {
+            let req = MembershipChangeData {
                 group_id,
                 term: 0, // not check
                 changes: vec![change],
@@ -180,7 +180,7 @@ async fn test_joint_consensus() {
         changes.push(change);
     }
     let rx = cluster.nodes[0]
-        .membership_change_non_block(MembershipChangeRequest {
+        .membership_change_non_block(MembershipChangeData {
             group_id,
             changes,
             term: 0, // no check term
@@ -273,7 +273,7 @@ async fn test_remove() {
             change.replica_id = (i + 1) as u64;
             changes.push(change);
         }
-        let req = MembershipChangeRequest {
+        let req = MembershipChangeData {
             group_id,
             changes,
             term: 0, // no check term

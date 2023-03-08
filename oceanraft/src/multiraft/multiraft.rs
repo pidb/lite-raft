@@ -6,10 +6,9 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
+use uuid::Uuid;
 
-use crate::prelude::AppReadIndexRequest;
-use crate::prelude::AppWriteRequest;
-use crate::prelude::MembershipChangeRequest;
+use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::RaftGroupManagement;
@@ -21,7 +20,10 @@ use super::error::Error;
 use super::event::EventChannel;
 use super::event::EventReceiver;
 use super::msg::AdminMessage;
-use super::msg::WriteMessage;
+use super::msg::ProposeMessage;
+use super::msg::ReadIndexContext;
+use super::msg::ReadIndexData;
+use super::msg::WriteData;
 use super::node::NodeActor;
 use super::response::AppWriteResponse;
 use super::storage::MultiRaftStorage;
@@ -122,7 +124,6 @@ where
             &transport,
             &storage,
             rsm,
-            // event_tx,
             &event_bcast,
             &task_group,
             ticker,
@@ -137,10 +138,13 @@ where
 
     pub async fn write_timeout(
         &self,
-        request: AppWriteRequest,
+        group_id: u64,
+        term: u64,
+        data: Vec<u8>,
+        context: Option<Vec<u8>>,
         duration: Duration,
     ) -> Result<RES, Error> {
-        let rx = self.write_non_block(request)?;
+        let rx = self.write_non_block(group_id, term, data, context)?;
         match timeout(duration, rx).await {
             Err(_) => Err(Error::Timeout(
                 "wait for the write to complete timeout".to_owned(),
@@ -153,8 +157,14 @@ where
         }
     }
 
-    pub async fn write(&self, request: AppWriteRequest) -> Result<RES, Error> {
-        let rx = self.write_non_block(request)?;
+    pub async fn write(
+        &self,
+        group_id: u64,
+        term: u64,
+        data: Vec<u8>,
+        context: Option<Vec<u8>>,
+    ) -> Result<RES, Error> {
+        let rx = self.write_non_block(group_id, term, data, context)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -162,8 +172,14 @@ where
         })?
     }
 
-    pub fn write_block(&self, request: AppWriteRequest) -> Result<RES, Error> {
-        let rx = self.write_non_block(request)?;
+    pub fn write_block(
+        &self,
+        group_id: u64,
+        term: u64,
+        data: Vec<u8>,
+        context: Option<Vec<u8>>,
+    ) -> Result<RES, Error> {
+        let rx = self.write_non_block(group_id, term, data, context)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -173,14 +189,23 @@ where
 
     pub fn write_non_block(
         &self,
-        request: AppWriteRequest,
+        group_id: u64,
+        term: u64,
+        data: Vec<u8>,
+        context: Option<Vec<u8>>,
+        // request: AppWriteRequest,
     ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self
             .actor
-            .write_propose_tx
-            .try_send(WriteMessage::Write(request, tx))
-        {
+            .propose_tx
+            .try_send(ProposeMessage::WriteData(WriteData {
+                group_id,
+                term,
+                data,
+                context,
+                tx,
+            })) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no avaiable capacity for write".to_owned(),
             ))),
@@ -193,7 +218,7 @@ where
 
     pub async fn membership_change_timeout(
         &self,
-        request: MembershipChangeRequest,
+        request: MembershipChangeData,
         duration: Duration,
     ) -> Result<RES, Error> {
         let rx = self.membership_change_non_block(request)?;
@@ -209,7 +234,7 @@ where
         }
     }
 
-    pub async fn membership_change(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
+    pub async fn membership_change(&self, request: MembershipChangeData) -> Result<RES, Error> {
         let rx = self.membership_change_non_block(request)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -218,7 +243,7 @@ where
         })?
     }
 
-    pub fn membership_change_block(&self, request: MembershipChangeRequest) -> Result<RES, Error> {
+    pub fn membership_change_block(&self, request: MembershipChangeData) -> Result<RES, Error> {
         let rx = self.membership_change_non_block(request)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -229,13 +254,13 @@ where
 
     pub fn membership_change_non_block(
         &self,
-        request: MembershipChangeRequest,
+        request: MembershipChangeData,
     ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self
             .actor
-            .write_propose_tx
-            .try_send(WriteMessage::Membership(request, tx))
+            .propose_tx
+            .try_send(ProposeMessage::Membership(request, tx))
         {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for memberhsip".to_owned(),
@@ -249,10 +274,11 @@ where
 
     pub async fn read_index_timeout(
         &self,
-        request: AppReadIndexRequest,
+        group_id: u64,
+        context: Option<Vec<u8>>,
         duration: Duration,
     ) -> Result<(), Error> {
-        let rx = self.read_index_non_block(request)?;
+        let rx = self.read_index_non_block(group_id, context)?;
         match timeout(duration, rx).await {
             Err(_) => Err(Error::Timeout(
                 "wait for the read index to complete timeout".to_owned(),
@@ -265,8 +291,8 @@ where
         }
     }
 
-    pub async fn read_index(&self, request: AppReadIndexRequest) -> Result<(), Error> {
-        let rx = self.read_index_non_block(request)?;
+    pub async fn read_index(&self, group_id: u64, context: Option<Vec<u8>>) -> Result<(), Error> {
+        let rx = self.read_index_non_block(group_id, context)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the read_index change was dropped".to_owned(),
@@ -274,8 +300,8 @@ where
         })?
     }
 
-    pub fn read_index_block(&self, request: AppReadIndexRequest) -> Result<(), Error> {
-        let rx = self.read_index_non_block(request)?;
+    pub fn read_index_block(&self, group_id: u64, context: Option<Vec<u8>>) -> Result<(), Error> {
+        let rx = self.read_index_non_block(group_id, context)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the read_index was dropped".to_owned(),
@@ -285,10 +311,21 @@ where
 
     pub fn read_index_non_block(
         &self,
-        request: AppReadIndexRequest,
+        group_id: u64,
+        context: Option<Vec<u8>>,
     ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
-        match self.actor.read_index_propose_tx.try_send((request, tx)) {
+        match self
+            .actor
+            .propose_tx
+            .try_send(ProposeMessage::ReadIndexData(ReadIndexData {
+                group_id,
+                context: ReadIndexContext {
+                    uuid: Uuid::new_v4(),
+                    context,
+                },
+                tx: tx,
+            })) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for read_index".to_owned(),
             ))),

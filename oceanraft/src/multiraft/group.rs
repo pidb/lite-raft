@@ -2,7 +2,6 @@ use std::collections::HashMap;
 
 use prost::Message;
 use raft::prelude::Entry;
-use raft::prelude::MembershipChangeRequest;
 use raft::LightReady;
 use raft::RawNode;
 use raft::ReadState;
@@ -19,13 +18,11 @@ use tracing::warn;
 use tracing::Level;
 use uuid::Uuid;
 
-use crate::prelude::AppReadIndexRequest;
-use crate::prelude::AppWriteRequest;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::ConfState;
-use crate::prelude::ReadIndexContext;
+use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
@@ -35,6 +32,8 @@ use super::error::WriteError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
+use super::msg::ReadIndexData;
+use super::msg::WriteData;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
 use super::node::ResponseCallback;
@@ -568,11 +567,11 @@ where
         // self.raft_group.advance_apply();
     }
 
-    fn pre_propose_write(&mut self, request: &AppWriteRequest) -> Result<(), Error>
+    fn pre_propose_write(&mut self, write_data: &WriteData<RES>) -> Result<(), Error>
     where
         RS: Storage,
     {
-        if request.data.is_empty() {
+        if write_data.data.is_empty() {
             return Err(Error::BadParameter(
                 "write request data must not be empty".to_owned(),
             ));
@@ -586,8 +585,11 @@ where
             }));
         }
 
-        if request.term != 0 && self.term() > request.term {
-            return Err(Error::Write(WriteError::Stale(request.term, self.term())));
+        if write_data.term != 0 && self.term() > write_data.term {
+            return Err(Error::Write(WriteError::Stale(
+                write_data.term,
+                self.term(),
+            )));
         }
 
         Ok(())
@@ -595,19 +597,25 @@ where
 
     pub fn propose_write(
         &mut self,
-        request: AppWriteRequest,
-        tx: oneshot::Sender<Result<RES, Error>>,
+        write_data: WriteData<RES>,
+        // tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCallback> {
-        if let Err(err) = self.pre_propose_write(&request) {
-            return Some(ResponseCallbackQueue::new_error_callback(tx, err));
+        if let Err(err) = self.pre_propose_write(&write_data) {
+            return Some(ResponseCallbackQueue::new_error_callback(
+                write_data.tx,
+                err,
+            ));
         }
         let term = self.term();
 
         // propose to raft group
         let next_index = self.last_index() + 1;
-        if let Err(err) = self.raft_group.propose(request.context, request.data) {
+        if let Err(err) = self.raft_group.propose(
+            write_data.context.map_or(vec![], |ctx_data| ctx_data),
+            write_data.data,
+        ) {
             return Some(ResponseCallbackQueue::new_error_callback(
-                tx,
+                write_data.tx,
                 Error::Raft(err),
             ));
         }
@@ -615,7 +623,7 @@ where
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
-                tx,
+                write_data.tx,
                 Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
         }
@@ -624,7 +632,7 @@ where
             index: next_index,
             term,
             is_conf_change: false,
-            tx: Some(tx),
+            tx: Some(write_data.tx),
         };
 
         self.proposals.push(proposal);
@@ -633,41 +641,39 @@ where
 
     pub fn read_index_propose(
         &mut self,
-        request: AppReadIndexRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
+        data: ReadIndexData,
     ) -> Option<ResponseCallback> {
-        let uuid = Uuid::new_v4();
-        let read_context = match request.context {
-            None => ReadIndexContext {
-                uuid: uuid.clone().as_bytes().to_vec(),
-                data: vec![],
-            }
-            .encode_length_delimited_to_vec(),
-            Some(ctx) => ctx.encode_length_delimited_to_vec(),
-        };
-        self.raft_group.read_index(read_context);
+        // let uuid = Uuid::new_v4();
+        let mut ctx = Vec::new();
+        // Safety: This method is unsafe because it is unsafe to
+        // transmute typed allocations to binary. Furthermore, Rust currently
+        // indicates that it is undefined behavior to observe padding bytes,
+        // which will happen when we memmcpy structs which contain padding bytes.
+        unsafe { abomonation::encode(&data.context, &mut ctx).unwrap() };
+        
+        self.raft_group.read_index(ctx);
 
         let proposal = ReadIndexProposal {
-            uuid,
+            uuid: data.context.uuid,
             read_index: None,
             context: None,
-            tx: Some(tx),
+            tx: Some(data.tx),
         };
         self.read_index_queue.push_back(proposal);
         None
     }
 
-    fn pre_propose_membership(&mut self, request: &MembershipChangeRequest) -> Result<(), Error>
+    fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error>
     where
         RS: Storage,
     {
-        if request.group_id == 0 {
+        if data.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
             ));
         }
 
-        if request.changes.is_empty() {
+        if data.changes.is_empty() {
             return Err(Error::BadParameter("group id must not be empty".to_owned()));
         }
 
@@ -679,8 +685,8 @@ where
             }));
         }
 
-        if request.term != 0 && self.term() > request.term {
-            return Err(Error::Write(WriteError::Stale(request.term, self.term())));
+        if data.term != 0 && self.term() > data.term {
+            return Err(Error::Write(WriteError::Stale(data.term, self.term())));
         }
 
         Ok(())
@@ -688,12 +694,12 @@ where
 
     pub fn propose_membership_change(
         &mut self,
-        req: MembershipChangeRequest,
+        data: MembershipChangeData,
         tx: oneshot::Sender<Result<RES, Error>>,
     ) -> Option<ResponseCallback> {
         // TODO: add pre propose check
 
-        if let Err(err) = self.pre_propose_membership(&req) {
+        if let Err(err) = self.pre_propose_membership(&data) {
             return Some(ResponseCallbackQueue::new_error_callback(tx, err));
         }
 
@@ -701,16 +707,16 @@ where
 
         info!(
             "node {}: propose membership change: request = {:?}",
-            0, /* TODO: add it*/ req
+            0, /* TODO: add it*/ data
         );
 
         let next_index = self.last_index() + 1;
 
-        let res = if req.changes.len() == 1 {
-            let (ctx, cc) = to_cc(&req);
+        let res = if data.changes.len() == 1 {
+            let (ctx, cc) = to_cc(&data);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
-            let (ctx, cc) = to_ccv2(&req);
+            let (ctx, cc) = to_ccv2(&data);
             self.raft_group.propose_conf_change(ctx, cc)
         };
 
@@ -785,20 +791,20 @@ where
     }
 }
 
-fn to_cc(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChange) {
-    assert_eq!(req.changes.len(), 1);
+fn to_cc(data: &MembershipChangeData) -> (Vec<u8>, ConfChange) {
+    assert_eq!(data.changes.len(), 1);
     let mut cc = ConfChange::default();
-    cc.set_change_type(req.changes[0].change_type());
+    cc.set_change_type(data.changes[0].change_type());
     // TODO: set membership change id
-    cc.node_id = req.changes[0].replica_id;
-    (req.encode_to_vec(), cc)
+    cc.node_id = data.changes[0].replica_id;
+    (data.encode_to_vec(), cc)
 }
 
-fn to_ccv2(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChangeV2) {
-    assert!(req.changes.len() > 1);
+fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
+    assert!(data.changes.len() > 1);
     let mut cc = ConfChangeV2::default();
     let mut sc = vec![];
-    for change in req.changes.iter() {
+    for change in data.changes.iter() {
         sc.push(ConfChangeSingle {
             change_type: change.change_type,
             node_id: change.replica_id,
@@ -807,5 +813,5 @@ fn to_ccv2(req: &MembershipChangeRequest) -> (Vec<u8>, ConfChangeV2) {
 
     // TODO: consider setting transaction type
     cc.set_changes(sc);
-    (req.encode_to_vec(), cc)
+    (data.encode_to_vec(), cc)
 }

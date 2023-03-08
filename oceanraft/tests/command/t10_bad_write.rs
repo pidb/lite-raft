@@ -49,7 +49,7 @@ async fn test_no_leader() {
         }
     }
 
-    cluster.stop().await;
+    // cluster.stop().await;
 }
 
 //
@@ -95,5 +95,5 @@ async fn test_bad_group() {
             Err(err) => assert_eq!(expected_err, err),
         }
     }
-    cluster.stop().await;
+    // cluster.stop().await;
 }

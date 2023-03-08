@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use oceanraft::prelude::AppReadIndexRequest;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -69,13 +68,7 @@ async fn test_group_read_index() {
 
     println!("{}", serde_json::to_string(&applied_kvs).unwrap());
 
-    let _ = cluster.nodes[0]
-        .read_index(AppReadIndexRequest {
-            context: None,
-            group_id,
-        })
-        .await
-        .unwrap();
+    let _ = cluster.nodes[0].read_index(group_id, None).await.unwrap();
 
     for i in 0..command_nums {
         let command_id = (i + 1) as u64;
@@ -86,7 +79,7 @@ async fn test_group_read_index() {
         };
         assert_eq!(*applied_kvs.get(&kv_cmd.key).unwrap(), kv_cmd);
     }
-    cluster.stop().await;
+    // cluster.stop().await;
     // write -> 1 -> 2 -> 3
     // read  -> commit_index = 1
     // ready -> read -> pending

@@ -55,7 +55,7 @@ async fn test_group_write() {
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
 
-    cluster.stop().await;
+    // cluster.stop().await;
 }
 
 #[async_entry::test(
@@ -105,5 +105,5 @@ async fn test_multigroup_write() {
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
 
-    cluster.stop().await;
+    // cluster.stop().await;
 }

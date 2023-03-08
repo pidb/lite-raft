@@ -20,7 +20,6 @@ use oceanraft::multiraft::Event;
 use oceanraft::multiraft::LeaderElectionEvent;
 use oceanraft::multiraft::ManualTick;
 use oceanraft::multiraft::MultiRaftMessageSenderImpl;
-use oceanraft::prelude::AppWriteRequest;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MultiRaft;
 use oceanraft::prelude::RaftGroupManagement;
@@ -350,14 +349,8 @@ impl FixtureCluster {
         group_id: u64,
         data: Vec<u8>,
     ) -> oneshot::Receiver<Result<(), Error>> {
-        let request = AppWriteRequest {
-            group_id,
-            term: 0,
-            context: vec![],
-            data,
-        };
         self.nodes[to_index(node_id)]
-            .write_non_block(request)
+            .write_non_block(group_id, 0, data, None)
             .unwrap()
     }
 

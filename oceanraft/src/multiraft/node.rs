@@ -22,9 +22,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::prelude::AppReadIndexRequest;
 use crate::prelude::ConfChangeType;
-use crate::prelude::MembershipChangeRequest;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
@@ -51,7 +49,7 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
-use super::msg::WriteMessage;
+use super::msg::ProposeMessage;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::proposal::ProposalQueue;
@@ -207,8 +205,7 @@ impl NodeManager {
 
 pub struct NodeActor<RES: AppWriteResponse> {
     // TODO: queue should have one per-group.
-    pub write_propose_tx: Sender<WriteMessage<RES>>,
-    pub read_index_propose_tx: Sender<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
+    pub propose_tx: Sender<ProposeMessage<RES>>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         MultiRaftMessage,
@@ -226,7 +223,6 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         storage: &MRS,
         rsm: RSM,
         event_bcast: &EventChannel,
-        // event_tx: &Sender<Vec<Event>>,
         task_group: &TaskGroup,
         ticker: Option<TK>,
     ) -> Self
@@ -237,9 +233,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         RSM: StateMachine<RES>,
         TK: Ticker,
     {
-        let (write_propose_tx, write_propose_rx) = channel(cfg.write_proposal_queue_size);
-        let (read_index_propose_tx, read_index_propose_rx) = channel(1000);
-        // let (membership_change_tx, membership_change_rx) = channel(1);
+        let (propose_tx, propose_rx) = channel(cfg.write_proposal_queue_size);
         let (admin_tx, admin_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(10);
@@ -262,8 +256,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             cfg,
             transport,
             storage,
-            write_propose_rx,
-            read_index_propose_rx,
+            propose_rx,
             campaign_rx,
             raft_message_rx,
             apply_request_tx,
@@ -281,8 +274,8 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
 
         Self {
             raft_message_tx,
-            write_propose_tx,
-            read_index_propose_tx,
+            propose_tx,
+            // read_index_propose_tx,
             campaign_tx,
             admin_tx,
             apply,
@@ -311,8 +304,7 @@ where
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    write_propose_rx: Receiver<WriteMessage<RES>>,
-    read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
+    propose_rx: Receiver<ProposeMessage<RES>>,
     admin_rx: Receiver<AdminMessage>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
@@ -331,8 +323,8 @@ where
         cfg: &Config,
         transport: &TR,
         storage: &MRS,
-        write_propose_rx: Receiver<WriteMessage<RES>>,
-        read_index_propose_rx: Receiver<(AppReadIndexRequest, oneshot::Sender<Result<(), Error>>)>,
+        propose_rx: Receiver<ProposeMessage<RES>>,
+        // read_index_propose_rx: Receiver<ReadIndexData>,
         campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
         raft_message_rx: Receiver<(
             MultiRaftMessage,
@@ -349,8 +341,7 @@ where
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
-            write_propose_rx,
-            read_index_propose_rx,
+            propose_rx: propose_rx,
             campaign_rx,
             multiraft_message_rx: raft_message_rx,
             admin_rx,
@@ -415,16 +406,8 @@ where
                     }
                 },
 
-                Some(req) = self.write_propose_rx.recv() => if let Some(cb) = self.propose_write_request(req) {
+                Some(req) = self.propose_rx.recv() => if let Some(cb) = self.handle_propose(req) {
                     self.pending_responses.push_back(cb);
-                },
-
-                Some((req, tx)) = self.read_index_propose_rx.recv() => {
-                    let group_id = req.group_id;
-                    self.active_groups.insert(group_id);
-                    if let Some(cb) = self.propose_read_index_request(req, tx) {
-                        self.pending_responses.push_back(cb);
-                    }
                 },
 
                 Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
@@ -821,13 +804,13 @@ where
     /// Note: Must be called to respond to the client when the loop ends.
     #[tracing::instrument(
         level = Level::TRACE,
-        name = "NodeActor::propose_write_request",
+        name = "NodeActor::handle_propose",
         skip_all
     )]
-    fn propose_write_request(&mut self, req: WriteMessage<RES>) -> Option<ResponseCallback> {
-        match req {
-            WriteMessage::Write(request, tx) => {
-                let group_id = request.group_id;
+    fn handle_propose(&mut self, msg: ProposeMessage<RES>) -> Option<ResponseCallback> {
+        match msg {
+            ProposeMessage::WriteData(data) => {
+                let group_id = data.group_id;
                 match self.groups.get_mut(&group_id) {
                     None => {
                         warn!(
@@ -835,17 +818,17 @@ where
                             self.node_id, group_id,
                         );
                         return Some(ResponseCallbackQueue::new_error_callback(
-                            tx,
+                            data.tx,
                             Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
                         ));
                     }
                     Some(group) => {
                         self.active_groups.insert(group_id);
-                        group.propose_write(request, tx)
+                        group.propose_write(data)
                     }
                 }
             }
-            WriteMessage::Membership(request, tx) => {
+            ProposeMessage::Membership(request, tx) => {
                 let group_id = request.group_id;
                 match self.groups.get_mut(&group_id) {
                     None => {
@@ -864,68 +847,25 @@ where
                     }
                 }
             }
-        }
-    }
-
-    /// if `None` is returned, the membership change request is successfully committed
-    /// to raft, otherwise the callback closure of the error response is
-    /// returned.
-    ///
-    /// Note: Must be called to respond to the client when the loop ends.
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorRuntime::propose_membership_change_request",
-        skip_all,
-    )]
-    fn propose_membership_change_request(
-        &mut self,
-        request: MembershipChangeRequest,
-        tx: oneshot::Sender<Result<RES, Error>>,
-    ) -> Option<ResponseCallback> {
-        let group_id = request.group_id;
-        match self.groups.get_mut(&group_id) {
-            None => {
-                warn!(
-                    "node {}: proposal membership failed, group {} does not exists",
-                    self.node_id, group_id,
-                );
-                return Some(ResponseCallbackQueue::new_error_callback(
-                    tx,
-                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                ));
+            ProposeMessage::ReadIndexData(read_data) => {
+                let group_id = read_data.group_id;
+                match self.groups.get_mut(&group_id) {
+                    None => {
+                        warn!(
+                            "node {}: proposal read_index failed, group {} does not exists",
+                            self.node_id, group_id,
+                        );
+                        return Some(ResponseCallbackQueue::new_error_callback(
+                            read_data.tx,
+                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+                        ));
+                    }
+                    Some(group) => {
+                        self.active_groups.insert(group_id);
+                        group.read_index_propose(read_data)
+                    }
+                }
             }
-            Some(group) => group.propose_membership_change(request, tx),
-        }
-    }
-
-    /// if `None` is returned, the read_index request is successfully committed
-    /// to raft, otherwise the callback closure of the error response is
-    /// returned.
-    ///
-    /// Note: Must be called to respond to the client when the loop ends.
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "MultiRaftActorRuntime::propose_read_index_request",
-        skip(self, tx))
-    ]
-    fn propose_read_index_request(
-        &mut self,
-        request: AppReadIndexRequest,
-        tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Option<ResponseCallback> {
-        let group_id = request.group_id;
-        match self.groups.get_mut(&group_id) {
-            None => {
-                warn!(
-                    "node {}: proposal read_index failed, group {} does not exists",
-                    self.node_id, group_id,
-                );
-                return Some(ResponseCallbackQueue::new_error_callback(
-                    tx,
-                    Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                ));
-            }
-            Some(group) => group.read_index_propose(request, tx),
         }
     }
 
@@ -1496,19 +1436,6 @@ where
         info!("node {}: node actor stopped now", self.node_id);
     }
 }
-
-// fn spawn_handle_response_events(node_id: u64, tx: &Sender<Vec<Event>>, events: Vec<Event>) {
-//     let tx = tx.clone();
-//     // TODO: add timeout
-//     let _ = tokio::spawn(async move {
-//         if let Err(_) = tx.send(events).await {
-//             error!(
-//                 "node {}: send pending events error, the event receiver dropped",
-//                 node_id
-//             );
-//         }
-//     });
-// }
 
 #[cfg(test)]
 mod tests {

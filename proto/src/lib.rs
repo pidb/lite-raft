@@ -40,9 +40,9 @@ pub mod prelude {
     };
 
     pub use crate::multiraft::{
-        AdminMessage, AdminMessageType, AppReadIndexRequest, AppReadIndexResponse, AppWriteRequest,
-        AppWriteResponse, MembershipChangeRequest, RaftGroupDesc, RaftGroupManagement,
-        RaftGroupManagementType, MultiRaftMessage, MultiRaftMessageResponse, ReadIndexContext, ReplicaDesc,
+        AdminMessage, AdminMessageType,
+        MembershipChangeData, RaftGroupDesc, RaftGroupManagement,
+        RaftGroupManagementType, MultiRaftMessage, MultiRaftMessageResponse, ReplicaDesc,
         SingleMembershipChange,
     };
 }

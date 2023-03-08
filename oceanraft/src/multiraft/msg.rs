@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
-use crate::prelude::AppWriteRequest;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
-use crate::prelude::MembershipChangeRequest;
+use crate::prelude::MembershipChangeData;
 use crate::prelude::RaftGroupManagement;
 
 use super::error::Error;
@@ -13,9 +13,37 @@ use super::group::RaftGroupApplyState;
 use super::proposal::Proposal;
 use super::response::AppWriteResponse;
 
-pub enum WriteMessage<RES: AppWriteResponse> {
-    Write(AppWriteRequest, oneshot::Sender<Result<RES, Error>>),
-    Membership(MembershipChangeRequest, oneshot::Sender<Result<RES, Error>>),
+pub struct WriteData<RES>
+where
+    RES: AppWriteResponse,
+{
+    pub group_id: u64,
+    pub term: u64,
+    pub data: Vec<u8>,
+    pub context: Option<Vec<u8>>,
+    pub tx: oneshot::Sender<Result<RES, Error>>,
+}
+
+#[derive(abomonation_derive::Abomonation, Clone)]
+pub struct ReadIndexContext {
+    #[unsafe_abomonate_ignore]
+    pub uuid: Uuid,
+
+    /// context for user
+    #[unsafe_abomonate_ignore]
+    pub context:Option<Vec<u8>> ,
+}
+
+pub struct ReadIndexData {
+    pub group_id: u64,
+    pub context: ReadIndexContext,
+    pub tx: oneshot::Sender<Result<(), Error>>,
+}
+
+pub enum ProposeMessage<RES: AppWriteResponse> {
+    WriteData(WriteData<RES>),
+    ReadIndexData(ReadIndexData),
+    Membership(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
 }
 
 pub enum AdminMessage {
@@ -85,7 +113,7 @@ pub(crate) struct CommitMembership {
     #[allow(unused)]
     pub(crate) entry_index: u64,
     pub(crate) conf_change: ConfChangeV2,
-    pub(crate) change_request: MembershipChangeRequest,
+    pub(crate) change_request: MembershipChangeData,
 }
 
 #[derive(Debug)]
