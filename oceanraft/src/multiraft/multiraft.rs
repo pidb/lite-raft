@@ -28,6 +28,7 @@ use super::msg::ReadIndexData;
 use super::msg::WriteData;
 use super::node::NodeActor;
 use super::response::AppWriteResponse;
+use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
@@ -85,16 +86,9 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 
 /// MultiRaft represents a group of raft replicas
 pub struct MultiRaft<RES: AppWriteResponse> {
-    // ctx: Context,
-    // cfg: Config,
-    // transport: T,
-    // storage: MRS,
     task_group: TaskGroup,
     actor: NodeActor<RES>,
-    // apply_actor: ApplyActor,
-    // _m2: PhantomData<T>,
-    // _m3: PhantomData<RS>,
-    // _m4: PhantomData<MRS>,
+    states: GroupStates,
     event_bcast: EventChannel,
 }
 
@@ -108,7 +102,6 @@ where
         storage: MRS,
         rsm: RSM,
         task_group: TaskGroup,
-        // event_tx: &Sender<Vec<Event>>,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
     where
@@ -120,6 +113,7 @@ where
         TK: Ticker,
     {
         config.validate()?;
+        let states = GroupStates::new();
         let event_bcast = EventChannel::new(config.event_capacity);
         let actor = NodeActor::spawn(
             &config,
@@ -129,12 +123,14 @@ where
             &event_bcast,
             &task_group,
             ticker,
+            states.clone(),
         );
 
         Ok(Self {
             event_bcast,
             actor,
             task_group,
+            states,
         })
     }
 

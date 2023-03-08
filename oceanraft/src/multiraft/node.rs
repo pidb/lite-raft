@@ -2,8 +2,10 @@ use std::collections::hash_map::HashMap;
 use std::collections::hash_map::Iter;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
+use raft::StateRole;
 use raft::Storage;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -57,6 +59,8 @@ use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
 use super::response::AppWriteResponse;
 use super::rsm::StateMachine;
+use super::state::GroupState;
+use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
@@ -225,6 +229,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         event_bcast: &EventChannel,
         task_group: &TaskGroup,
         ticker: Option<TK>,
+        states: GroupStates,
     ) -> Self
     where
         TR: Transport + Clone,
@@ -264,6 +269,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             manage_rx,
             event_bcast,
             commit_rx,
+            states,
         );
 
         let stopper = task_group.stopper();
@@ -308,6 +314,7 @@ where
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     apply_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
     apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
+    shared_states: GroupStates,
 }
 
 impl<TR, RS, MRS, RES> NodeWorker<TR, RS, MRS, RES>
@@ -332,6 +339,7 @@ where
         manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
+        shared_states: GroupStates,
     ) -> Self {
         NodeWorker::<TR, RS, MRS, RES> {
             cfg: cfg.clone(),
@@ -351,6 +359,7 @@ where
             replica_cache: ReplicaCache::new(storage.clone()),
             event_chan: event_chan.clone(),
             pending_responses: ResponseCallbackQueue::new(),
+            shared_states,
         }
     }
 
@@ -1012,6 +1021,16 @@ where
             "node {}: raft group_id = {}, replica_id = {} created",
             self.node_id, group_id, replica_id
         );
+        let shared_state = Arc::new(GroupState::from((
+            replica_id,
+            rs.hard_state.commit, /* commit_index */
+            rs.hard_state.term,   /* commit_term */
+            rs.hard_state.commit, /* applied_index */
+            rs.hard_state.term,   /* applied_term */
+            0,
+            StateRole::Follower,
+        )));
+
         let mut group = RaftGroup {
             node_id: self.cfg.node_id,
             group_id,
@@ -1023,6 +1042,7 @@ where
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
             status: Status::None,
+            shared_state: shared_state.clone(),
             read_index_queue: ReadIndexQueue::new(),
         };
 
@@ -1063,6 +1083,16 @@ where
             group_id,
             replica_id,
         });
+
+        let prev_shard_state = self.shared_states.insert(group_id, shared_state);
+
+        assert_eq!(
+            prev_shard_state.is_none(),
+            true,
+            "expect group {} shared state is empty, but goted",
+            group_id
+        );
+
         Ok(())
     }
 
@@ -1103,9 +1133,7 @@ where
             }
         };
 
-        group
-            .raft_group
-            .advance_apply_to(response.apply_state.applied_index);
+        group.advance_apply(&response.apply_state);
         debug!(
             "node {}: group = {} apply state change = {:?}",
             self.node_id, response.group_id, response.apply_state
@@ -1307,7 +1335,6 @@ where
                             &mut self.node_manager,
                             &mut multi_groups_write,
                             &mut applys,
-                            // &mut self.pending_events,
                             &mut self.event_chan,
                         )
                         .await;
@@ -1437,6 +1464,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
 
     use super::NodeWorker;
     use crate::memstore::MultiRaftMemoryStorage;
@@ -1456,6 +1484,7 @@ mod tests {
     use raft_proto::prelude::SingleMembershipChange;
 
     use super::NodeManager;
+    use crate::multiraft::state::GroupState;
 
     type TestMultiRaftActorRuntime = NodeWorker<
         LocalTransport<MultiRaftMessageSenderImpl>,
@@ -1488,6 +1517,7 @@ mod tests {
             committed_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
             status: Status::None,
+            shared_state: Arc::new(GroupState::default()),
             read_index_queue: ReadIndexQueue::new(),
         })
     }

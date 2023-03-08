@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use prost::Message;
 use raft::prelude::Entry;
@@ -43,6 +45,7 @@ use super::proposal::ReadIndexProposal;
 use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
 use super::response::AppWriteResponse;
+use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::util;
@@ -94,6 +97,7 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
+    pub shared_state: Arc<GroupState>,
 }
 
 //===----------------------------------------------------------------------===//
@@ -144,7 +148,6 @@ where
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
         multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
         event_bcast: &mut EventChannel,
-        // pending_events: &mut Vec<Event>,
     ) {
         debug!(
             "node {}: group = {} is now ready for processing",
@@ -284,6 +287,7 @@ where
     #[inline]
     fn maybe_update_committed_term(&mut self, term: u64) {
         if self.committed_term != term && self.leader.replica_id != 0 {
+            self.shared_state.set_commit_term(term);
             self.committed_term = term
         }
     }
@@ -362,7 +366,6 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        // pending_events: &mut Vec<Event>,
         event_bcast: &mut EventChannel,
     ) {
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
@@ -383,7 +386,6 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        // pending_events: &mut Vec<Event>,
         event_bcast: &mut EventChannel,
     ) {
         let group_id = self.group_id;
@@ -419,12 +421,17 @@ where
             }
         };
 
+        // update shared states
+        self.shared_state.set_leader_id(ss.leader_id);
+        self.shared_state.set_role(&ss.raft_state);
+
         info!(
             "node {}: group = {}, replica = {} became leader",
             node_id, self.group_id, ss.leader_id
         );
         let replica_id = replica_desc.replica_id;
         self.leader = replica_desc; // always set because node_id maybe NO_NODE.
+
         event_bcast.push(Event::LederElection(LeaderElectionEvent {
             group_id: self.group_id,
             leader_id: ss.leader_id,
@@ -638,10 +645,7 @@ where
         None
     }
 
-    pub fn read_index_propose(
-        &mut self,
-        data: ReadIndexData,
-    ) -> Option<ResponseCallback> {
+    pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
         // let uuid = Uuid::new_v4();
         let mut ctx = Vec::new();
         // Safety: This method is unsafe because it is unsafe to
@@ -649,7 +653,7 @@ where
         // indicates that it is undefined behavior to observe padding bytes,
         // which will happen when we memmcpy structs which contain padding bytes.
         unsafe { abomonation::encode(&data.context, &mut ctx).unwrap() };
-        
+
         self.raft_group.read_index(ctx);
 
         let proposal = ReadIndexProposal {
@@ -787,6 +791,13 @@ where
                 self.node_ids.truncate(len - 1);
                 true
             })
+    }
+
+    pub(crate) fn advance_apply(&mut self, apply_state: &RaftGroupApplyState) {
+        self.raft_group.advance_apply_to(apply_state.applied_index);
+        self.shared_state
+            .set_applied_index(apply_state.applied_index);
+        self.shared_state.set_applied_term(apply_state.applied_term);
     }
 }
 

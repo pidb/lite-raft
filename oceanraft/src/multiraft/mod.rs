@@ -12,6 +12,7 @@ mod apply;
 mod group;
 mod msg;
 mod node;
+mod state;
 pub mod storage;
 
 pub use config::Config;
