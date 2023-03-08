@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
+use raft::prelude::ReplicaDesc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
-use crate::prelude::RaftGroupManagement;
+// use crate::prelude::RaftGroupManagement;
 
 use super::error::Error;
 use super::group::RaftGroupApplyState;
@@ -31,7 +32,7 @@ pub struct ReadIndexContext {
 
     /// context for user
     #[unsafe_abomonate_ignore]
-    pub context:Option<Vec<u8>> ,
+    pub context: Option<Vec<u8>>,
 }
 
 pub struct ReadIndexData {
@@ -46,8 +47,20 @@ pub enum ProposeMessage<RES: AppWriteResponse> {
     MembershipData(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
 }
 
-pub enum AdminMessage {
-    Group(RaftGroupManagement, oneshot::Sender<Result<(), Error>>),
+pub enum GroupOp {
+    Create,
+    Remove,
+}
+
+pub struct GroupData {
+    pub group_id: u64,
+    pub replica_id: u64,
+    pub replicas: Option<Vec<ReplicaDesc>>,
+    pub op: GroupOp,
+    pub tx: oneshot::Sender<Result<(), Error>>,
+}
+pub enum ManageMessage {
+    GroupData(GroupData),
 }
 
 #[allow(unused)]

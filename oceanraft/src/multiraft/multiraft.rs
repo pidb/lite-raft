@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use futures::Future;
+use raft::prelude::ReplicaDesc;
 use raft::Storage;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
@@ -11,7 +12,6 @@ use uuid::Uuid;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-use crate::prelude::RaftGroupManagement;
 use crate::util::TaskGroup;
 
 use super::config::Config;
@@ -19,7 +19,9 @@ use super::error::ChannelError;
 use super::error::Error;
 use super::event::EventChannel;
 use super::event::EventReceiver;
-use super::msg::AdminMessage;
+use super::msg::GroupData;
+use super::msg::GroupOp;
+use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
 use super::msg::ReadIndexContext;
 use super::msg::ReadIndexData;
@@ -365,8 +367,13 @@ where
         rx
     }
 
-    pub async fn group_manage(&self, request: RaftGroupManagement) -> Result<(), Error> {
-        let rx = self.group_manage_non_block(request)?;
+    pub async fn create_group(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<(), Error> {
+        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the group_manager change was dropped".to_owned(),
@@ -374,8 +381,13 @@ where
         })?
     }
 
-    pub fn group_manage_block(&self, request: RaftGroupManagement) -> Result<(), Error> {
-        let rx = self.group_manage_non_block(request)?;
+    pub fn create_group_block(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<(), Error> {
+        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the group_manager change was dropped".to_owned(),
@@ -383,16 +395,72 @@ where
         })?
     }
 
-    pub fn group_manage_non_block(
+    #[inline]
+    pub fn create_group_non_block(
         &self,
-        request: RaftGroupManagement,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        self.group_operation(group_id, replica_id, replicas, GroupOp::Create)
+    }
+
+    pub async fn remove_group(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<(), Error> {
+        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    pub fn remove_group_block(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<(), Error> {
+        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
+        rx.blocking_recv().map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    #[inline]
+    pub fn remove_group_non_block(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)
+    }
+
+    fn group_operation(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        replicas: Option<Vec<ReplicaDesc>>,
+        op: GroupOp,
     ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self
             .actor
-            .admin_tx
-            .try_send(AdminMessage::Group(request, tx))
-        {
+            .manage_tx
+            .try_send(ManageMessage::GroupData(GroupData {
+                group_id,
+                replica_id,
+                replicas,
+                op,
+                tx,
+            })) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for group management".to_owned(),
             ))),

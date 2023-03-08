@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-
 use oceanraft::multiraft::ApplyNormal;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -22,8 +21,6 @@ use oceanraft::multiraft::ManualTick;
 use oceanraft::multiraft::MultiRaftMessageSenderImpl;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MultiRaft;
-use oceanraft::prelude::RaftGroupManagement;
-use oceanraft::prelude::RaftGroupManagementType;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
@@ -223,13 +220,9 @@ impl FixtureCluster {
             let node = &self.nodes[place_node_index];
 
             // create admin message for create raft grop
-            let mut msg = RaftGroupManagement::default();
-            msg.set_msg_type(RaftGroupManagementType::MsgCreateGroup);
-            msg.group_id = plan.group_id;
-            msg.replica_id = replica_id;
-            msg.replicas = replicas.clone();
-            // self.tickers[place_node_index].non_blocking_tick();
-            let _ = node.group_manage(msg).await?;
+            let _ = node
+                .create_group(plan.group_id, replica_id, Some(replicas.clone()))
+                .await?;
 
             match self.groups.get_mut(&plan.group_id) {
                 None => {
@@ -303,7 +296,7 @@ impl FixtureCluster {
                 // for event in events {
                 match event {
                     Event::LederElection(leader_elect) => return Ok(leader_elect),
-                    _ => {},
+                    _ => {}
                 }
                 // }
             }
@@ -402,7 +395,7 @@ impl FixtureCluster {
 
     pub async fn stop(&mut self) {
         for node in std::mem::take(&mut self.nodes).into_iter() {
-            node. stop().await
+            node.stop().await
         }
     }
 }

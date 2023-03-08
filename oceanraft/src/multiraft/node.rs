@@ -4,8 +4,6 @@ use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use raft::prelude::RaftGroupManagement;
-use raft::prelude::RaftGroupManagementType;
 use raft::Storage;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -43,12 +41,14 @@ use super::group::RaftGroup;
 use super::group::RaftGroupState;
 use super::group::RaftGroupWriteRequest;
 use super::group::Status;
-use super::msg::AdminMessage;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
+use super::msg::GroupData;
+use super::msg::GroupOp;
+use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
@@ -211,7 +211,7 @@ pub struct NodeActor<RES: AppWriteResponse> {
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    pub admin_tx: Sender<AdminMessage>,
+    pub manage_tx: Sender<ManageMessage>,
     #[allow(unused)]
     apply: ApplyActor,
 }
@@ -234,7 +234,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         TK: Ticker,
     {
         let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
-        let (admin_tx, admin_rx) = channel(1);
+        let (manage_tx, manage_rx) = channel(1);
         let (campaign_tx, campaign_rx) = channel(1);
         let (raft_message_tx, raft_message_rx) = channel(10);
 
@@ -261,8 +261,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             raft_message_rx,
             apply_request_tx,
             apply_response_rx,
-            admin_rx,
-            // event_tx,
+            manage_rx,
             event_bcast,
             commit_rx,
         );
@@ -276,7 +275,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             raft_message_tx,
             propose_tx,
             campaign_tx,
-            admin_tx,
+            manage_tx,
             apply,
         }
     }
@@ -304,7 +303,7 @@ where
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     propose_rx: Receiver<ProposeMessage<RES>>,
-    admin_rx: Receiver<AdminMessage>,
+    manage_rx: Receiver<ManageMessage>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     apply_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
@@ -330,7 +329,7 @@ where
         )>,
         apply_request_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
         apply_response_rx: UnboundedReceiver<ApplyResultMessage>,
-        admin_rx: Receiver<AdminMessage>,
+        manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     ) -> Self {
@@ -342,7 +341,7 @@ where
             propose_rx: propose_rx,
             campaign_rx,
             multiraft_message_rx: raft_message_rx,
-            admin_rx,
+            manage_rx,
             storage: storage.clone(),
             transport: transport.clone(),
             apply_tx: apply_request_tx,
@@ -410,7 +409,7 @@ where
 
                 Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
 
-                Some(msg) = self.admin_rx.recv() => if let Some(cb) = self.handle_admin_message(msg).await {
+                Some(msg) = self.manage_rx.recv() => if let Some(cb) = self.handle_manage_message(msg).await {
                     self.pending_responses.push_back(cb);
                 },
 
@@ -897,10 +896,10 @@ where
         level = Level::TRACE,
         skip_all,
     )]
-    async fn handle_admin_message(&mut self, msg: AdminMessage) -> Option<ResponseCallback> {
+    async fn handle_manage_message(&mut self, msg: ManageMessage) -> Option<ResponseCallback> {
         match msg {
             // handle raft group management request
-            AdminMessage::Group(req, tx) => self.handle_raft_group_management(req, tx).await,
+            ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
         }
     }
 
@@ -909,20 +908,21 @@ where
         level = Level::TRACE,
         skip_all
     )]
-    async fn handle_raft_group_management(
-        &mut self,
-        msg: RaftGroupManagement,
-        tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Option<ResponseCallback> {
-        let res = match msg.msg_type() {
-            RaftGroupManagementType::MsgCreateGroup => {
-                self.active_groups.insert(msg.group_id);
-                self.create_raft_group(msg.group_id, msg.replica_id, msg.replicas)
-                    .await
+    async fn handle_group_manage(&mut self, data: GroupData) -> Option<ResponseCallback> {
+        let tx = data.tx;
+        let res = match data.op {
+            GroupOp::Create => {
+                self.active_groups.insert(data.group_id);
+                self.create_raft_group(
+                    data.group_id,
+                    data.replica_id,
+                    data.replicas.map_or(vec![], |rs| rs),
+                )
+                .await
             }
-            RaftGroupManagementType::MsgRemoveGoup => {
+            GroupOp::Remove => {
                 // marke delete
-                let group_id = msg.group_id;
+                let group_id = data.group_id;
                 let group = match self.groups.get_mut(&group_id) {
                     None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
                     Some(group) => group,
