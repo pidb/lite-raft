@@ -52,7 +52,7 @@ async fn test_group_write() {
     }
 
     for rx in recvs {
-        assert_eq!(rx.await.unwrap().is_ok(), true);
+        assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
     // cluster.stop().await;
@@ -102,7 +102,7 @@ async fn test_multigroup_write() {
     }
 
     for rx in recvs {
-        assert_eq!(rx.await.unwrap().is_ok(), true);
+        assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
     // cluster.stop().await;

@@ -1,7 +1,9 @@
 use std::vec::IntoIter;
 
 use futures::Future;
-use oceanraft::multiraft::{Apply, StateMachine};
+use oceanraft::multiraft::Apply;
+use oceanraft::multiraft::GroupState;
+use oceanraft::multiraft::StateMachine;
 use tokio::sync::mpsc::Sender;
 
 pub struct FixtureStateMachine {
@@ -18,7 +20,12 @@ impl StateMachine<()> for FixtureStateMachine {
     type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<()>>>> + 'life0
     where
         Self: 'life0;
-    fn apply(&mut self, iter: IntoIter<Apply<()>>) -> Self::ApplyFuture<'_> {
+    fn apply(
+        &mut self,
+        _group_id: u64,
+        _state: &GroupState,
+        iter: IntoIter<Apply<()>>,
+    ) -> Self::ApplyFuture<'_> {
         async move {
             // self.tx.send(iter.collect()).await.unwrap();
             if let Err(_) = self.tx.send(iter.collect()).await {

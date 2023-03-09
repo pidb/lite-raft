@@ -28,13 +28,16 @@ use super::msg::ReadIndexData;
 use super::msg::WriteData;
 use super::node::NodeActor;
 use super::response::AppWriteResponse;
+use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
+use super::RaftGroupError;
 use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
+pub const NO_LEADER: u64 = 0;
 
 /// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///
@@ -85,16 +88,10 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 
 /// MultiRaft represents a group of raft replicas
 pub struct MultiRaft<RES: AppWriteResponse> {
-    // ctx: Context,
-    // cfg: Config,
-    // transport: T,
-    // storage: MRS,
+    node_id: u64,
     task_group: TaskGroup,
     actor: NodeActor<RES>,
-    // apply_actor: ApplyActor,
-    // _m2: PhantomData<T>,
-    // _m3: PhantomData<RS>,
-    // _m4: PhantomData<MRS>,
+    shared_states: GroupStates,
     event_bcast: EventChannel,
 }
 
@@ -103,12 +100,11 @@ where
     RES: AppWriteResponse,
 {
     pub fn new<TR, RS, MRS, RSM, TK>(
-        config: Config,
+        cfg: Config,
         transport: TR,
         storage: MRS,
         rsm: RSM,
         task_group: TaskGroup,
-        // event_tx: &Sender<Vec<Event>>,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
     where
@@ -119,22 +115,26 @@ where
         RES: AppWriteResponse,
         TK: Ticker,
     {
-        config.validate()?;
-        let event_bcast = EventChannel::new(config.event_capacity);
+        cfg.validate()?;
+        let states = GroupStates::new();
+        let event_bcast = EventChannel::new(cfg.event_capacity);
         let actor = NodeActor::spawn(
-            &config,
+            &cfg,
             &transport,
             &storage,
             rsm,
             &event_bcast,
             &task_group,
             ticker,
+            states.clone(),
         );
 
         Ok(Self {
+            node_id: cfg.node_id,
             event_bcast,
             actor,
             task_group,
+            shared_states: states,
         })
     }
 
@@ -189,14 +189,32 @@ where
         })?
     }
 
+    fn pre_propose_check(&self, group_id: u64) -> Result<(), Error> {
+        let state = self.shared_states.get(group_id).map_or(
+            Err(Error::RaftGroup(RaftGroupError::Deleted(0, group_id))),
+            |state| Ok(state),
+        )?;
+
+        if !state.is_leader() {
+            return Err(Error::Write(super::WriteError::NotLeader {
+                node_id: self.node_id,
+                group_id,
+                replica_id: state.get_replica_id(),
+            }));
+        }
+
+        Ok(())
+    }
+
     pub fn write_non_block(
         &self,
         group_id: u64,
         term: u64,
         data: Vec<u8>,
         context: Option<Vec<u8>>,
-        // request: AppWriteRequest,
     ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
+        let _ = self.pre_propose_check(group_id)?;
+
         let (tx, rx) = oneshot::channel();
         match self
             .actor
@@ -258,6 +276,8 @@ where
         &self,
         request: MembershipChangeData,
     ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
+        let _ = self.pre_propose_check(request.group_id)?;
+
         let (tx, rx) = oneshot::channel();
         match self
             .actor

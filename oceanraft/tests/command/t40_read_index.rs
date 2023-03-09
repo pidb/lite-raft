@@ -63,7 +63,7 @@ async fn test_group_read_index() {
     // write_checker.check(&events);
 
     for rx in recvs {
-        assert_eq!(rx.await.unwrap().is_ok(), true);
+        assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
     println!("{}", serde_json::to_string(&applied_kvs).unwrap());

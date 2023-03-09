@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use prost::Message;
 use raft::prelude::Entry;
@@ -20,7 +21,6 @@ use tracing::Level;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
 use crate::prelude::ConfChangeV2;
-use crate::prelude::ConfState;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
@@ -31,6 +31,7 @@ use super::error::WriteError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
+use super::msg::ApplyResultMessage;
 use super::msg::ReadIndexData;
 use super::msg::WriteData;
 use super::multiraft::NO_NODE;
@@ -43,33 +44,17 @@ use super::proposal::ReadIndexProposal;
 use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
 use super::response::AppWriteResponse;
+use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::transport;
 use super::util;
 use super::Event;
-
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct RaftGroupApplyState {
-    pub commit_index: u64,
-    pub commit_term: u64,
-    pub applied_term: u64,
-    pub applied_index: u64,
-}
 
 pub enum Status {
     None,
     Delete,
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct RaftGroupState {
-    pub group_id: u64,
-    pub replica_id: u64,
-    // pub hard_state: HardState,
-    pub soft_state: SoftState,
-    pub membership_state: ConfState,
-    pub apply_state: RaftGroupApplyState,
-}
 
 #[derive(Default, Debug)]
 pub struct RaftGroupWriteRequest {
@@ -90,10 +75,31 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     pub node_ids: Vec<u64>,
     pub proposals: ProposalQueue<RES>,
     pub leader: ReplicaDesc,
-    pub committed_term: u64,
-    pub state: RaftGroupState,
+
+    /// the current latest commit index, which is different from the
+    /// internal `commit_index` of `raft_group`, may be the `commit_index`
+    /// but not yet advance state machine, meaning that `commit_index`
+    /// should be greater than or equal to `raft_group`
+    pub commit_index: u64,
+
+    /// the current latest `commit_term`, which is different from the
+    /// internal `commit_term` of `raft_group`, may be the `commit_term`
+    /// but not yet advance state machine, meaning that `commit_term`
+    /// should be greater than or equal to `raft_group`
+    pub commit_term: u64,
+
+    /// Represents the index applied to the current group apply,
+    /// updated when apply returns results    
+    pub applied_index: u64,
+
+    /// Represents the term applied to the current group apply,
+    /// updated when apply returns results    
+    pub applied_term: u64,
+
+    // pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
+    pub shared_state: Arc<GroupState>,
 }
 
 //===----------------------------------------------------------------------===//
@@ -144,7 +150,6 @@ where
         multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
         multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
         event_bcast: &mut EventChannel,
-        // pending_events: &mut Vec<Event>,
     ) {
         debug!(
             "node {}: group = {} is now ready for processing",
@@ -272,31 +277,34 @@ where
             replica_id
         );
         let group_id = self.group_id;
-        let last_term = entries[entries.len() - 1].term;
-        self.maybe_update_committed_term(last_term);
+        let last_commit_ent = &entries[entries.len() - 1];
+
+        // update shared_state for latest commit
+        self.shared_state.set_commit_index(last_commit_ent.index);
+        self.shared_state.set_commit_term(last_commit_ent.term);
+
+        // update group local state without shared
+        if self.commit_term != last_commit_ent.term && self.leader.replica_id != 0 {
+            self.commit_term = last_commit_ent.term;
+        }
+        if self.commit_index != last_commit_ent.index && self.leader.replica_id != 0 {
+            self.commit_index = last_commit_ent.index;
+        }
 
         let apply = self.create_apply(gs, replica_id, entries);
         multi_groups_apply.insert(group_id, apply);
     }
 
-    /// Update the term of the latest entries committed during
-    /// the term of the leader.
-    #[inline]
-    fn maybe_update_committed_term(&mut self, term: u64) {
-        if self.committed_term != term && self.leader.replica_id != 0 {
-            self.committed_term = term
-        }
-    }
-
     fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> ApplyData<RES> {
-        let current_term = self.raft_group.raft.term;
-        // TODO: min(persistent, committed)
-        // let commit_index = self.raft_group.raft.raft_log.committed;
+        // this is different from `commit_index` and `commit_term` for self local,
+        // we need a commit state that has been advanced to the state machine.
         let commit_index = std::cmp::min(
             self.raft_group.raft.raft_log.committed,
             self.raft_group.raft.raft_log.persisted,
         );
         let commit_term = gs.term(commit_index).unwrap();
+
+        let current_term = self.raft_group.raft.term;
         let mut proposals = Vec::new();
         if !self.proposals.is_empty() {
             for entry in entries.iter() {
@@ -362,7 +370,6 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        // pending_events: &mut Vec<Event>,
         event_bcast: &mut EventChannel,
     ) {
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
@@ -383,7 +390,6 @@ where
         node_id: u64,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
-        // pending_events: &mut Vec<Event>,
         event_bcast: &mut EventChannel,
     ) {
         let group_id = self.group_id;
@@ -419,12 +425,17 @@ where
             }
         };
 
+        // update shared states
+        self.shared_state.set_leader_id(ss.leader_id);
+        self.shared_state.set_role(&ss.raft_state);
+
         info!(
             "node {}: group = {}, replica = {} became leader",
             node_id, self.group_id, ss.leader_id
         );
         let replica_id = replica_desc.replica_id;
         self.leader = replica_desc; // always set because node_id maybe NO_NODE.
+
         event_bcast.push(Event::LederElection(LeaderElectionEvent {
             group_id: self.group_id,
             leader_id: ss.leader_id,
@@ -638,10 +649,7 @@ where
         None
     }
 
-    pub fn read_index_propose(
-        &mut self,
-        data: ReadIndexData,
-    ) -> Option<ResponseCallback> {
+    pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
         // let uuid = Uuid::new_v4();
         let mut ctx = Vec::new();
         // Safety: This method is unsafe because it is unsafe to
@@ -649,7 +657,7 @@ where
         // indicates that it is undefined behavior to observe padding bytes,
         // which will happen when we memmcpy structs which contain padding bytes.
         unsafe { abomonation::encode(&data.context, &mut ctx).unwrap() };
-        
+
         self.raft_group.read_index(ctx);
 
         let proposal = ReadIndexProposal {
@@ -787,6 +795,22 @@ where
                 self.node_ids.truncate(len - 1);
                 true
             })
+    }
+
+    pub(crate) fn advance_apply(&mut self, result: &ApplyResultMessage) {
+        // keep  invariant
+        assert!(result.applied_index <= self.commit_index);
+
+        self.raft_group.advance_apply_to(result.applied_index);
+
+        // update local apply state
+        self.applied_index = result.applied_index;
+        self.applied_term = result.applied_term;
+
+        // update shared state for apply
+        self.shared_state
+            .set_applied_index(result.applied_index);
+        self.shared_state.set_applied_term(result.applied_term);
     }
 }
 

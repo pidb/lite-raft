@@ -68,7 +68,7 @@ async fn test_group_stale_write() {
         // let res = timeout_at(Instant::now() + Duration::from_millis(1000), stale_rx)
         // .await
         // .expect(format!("wait stale {} timeouted", i + 1).as_str());
-        assert_eq!(stale_rx.await.unwrap().is_err(), true);
+        assert_eq!(stale_rx.unwrap().await.unwrap().is_err(), true);
     }
 
     // check normal
@@ -87,7 +87,7 @@ async fn test_group_stale_write() {
 
     for rx in recvs {
         // TODO: assertiong response type
-        assert_eq!(rx.await.unwrap().is_ok(), true);
+        assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
     // cluster.stop().await;
 }
