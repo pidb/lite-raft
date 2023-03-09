@@ -41,7 +41,6 @@ use super::error::RaftGroupError;
 use super::event::Event;
 use super::event::EventChannel;
 use super::group::RaftGroup;
-use super::group::RaftGroupState;
 use super::group::RaftGroupWriteRequest;
 use super::group::Status;
 use super::msg::ApplyCommitMessage;
@@ -252,6 +251,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
+            states.clone(),
             apply_request_rx,
             apply_response_tx,
             commit_tx,
@@ -1042,7 +1042,6 @@ where
             node_ids: Vec::new(),
             proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(),
-            state: RaftGroupState::default(),
             status: Status::None,
             read_index_queue: ReadIndexQueue::new(),
             shared_state: shared_state.clone(),
@@ -1131,22 +1130,20 @@ where
         name = "NodeActor::handle_apply_result",
         skip(self))
     ]
-    async fn handle_apply_result(&mut self, response: ApplyResultMessage) {
-        let group = match self.groups.get_mut(&response.group_id) {
+    async fn handle_apply_result(&mut self, result: ApplyResultMessage) {
+        let group = match self.groups.get_mut(&result.group_id) {
             Some(group) => group,
             None => {
-                warn!("group {} removed, skip apply", response.group_id);
+                warn!("group {} removed, skip apply", result.group_id);
                 return;
             }
         };
 
-        group.advance_apply(&response.apply_state);
+        group.advance_apply(&result);
         debug!(
             "node {}: group = {} apply state change = {:?}",
-            self.node_id, response.group_id, response.apply_state
+            self.node_id, result.group_id, result
         );
-
-        group.state.apply_state = response.apply_state;
     }
 
     async fn handle_apply_commit(&mut self, commit: ApplyCommitMessage) {
@@ -1480,7 +1477,6 @@ mod tests {
     use crate::multiraft::proposal::ReadIndexQueue;
 
     use crate::multiraft::group::RaftGroup;
-    use crate::multiraft::group::RaftGroupState;
     use crate::multiraft::group::Status;
 
     use crate::multiraft::replica_cache::ReplicaCache;
@@ -1521,12 +1517,11 @@ mod tests {
             node_ids: vec![node_id],
             proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
-            state: RaftGroupState::default(),
             status: Status::None,
             shared_state: Arc::new(GroupState::default()),
             read_index_queue: ReadIndexQueue::new(),
 
-            commit_term: 0,                 // TODO: init committed term from storage
+            commit_term: 0, // TODO: init committed term from storage
             commit_index: 0,
             applied_index: 0,
             applied_term: 0,

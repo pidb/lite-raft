@@ -20,18 +20,23 @@ use crate::util::TaskGroup;
 use super::config::Config;
 use super::error::Error;
 use super::error::WriteError;
-use super::group::RaftGroupApplyState;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::proposal::Proposal;
 use super::response::AppWriteResponse;
+use super::state::GroupStates;
 use super::Apply;
 use super::ApplyMembership;
 use super::ApplyNoOp;
 use super::ApplyNormal;
 use super::StateMachine;
+
+struct LocalApplyState {
+    applied_term: u64,
+    applied_index: u64,
+}
 
 pub struct ApplyActor {}
 
@@ -39,6 +44,7 @@ impl ApplyActor {
     pub(crate) fn spawn<RES, RSM>(
         cfg: &Config,
         rsm: RSM,
+        shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<RES>)>,
         response_tx: UnboundedSender<ApplyResultMessage>,
         commit_tx: UnboundedSender<ApplyCommitMessage>,
@@ -48,7 +54,7 @@ impl ApplyActor {
         RES: AppWriteResponse,
         RSM: StateMachine<RES>,
     {
-        let worker = ApplyWorker::new(cfg, rsm, request_rx, response_tx, commit_tx);
+        let worker = ApplyWorker::new(cfg, rsm, shared_states, request_rx, response_tx, commit_tx);
         let stopper = task_group.stopper();
         task_group.spawn(async move {
             worker.main_loop(stopper).await;
@@ -63,7 +69,6 @@ where
     RSM: StateMachine<RES>,
     RES: AppWriteResponse,
 {
-    multi_groups_apply_state: HashMap<u64, RaftGroupApplyState>,
     node_id: u64,
     cfg: Config,
     rx: UnboundedReceiver<(tracing::span::Span, ApplyMessage<RES>)>,
@@ -71,6 +76,8 @@ where
     pending_applys: HashMap<u64, Vec<ApplyData<RES>>>,
     ctx: ApplyContext<RSM, RES>,
     delegate: ApplyDelegate<RSM, RES>,
+    local_apply_states: HashMap<u64, LocalApplyState>,
+    shared_states: GroupStates,
 }
 
 impl<RSM, RES> ApplyWorker<RSM, RES>
@@ -81,17 +88,18 @@ where
     fn new(
         cfg: &Config,
         rsm: RSM,
+        shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<RES>)>,
         response_tx: UnboundedSender<ApplyResultMessage>,
         commit_tx: UnboundedSender<ApplyCommitMessage>,
     ) -> Self {
         Self {
-            multi_groups_apply_state: HashMap::default(), // FIXME: Should be initialized at raft group creation time
+            local_apply_states: HashMap::default(),
             node_id: cfg.node_id,
             cfg: cfg.clone(),
-            // ctx: ctx.clone(),
             rx: request_rx,
             tx: response_tx,
+            shared_states,
             pending_applys: HashMap::new(),
             delegate: ApplyDelegate::new(cfg.node_id),
             ctx: ApplyContext {
@@ -165,9 +173,15 @@ where
     }
 
     async fn delegate_handle_applys(&mut self) {
-        // let mut futs = vec![];
         for (group_id, applys) in self.pending_applys.drain() {
-            let apply_state = self.multi_groups_apply_state.entry(group_id).or_default();
+            let shared_state = self.shared_states.get(group_id).unwrap();
+            let apply_state = self
+                .local_apply_states
+                .entry(group_id)
+                .or_insert(LocalApplyState {
+                    applied_index: shared_state.get_applied_index(),
+                    applied_term: shared_state.get_applied_term(),
+                });
 
             let response = self
                 .delegate
@@ -455,7 +469,7 @@ where
         &mut self,
         ctx: &mut ApplyContext<RSM, RES>,
         mut apply: ApplyData<RES>,
-        apply_state: &mut RaftGroupApplyState,
+        apply_state: &mut LocalApplyState,
     ) {
         let group_id = apply.group_id;
         let (prev_applied_index, prev_applied_term) =
@@ -474,9 +488,14 @@ where
             return;
         }
 
-        // helps applications establish monotonically increasing apply constraints for each batch.
-        if *apply_state != RaftGroupApplyState::default()
-            && apply.entries[0].index != apply_state.applied_index + 1
+        // Helps applications establish monotonically increasing apply constraints for each batch.
+        //
+        // Notes:
+        // If the `LocalApplyState` applied_index is equal to 0, it means the `Storage` **is not**
+        // created with a configuration, and its last index and term should be equal to 0. This
+        // case can happen when a consensus group is started with a membership change.
+        // In this case, we give up continue check and then catch up leader state.
+        if apply_state.applied_index != 0 && apply.entries[0].index != apply_state.applied_index + 1
         {
             panic!(
                 "apply entries index does not match, expect {}, but got {}",
@@ -564,15 +583,13 @@ where
                     (index - 1, 0 /* TODO: load term from stored entries*/)
                 }
             });
-        apply_state.commit_term = apply.commit_term;
-        apply_state.commit_index = apply.commit_index;
     }
 
     async fn handle_applys(
         &mut self,
         group_id: u64,
         applys: Vec<ApplyData<RES>>,
-        apply_state: &mut RaftGroupApplyState,
+        apply_state: &mut LocalApplyState,
         ctx: &mut ApplyContext<RSM, RES>,
     ) -> Result<ApplyResultMessage, Error> {
         for apply in applys {
@@ -581,7 +598,8 @@ where
 
         Ok(ApplyResultMessage {
             group_id,
-            apply_state: apply_state.clone(),
+            applied_index: apply_state.applied_index,
+            applied_term: apply_state.applied_term,
         })
     }
 }
@@ -632,6 +650,7 @@ mod test {
     use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::multiraft::state::GroupStates;
     use crate::multiraft::util::compute_entry_size;
     use crate::multiraft::Config;
     use crate::multiraft::StateMachine;
@@ -704,7 +723,15 @@ mod test {
         };
 
         let rsm = NoOpStateMachine {};
-        ApplyWorker::new(&cfg, rsm, request_rx, response_tx, callback_tx)
+        let shared_states = GroupStates::new();
+        ApplyWorker::new(
+            &cfg,
+            rsm,
+            shared_states,
+            request_rx,
+            response_tx,
+            callback_tx,
+        )
     }
     #[test]
     fn test_batch_pendings() {

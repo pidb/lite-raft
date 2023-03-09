@@ -21,7 +21,6 @@ use tracing::Level;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
 use crate::prelude::ConfChangeV2;
-use crate::prelude::ConfState;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
@@ -32,6 +31,7 @@ use super::error::WriteError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
+use super::msg::ApplyResultMessage;
 use super::msg::ReadIndexData;
 use super::msg::WriteData;
 use super::multiraft::NO_NODE;
@@ -50,28 +50,11 @@ use super::transport;
 use super::util;
 use super::Event;
 
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct RaftGroupApplyState {
-    pub commit_index: u64,
-    pub commit_term: u64,
-    pub applied_term: u64,
-    pub applied_index: u64,
-}
-
 pub enum Status {
     None,
     Delete,
 }
 
-#[derive(Debug, Default, PartialEq)]
-pub struct RaftGroupState {
-    pub group_id: u64,
-    pub replica_id: u64,
-    // pub hard_state: HardState,
-    pub soft_state: SoftState,
-    pub membership_state: ConfState,
-    pub apply_state: RaftGroupApplyState,
-}
 
 #[derive(Default, Debug)]
 pub struct RaftGroupWriteRequest {
@@ -113,7 +96,7 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     /// updated when apply returns results    
     pub applied_term: u64,
 
-    pub state: RaftGroupState,
+    // pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
     pub shared_state: Arc<GroupState>,
@@ -814,20 +797,20 @@ where
             })
     }
 
-    pub(crate) fn advance_apply(&mut self, apply_state: &RaftGroupApplyState) {
+    pub(crate) fn advance_apply(&mut self, result: &ApplyResultMessage) {
         // keep  invariant
-        assert!(apply_state.applied_index <= self.commit_index);
+        assert!(result.applied_index <= self.commit_index);
 
-        self.raft_group.advance_apply_to(apply_state.applied_index);
+        self.raft_group.advance_apply_to(result.applied_index);
 
         // update local apply state
-        self.applied_index = apply_state.applied_index;
-        self.applied_term = apply_state.applied_term;
+        self.applied_index = result.applied_index;
+        self.applied_term = result.applied_term;
 
         // update shared state for apply
         self.shared_state
-            .set_applied_index(apply_state.applied_index);
-        self.shared_state.set_applied_term(apply_state.applied_term);
+            .set_applied_index(result.applied_index);
+        self.shared_state.set_applied_term(result.applied_term);
     }
 }
 

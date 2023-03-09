@@ -10,7 +10,6 @@ use crate::prelude::MembershipChangeData;
 // use crate::prelude::RaftGroupManagement;
 
 use super::error::Error;
-use super::group::RaftGroupApplyState;
 use super::proposal::Proposal;
 use super::response::AppWriteResponse;
 
@@ -113,7 +112,8 @@ pub enum ApplyMessage<RES: AppWriteResponse> {
 #[derive(Debug)]
 pub struct ApplyResultMessage {
     pub group_id: u64,
-    pub apply_state: RaftGroupApplyState,
+    pub applied_index: u64,
+    pub applied_term: u64,
 }
 
 /// Commit membership change results.
