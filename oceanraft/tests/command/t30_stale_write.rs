@@ -89,5 +89,5 @@ async fn test_group_stale_write() {
         // TODO: assertiong response type
         assert_eq!(rx.await.unwrap().is_ok(), true);
     }
-    cluster.stop().await;
+    // cluster.stop().await;
 }

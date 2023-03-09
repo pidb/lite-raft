@@ -3,100 +3,53 @@ package multiraft;
 
 import "eraftpb.proto";
 
-message AppWriteRequest {
-    uint64 group_id = 1;
-    uint64 term = 2;
-    bytes data = 3;
-    bytes context = 4;
-}
-
-message AppWriteResponse {
-
-}
-
-message ReadIndexContext {
-    bytes uuid = 1;
-    bytes data = 2;
-}
-
-message AppReadIndexRequest {
-    uint64 group_id = 1;
-    ReadIndexContext context = 2;
-}
-
-message AppReadIndexResponse {
-
-}
-
-
 message ReplicaDesc {
-    uint64 node_id = 1;
-    uint64 replica_id = 2;
-    // uint64 store_id = 3;
+  uint64 node_id = 1;
+  uint64 replica_id = 2;
+  // uint64 store_id = 3;
 }
 
 message RaftGroupDesc {
-    uint64 group_id = 1;
-    repeated uint64 nodes = 2;
-    repeated ReplicaDesc replicas = 3;
+  uint64 group_id = 1;
+  repeated uint64 nodes = 2;
+  repeated ReplicaDesc replicas = 3;
 }
 
 // MultiRaftMessage wraps eraft.Message and includes the node information.
 // 1. `group_id` is the raft group identifier. it must define that 0 is invalid.
-// 2. `from_node` represents which node the message came from, so `msg.from` represents 
+// 2. `from_node` represents which node the message came from, so `msg.from`
+// represents
 //    which replica id came from the node.
-// 3. `to_node` represents the node to which the message is sent, so `msg.to` represents 
+// 3. `to_node` represents the node to which the message is sent, so `msg.to`
+// represents
 //    the replica id sent to the node.
-// 4. `replica` contains the location information of the raft group replica. It can be empty. 
-//     Note: This field is used to configure new replicas to learn this information when the 
-//     raft group sends initialization messages to other nodes after a membership change.
+// 4. `replica` contains the location information of the raft group replica. It
+// can be empty.
+//     Note: This field is used to configure new replicas to learn this
+//     information when the raft group sends initialization messages to other
+//     nodes after a membership change.
 // 5. `msg` is eraft.Message.
 message MultiRaftMessage {
-    uint64 group_id = 1;
-    uint64 from_node = 2;
-    uint64 to_node = 3;
-    repeated  ReplicaDesc replicas = 4;
-    eraftpb.Message msg = 5;
+  uint64 group_id = 1;
+  uint64 from_node = 2;
+  uint64 to_node = 3;
+  repeated ReplicaDesc replicas = 4;
+  eraftpb.Message msg = 5;
 }
 
 // MultiRaftMessageResponse is an empty message returned by raft RPCs. If a
 // response is needed it will be sent as a separate message.
-message MultiRaftMessageResponse {
-
-}
-
-
-enum RaftGroupManagementType {
-    MsgCreateGroup = 0;
-    MsgRemoveGoup = 1;
-}
-
-message RaftGroupManagement {
-    uint64 group_id = 1;
-    uint64 replica_id = 2;
-    repeated ReplicaDesc replicas = 3;
-    RaftGroupManagementType msg_type = 4;
-}
-
+message MultiRaftMessageResponse {}
 
 message SingleMembershipChange {
-    uint64 node_id = 1;
-    uint64 replica_id = 2;
-    eraftpb.ConfChangeType change_type = 3;
+  uint64 node_id = 1;
+  uint64 replica_id = 2;
+  eraftpb.ConfChangeType change_type = 3;
 }
 
-message MembershipChangeRequest {
-    uint64 group_id = 1;
-    uint64 term = 2;
-    repeated SingleMembershipChange changes = 3;
-    repeated ReplicaDesc replicas = 4;
-}
-
-enum AdminMessageType {
-    RaftGroup = 0;
-}
-
-message AdminMessage {
-    RaftGroupManagement raft_group = 1;
-    AdminMessageType msg_type = 2;
+message MembershipChangeData {
+  uint64 group_id = 1;
+  uint64 term = 2;
+  repeated SingleMembershipChange changes = 3;
+  repeated ReplicaDesc replicas = 4;
 }

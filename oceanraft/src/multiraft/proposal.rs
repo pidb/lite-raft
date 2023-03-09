@@ -2,17 +2,15 @@ use std::collections::vec_deque::Drain;
 use std::collections::VecDeque;
 use std::fmt::Debug;
 
-use prost::Message;
 use raft::ReadState;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::prelude::ReadIndexContext;
-
 use super::error::Error;
 use super::error::WriteError;
+use super::msg::ReadIndexContext;
 use super::response::AppWriteResponse;
 
 /// Shrink queue if queue capacity more than and len less than
@@ -78,18 +76,28 @@ impl ReadIndexQueue {
     }
 
     pub(crate) fn advance_reads(&mut self, rss: Vec<ReadState>) {
-        for rs in rss {
-            let mut rctx = ReadIndexContext::default();
-            let _ = rctx
-                .merge_length_delimited(rs.request_ctx.as_ref())
-                .unwrap();
-
-            let rctx_uuid = Uuid::from_bytes(rctx.get_uuid().try_into().unwrap());
-            // let rctx_uuid = Uuid::parse(&rctx.uuid).unwrap();
+        for mut rs in rss {
+            // usnafe of safety:
+            // The decode method is unsafe due to a number of unchecked invariants.
+            //
+            // Decoding arbitrary &[u8] data can result in invalid utf8 strings, enums
+            // with invalid discriminants, etc. decode does perform bounds checks, as part
+            // of determining if enough data are present to completely decode, and while it
+            // should only write within the bounds of its &mut [u8] argument, the use of invalid
+            // utf8 and enums are undefined behavior.
+            //
+            // Please do not decode data that was not encoded by the corresponding implementation.
+            //
+            // In addition, decode does not ensure that the bytes representing types will be
+            // correctly aligned. On several platforms unaligned reads are undefined behavior,
+            // but on several other platforms they are only a performance penalty.
+            let (rctx, remaining) =
+                unsafe { abomonation::decode::<ReadIndexContext>(&mut rs.request_ctx).unwrap() };
+            assert_eq!(remaining.len(), 0);
             match self.queue.get_mut(self.ready_cnt) {
-                Some(read) if read.uuid == rctx_uuid => {
+                Some(read) if read.uuid == rctx.uuid => {
                     read.read_index = Some(rs.index);
-                    read.context = Some(rctx);
+                    read.context = Some(rctx.clone());
                     self.ready_cnt += 1;
                 }
                 Some(read) => error!("unexpected uuid {} detected", read.uuid),

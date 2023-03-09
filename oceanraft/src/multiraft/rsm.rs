@@ -11,7 +11,7 @@ use crate::prelude::ConfChangeI;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::EntryType;
-use crate::prelude::MembershipChangeRequest;
+use crate::prelude::MembershipChangeData;
 
 use super::error::Error;
 use super::msg::ApplyCommitMessage;
@@ -28,6 +28,7 @@ pub struct ApplyNoOp {
 #[derive(Debug)]
 pub struct ApplyNormal<RES: AppWriteResponse> {
     pub group_id: u64,
+    // TODO: Consider exposing only internal fields instead of entry
     pub entry: Entry,
     pub is_conf_change: bool,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
@@ -49,7 +50,7 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
                 let mut conf_change = ConfChange::default();
                 conf_change.merge(self.entry.data.as_ref()).unwrap();
 
-                let mut change_request = MembershipChangeRequest::default();
+                let mut change_request = MembershipChangeData::default();
                 change_request.merge(self.entry.context.as_ref()).unwrap();
 
                 CommitMembership {
@@ -62,7 +63,7 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
                 let mut conf_change = ConfChangeV2::default();
                 conf_change.merge(self.entry.data.as_ref()).unwrap();
 
-                let mut change_request = MembershipChangeRequest::default();
+                let mut change_request = MembershipChangeData::default();
                 change_request.merge(self.entry.context.as_ref()).unwrap();
 
                 CommitMembership {
@@ -84,7 +85,7 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
             .commit_tx
             .send(ApplyCommitMessage::Membership((commit, tx)))
         {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(_) => {
                 return Err(Error::Channel(ChannelError::ReceiverClosed(
                     "node actor dropped".to_owned(),
