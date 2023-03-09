@@ -22,6 +22,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
+use crate::multiraft::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
@@ -1021,13 +1022,15 @@ where
             "node {}: raft group_id = {}, replica_id = {} created",
             self.node_id, group_id, replica_id
         );
+
+        //  initialize shared_state of group
         let shared_state = Arc::new(GroupState::from((
             replica_id,
             rs.hard_state.commit, /* commit_index */
             rs.hard_state.term,   /* commit_term */
             rs.hard_state.commit, /* applied_index */
             rs.hard_state.term,   /* applied_term */
-            0,
+            NO_LEADER,
             StateRole::Follower,
         )));
 
@@ -1038,13 +1041,16 @@ where
             raft_group,
             node_ids: Vec::new(),
             proposals: ProposalQueue::new(replica_id),
-            leader: ReplicaDesc::default(), // TODO: init leader from storage
-            commit_index: 0,
-            commit_term: 0,              // TODO: init committed term from storage
+            leader: ReplicaDesc::default(),
             state: RaftGroupState::default(),
             status: Status::None,
-            shared_state: shared_state.clone(),
             read_index_queue: ReadIndexQueue::new(),
+            shared_state: shared_state.clone(),
+
+            applied_index: rs.hard_state.commit,
+            applied_term: rs.hard_state.term,
+            commit_index: rs.hard_state.commit,
+            commit_term: rs.hard_state.term,
         };
 
         for replica_desc in replicas_desc.iter() {
@@ -1515,12 +1521,15 @@ mod tests {
             node_ids: vec![node_id],
             proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
-            commit_term: 0,              // TODO: init committed term from storage
-            commit_index: 0,
             state: RaftGroupState::default(),
             status: Status::None,
             shared_state: Arc::new(GroupState::default()),
             read_index_queue: ReadIndexQueue::new(),
+
+            commit_term: 0,                 // TODO: init committed term from storage
+            commit_index: 0,
+            applied_index: 0,
+            applied_term: 0,
         })
     }
 

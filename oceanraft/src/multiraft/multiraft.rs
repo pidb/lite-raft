@@ -37,6 +37,7 @@ use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
+pub const NO_LEADER: u64 = 0;
 
 /// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///

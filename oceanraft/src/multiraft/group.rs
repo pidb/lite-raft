@@ -105,6 +105,14 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     /// should be greater than or equal to `raft_group`
     pub commit_term: u64,
 
+    /// Represents the index applied to the current group apply,
+    /// updated when apply returns results    
+    pub applied_index: u64,
+
+    /// Represents the term applied to the current group apply,
+    /// updated when apply returns results    
+    pub applied_term: u64,
+
     pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
@@ -811,6 +819,10 @@ where
         assert!(apply_state.applied_index <= self.commit_index);
 
         self.raft_group.advance_apply_to(apply_state.applied_index);
+
+        // update local apply state
+        self.applied_index = apply_state.applied_index;
+        self.applied_term = apply_state.applied_term;
 
         // update shared state for apply
         self.shared_state
