@@ -77,23 +77,24 @@ impl GroupState {
     #[inline]
     #[allow(unused)]
     pub fn get_replica_id(&self) -> u64 {
-        unimplemented!()
+        self.replica_id.load(Ordering::SeqCst)
     }
 
     #[inline]
+    #[allow(unused)]
     pub fn set_replica_id(&self, val: u64) {
-        unimplemented!()
+        self.replica_id.store(val, Ordering::SeqCst)
     }
 
     #[inline]
     #[allow(unused)]
     pub fn get_commit_index(&self) -> u64 {
-        unimplemented!()
+        self.commit_index.load(Ordering::SeqCst)
     }
 
     #[inline]
     pub fn set_commit_index(&self, val: u64) {
-        unimplemented!()
+        self.commit_index.store(val, Ordering::SeqCst)
     }
 
     #[inline]

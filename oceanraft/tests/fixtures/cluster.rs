@@ -341,10 +341,8 @@ impl FixtureCluster {
         node_id: u64,
         group_id: u64,
         data: Vec<u8>,
-    ) -> oneshot::Receiver<Result<(), Error>> {
-        self.nodes[to_index(node_id)]
-            .write_non_block(group_id, 0, data, None)
-            .unwrap()
+    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+        self.nodes[to_index(node_id)].write_non_block(group_id, 0, data, None)
     }
 
     // Wait normal apply.

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use prost::Message;
@@ -93,7 +92,19 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
     pub node_ids: Vec<u64>,
     pub proposals: ProposalQueue<RES>,
     pub leader: ReplicaDesc,
-    pub committed_term: u64,
+
+    /// the current latest commit index, which is different from the
+    /// internal `commit_index` of `raft_group`, may be the `commit_index`
+    /// but not yet advance state machine, meaning that `commit_index`
+    /// should be greater than or equal to `raft_group`
+    pub commit_index: u64,
+
+    /// the current latest `commit_term`, which is different from the
+    /// internal `commit_term` of `raft_group`, may be the `commit_term`
+    /// but not yet advance state machine, meaning that `commit_term`
+    /// should be greater than or equal to `raft_group`
+    pub commit_term: u64,
+
     pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
@@ -275,32 +286,34 @@ where
             replica_id
         );
         let group_id = self.group_id;
-        let last_term = entries[entries.len() - 1].term;
-        self.maybe_update_committed_term(last_term);
+        let last_commit_ent = &entries[entries.len() - 1];
+
+        // update shared_state for latest commit
+        self.shared_state.set_commit_index(last_commit_ent.index);
+        self.shared_state.set_commit_term(last_commit_ent.term);
+
+        // update group local state without shared
+        if self.commit_term != last_commit_ent.term && self.leader.replica_id != 0 {
+            self.commit_term = last_commit_ent.term;
+        }
+        if self.commit_index != last_commit_ent.index && self.leader.replica_id != 0 {
+            self.commit_index = last_commit_ent.index;
+        }
 
         let apply = self.create_apply(gs, replica_id, entries);
         multi_groups_apply.insert(group_id, apply);
     }
 
-    /// Update the term of the latest entries committed during
-    /// the term of the leader.
-    #[inline]
-    fn maybe_update_committed_term(&mut self, term: u64) {
-        if self.committed_term != term && self.leader.replica_id != 0 {
-            self.shared_state.set_commit_term(term);
-            self.committed_term = term
-        }
-    }
-
     fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> ApplyData<RES> {
-        let current_term = self.raft_group.raft.term;
-        // TODO: min(persistent, committed)
-        // let commit_index = self.raft_group.raft.raft_log.committed;
+        // this is different from `commit_index` and `commit_term` for self local,
+        // we need a commit state that has been advanced to the state machine.
         let commit_index = std::cmp::min(
             self.raft_group.raft.raft_log.committed,
             self.raft_group.raft.raft_log.persisted,
         );
         let commit_term = gs.term(commit_index).unwrap();
+
+        let current_term = self.raft_group.raft.term;
         let mut proposals = Vec::new();
         if !self.proposals.is_empty() {
             for entry in entries.iter() {
@@ -794,7 +807,12 @@ where
     }
 
     pub(crate) fn advance_apply(&mut self, apply_state: &RaftGroupApplyState) {
+        // keep  invariant
+        assert!(apply_state.applied_index <= self.commit_index);
+
         self.raft_group.advance_apply_to(apply_state.applied_index);
+
+        // update shared state for apply
         self.shared_state
             .set_applied_index(apply_state.applied_index);
         self.shared_state.set_applied_term(apply_state.applied_term);

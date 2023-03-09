@@ -6,7 +6,6 @@ use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
 
-
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
 #[async_entry::test(
@@ -36,14 +35,13 @@ async fn test_no_leader() {
     for i in 0..3 {
         let node_id = i + 1;
         let data = "data".as_bytes().to_vec();
-        let rx = cluster.write_command(node_id, plan.group_id, data);
         let expected_err = Error::Write(WriteError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
         });
 
-        match rx.await.unwrap() {
+        match cluster.write_command(node_id, plan.group_id, data) {
             Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
             Err(err) => assert_eq!(expected_err, err),
         }
@@ -83,16 +81,18 @@ async fn test_bad_group() {
     for i in 1..3 {
         let node_id = i + 1;
         let data = "data".as_bytes().to_vec();
-       
-        let rx = cluster.write_command(node_id, plan.group_id, data);
+
         let expected_err = Error::Write(WriteError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
         });
-        match rx.await.unwrap() {
-            Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
+        match cluster.write_command(node_id, plan.group_id, data) {
             Err(err) => assert_eq!(expected_err, err),
+            Ok(rx) => match rx.await.unwrap() {
+                Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
+                Err(err) => assert_eq!(expected_err, err),
+            },
         }
     }
     // cluster.stop().await;

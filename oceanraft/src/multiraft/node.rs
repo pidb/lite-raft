@@ -1039,7 +1039,8 @@ where
             node_ids: Vec::new(),
             proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
-            committed_term: 0,              // TODO: init committed term from storage
+            commit_index: 0,
+            commit_term: 0,              // TODO: init committed term from storage
             state: RaftGroupState::default(),
             status: Status::None,
             shared_state: shared_state.clone(),
@@ -1514,7 +1515,8 @@ mod tests {
             node_ids: vec![node_id],
             proposals: ProposalQueue::new(replica_id),
             leader: ReplicaDesc::default(), // TODO: init leader from storage
-            committed_term: 0,              // TODO: init committed term from storage
+            commit_term: 0,              // TODO: init committed term from storage
+            commit_index: 0,
             state: RaftGroupState::default(),
             status: Status::None,
             shared_state: Arc::new(GroupState::default()),
