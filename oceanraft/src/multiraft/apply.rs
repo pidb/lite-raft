@@ -31,6 +31,7 @@ use super::Apply;
 use super::ApplyMembership;
 use super::ApplyNoOp;
 use super::ApplyNormal;
+use super::GroupState;
 use super::StateMachine;
 
 struct LocalApplyState {
@@ -185,7 +186,13 @@ where
 
             let response = self
                 .delegate
-                .handle_applys(group_id, applys, apply_state, &mut self.ctx)
+                .handle_applys(
+                    group_id,
+                    applys,
+                    apply_state,
+                    shared_state.as_ref(),
+                    &mut self.ctx,
+                )
                 .await
                 .unwrap();
             // TODO: batch send?
@@ -470,6 +477,7 @@ where
         ctx: &mut ApplyContext<RSM, RES>,
         mut apply: ApplyData<RES>,
         apply_state: &mut LocalApplyState,
+        shared_state: &GroupState,
     ) {
         let group_id = apply.group_id;
         let (prev_applied_index, prev_applied_term) =
@@ -571,7 +579,10 @@ where
         // 3. Otherwise, maybe_failed_iter.next() -1 fails. We set applied as the index of the successful application log
         //
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
-        let maybe_failed_iter = ctx.rsm.apply(events.into_iter()).await;
+        let maybe_failed_iter = ctx
+            .rsm
+            .apply(group_id, shared_state, events.into_iter())
+            .await;
         (apply_state.applied_index, apply_state.applied_term) = maybe_failed_iter
             .and_then(|mut iter| iter.next())
             .map_or((apply.commit_index, apply.commit_term), |next| {
@@ -590,10 +601,12 @@ where
         group_id: u64,
         applys: Vec<ApplyData<RES>>,
         apply_state: &mut LocalApplyState,
+        shared_state: &GroupState,
         ctx: &mut ApplyContext<RSM, RES>,
     ) -> Result<ApplyResultMessage, Error> {
         for apply in applys {
-            self.handle_apply(ctx, apply, apply_state).await;
+            self.handle_apply(ctx, apply, apply_state, shared_state)
+                .await;
         }
 
         Ok(ApplyResultMessage {
@@ -648,8 +661,10 @@ where
 mod test {
     use futures::Future;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::multiraft::state::GroupState;
     use crate::multiraft::state::GroupStates;
     use crate::multiraft::util::compute_entry_size;
     use crate::multiraft::Config;
@@ -669,6 +684,8 @@ mod test {
             Self: 'life0;
         fn apply(
             &mut self,
+            _: u64,
+            _: &GroupState,
             _: std::vec::IntoIter<crate::multiraft::Apply<()>>,
         ) -> Self::ApplyFuture<'_> {
             async move { None }

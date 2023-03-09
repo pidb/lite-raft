@@ -17,6 +17,7 @@ use super::error::Error;
 use super::msg::ApplyCommitMessage;
 use super::msg::CommitMembership;
 use super::response::AppWriteResponse;
+use super::GroupState;
 
 #[derive(Debug)]
 pub struct ApplyNoOp {
@@ -137,5 +138,10 @@ where
     where
         Self: 'life0;
 
-    fn apply(&mut self, iter: IntoIter<Apply<R>>) -> Self::ApplyFuture<'_>;
+    fn apply(
+        &mut self,
+        group_id: u64,
+        state: &GroupState,
+        iter: IntoIter<Apply<R>>,
+    ) -> Self::ApplyFuture<'_>;
 }
