@@ -1,4 +1,3 @@
-// use raft::Storage;
 use tracing::error;
 use tracing::trace;
 use tracing::Level;
@@ -156,7 +155,7 @@ async fn send_message<TR, RS, MRS>(
     }
 }
 
-
 mod local;
 
 pub use local::LocalTransport;
+

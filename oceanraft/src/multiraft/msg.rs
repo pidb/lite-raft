@@ -7,7 +7,6 @@ use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
-// use crate::prelude::RaftGroupManagement;
 
 use super::error::Error;
 use super::proposal::Proposal;
