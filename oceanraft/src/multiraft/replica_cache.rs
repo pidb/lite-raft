@@ -1,20 +1,19 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use raft::Storage;
-
 use crate::prelude::RaftGroupDesc;
 use crate::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::storage::MultiRaftStorage;
+use super::storage::RaftStorage;
 
 /// ReplicaCache cache replica metadatas
 /// from read storage and messages and write the replica metadata the storage
 /// when cache miss.
 pub struct ReplicaCache<RS, MRS>
 where
-    RS: Storage,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
     storage: MRS,
@@ -24,7 +23,7 @@ where
 
 impl<RS, MRS> ReplicaCache<RS, MRS>
 where
-    RS: Storage,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
     pub fn new(storage: MRS) -> Self {

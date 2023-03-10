@@ -1,3 +1,5 @@
+extern crate raft_proto;
+
 use std::vec::IntoIter;
 
 use futures::Future;
@@ -5,9 +7,10 @@ use prost::Message;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
+use raft_proto::ConfChangeI;
+
 use crate::multiraft::error::ChannelError;
 use crate::prelude::ConfChange;
-use crate::prelude::ConfChangeI;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::EntryType;

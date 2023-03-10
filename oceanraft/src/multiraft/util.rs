@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use futures::future::BoxFuture;
 use prost::Message;
-use raft_proto::prelude::Entry;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -14,6 +13,8 @@ use tokio::time::interval_at;
 #[allow(unused)]
 use tokio::time::Instant;
 use tokio::time::Interval;
+
+use crate::prelude::Entry;
 
 #[inline]
 pub fn compute_entry_size(ent: &Entry) -> usize {

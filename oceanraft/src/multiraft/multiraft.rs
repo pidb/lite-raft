@@ -1,8 +1,6 @@
 use std::time::Duration;
 
 use futures::Future;
-use raft::prelude::ReplicaDesc;
-use raft::Storage;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
@@ -12,6 +10,7 @@ use uuid::Uuid;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
+use crate::prelude::ReplicaDesc;
 use crate::util::TaskGroup;
 
 use super::config::Config;
@@ -30,6 +29,7 @@ use super::node::NodeActor;
 use super::response::AppWriteResponse;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
+use super::storage::RaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
 use super::RaftGroupError;
@@ -109,7 +109,7 @@ where
     ) -> Result<Self, Error>
     where
         TR: Transport + Clone,
-        RS: Storage + Send + Sync + Clone + 'static,
+        RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
         RSM: StateMachine<RES>,
         RES: AppWriteResponse,

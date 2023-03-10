@@ -1,19 +1,101 @@
-use std::collections::hash_map::HashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::multiraft::storage::MultiRaftStorage;
-use crate::multiraft::Error;
-
 use futures::Future;
-use raft_proto::prelude::ConfState;
-use raft_proto::prelude::RaftGroupDesc;
-use raft_proto::prelude::ReplicaDesc;
+use raft::storage::MemStorage;
+use raft::Result as RaftResult;
 use tokio::sync::RwLock as AsyncRwLock;
 
-pub type Result<T> = std::result::Result<T, Error>;
+use crate::multiraft::error::Error;
+use crate::multiraft::error::Result;
+use crate::prelude::ConfState;
+use crate::prelude::Entry;
+use crate::prelude::HardState;
+use crate::prelude::RaftGroupDesc;
+use crate::prelude::RaftState;
+use crate::prelude::ReplicaDesc;
+use crate::prelude::Snapshot;
 
-/// This raft-rs MemStorage trait re-export.
-pub use raft::storage::MemStorage as RaftMemStorage;
+use super::MultiRaftStorage;
+use super::RaftStorage;
+use super::RaftStorageReader;
+use super::RaftStorageWriter;
+
+#[derive(Clone)]
+pub struct RaftMemStorage {
+    core: Arc<MemStorage>,
+}
+
+impl RaftMemStorage {
+    pub fn new() -> Self {
+        Self {
+            core: Arc::new(MemStorage::new()),
+        }
+    }
+
+    pub fn new_with_conf_state(cs: ConfState) -> Self {
+        Self {
+            core: Arc::new(MemStorage::new_with_conf_state(cs)),
+        }
+    }
+}
+
+impl RaftStorageReader for RaftMemStorage {
+    fn entries(
+        &self,
+        low: u64,
+        high: u64,
+        max_size: impl Into<Option<u64>>,
+        context: raft::GetEntriesContext,
+    ) -> RaftResult<Vec<Entry>> {
+        self.core.entries(low, high, max_size, context)
+    }
+
+    fn first_index(&self) -> RaftResult<u64> {
+        self.core.first_index()
+    }
+
+    fn initial_state(&self) -> RaftResult<RaftState> {
+        self.core.initial_state()
+    }
+
+    fn last_index(&self) -> RaftResult<u64> {
+        self.core.last_index()
+    }
+
+    fn snapshot(&self, request_index: u64, to: u64) -> RaftResult<Snapshot> {
+        self.core.snapshot(request_index, to)
+    }
+
+    fn term(&self, idx: u64) -> RaftResult<u64> {
+        self.core.term(idx)
+    }
+}
+
+impl RaftStorageWriter for RaftMemStorage {
+    fn append(&self, ents: &[Entry]) -> crate::multiraft::error::Result<()> {
+        self.core.wl().append(ents).map_err(|err| Error::Raft(err))
+    }
+
+    fn apply_snapshot(&self, snapshot: Snapshot) -> crate::multiraft::error::Result<()> {
+        self.core
+            .wl()
+            .apply_snapshot(snapshot)
+            .map_err(|err| Error::Raft(err))
+    }
+
+    fn set_hardstate(&self, hs: HardState) -> Result<()> {
+        self.core.wl().set_hardstate(hs);
+        Ok(())
+    }
+
+    fn set_confstate(&self, cs: ConfState) -> Result<()> {
+        self.core.wl().set_conf_state(cs);
+        Ok(())
+    }
+}
+
+impl RaftStorage for RaftMemStorage {}
 
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
@@ -33,30 +115,30 @@ impl MultiRaftMemoryStorage {
 }
 
 impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
-    type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = Result<RaftMemStorage>> + 'life0
-        where
-            Self: 'life0,
-            ConfState: From<T>,
-            T: Send + 'life0;
-    #[allow(unused)]
-    fn create_group_storage_with_conf_state<'life0, T>(
-        &'life0 self,
-        group_id: u64,
-        replica_id: u64,
-        conf_state: T,
-    ) -> Self::CreateGroupStorageWithConfStateFuture<'life0, T>
-    where
-        ConfState: From<T>,
-        T: Send,
-    {
-        async move {
-            let mut wl = self.groups.write().await;
-            assert_ne!(wl.contains_key(&group_id), true);
-            let storage = RaftMemStorage::new_with_conf_state(conf_state);
-            wl.insert(group_id, storage.clone());
-            Ok(storage)
-        }
-    }
+    // type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = Result<RaftMemStorage>> + 'life0
+    //     where
+    //         Self: 'life0,
+    //         ConfState: From<T>,
+    //         T: Send + 'life0;
+    // #[allow(unused)]
+    // fn create_group_storage_with_conf_state<'life0, T>(
+    //     &'life0 self,
+    //     group_id: u64,
+    //     replica_id: u64,
+    //     conf_state: T,
+    // ) -> Self::CreateGroupStorageWithConfStateFuture<'life0, T>
+    // where
+    //     ConfState: From<T>,
+    //     T: Send,
+    // {
+    //     async move {
+    //         let mut wl = self.groups.write().await;
+    //         assert_ne!(wl.contains_key(&group_id), true);
+    //         let storage = RaftMemStorage::new_with_conf_state(conf_state);
+    //         wl.insert(group_id, storage.clone());
+    //         Ok(storage)
+    //     }
+    // }
 
     type GroupStorageFuture<'life0> = impl Future<Output = Result<RaftMemStorage>> + 'life0
         where

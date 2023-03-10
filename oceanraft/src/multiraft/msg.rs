@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 
-use raft::prelude::ReplicaDesc;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
+use crate::prelude::ReplicaDesc;
 // use crate::prelude::RaftGroupManagement;
 
 use super::error::Error;

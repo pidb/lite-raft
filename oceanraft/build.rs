@@ -8,8 +8,6 @@ fn main() {
 
     let proto_dir = Path::new(&manifest_dir).join("proto");
     let protos = [
-        &Path::new(&proto_dir).join(Path::new("apppb.proto")),
-        &Path::new(&proto_dir).join(Path::new("errorpb.proto")),
         &Path::new(&proto_dir).join(Path::new("eraftpb.proto")),
         &Path::new(&proto_dir).join(Path::new("multiraftpb.proto")),
     ];
@@ -22,6 +20,8 @@ fn main() {
 
     let mut build_config = prost_build::Config::new();
     build_config
-    .file_descriptor_set_path(out_dir.join("pirate_descriptor.bin"))
-    .compile_protos(&protos, &[proto_dir]).unwrap();
+        .extern_path(".eraftpb", "::raft::eraftpb")
+        .file_descriptor_set_path(out_dir.join("oceanraft_descriptor.bin"))
+        .compile_protos(&protos, &[proto_dir])
+        .unwrap();
 }

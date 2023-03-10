@@ -1,16 +1,17 @@
-use raft::Storage;
+// use raft::Storage;
 use tracing::error;
 use tracing::trace;
 use tracing::Level;
 
-use raft_proto::prelude::Message;
-use raft_proto::prelude::MessageType;
-use raft_proto::prelude::MultiRaftMessage;
+use crate::prelude::Message;
+use crate::prelude::MessageType;
+use crate::prelude::MultiRaftMessage;
 
 use super::error::Error;
 use super::node::NodeManager;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
+use super::storage::RaftStorage;
 
 pub trait Transport: Send + Sync + 'static {
     fn send(&self, msg: MultiRaftMessage) -> Result<(), Error>;
@@ -26,7 +27,7 @@ pub async fn send_messages<TR, RS, MRS>(
     msgs: Vec<Message>,
 ) where
     TR: Transport,
-    RS: Storage,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
     assert_ne!(from_node_id, 0);
@@ -95,7 +96,7 @@ async fn send_message<TR, RS, MRS>(
     msg: Message,
 ) where
     TR: Transport,
-    RS: Storage,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
 {
     // if we lose information about the target replica, we may not be able to

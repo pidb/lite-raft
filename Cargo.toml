@@ -8,7 +8,5 @@ license = "MIT/Apache-2.0"
 
 [workspace]
 members = [
-    "proto",
-    "core",
     "oceanraft",
 ]
