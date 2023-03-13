@@ -17,7 +17,6 @@ use rocksdb::WriteOptions;
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
 use crate::prelude::HardState;
-use crate::prelude::RaftGroupDesc;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
@@ -36,7 +35,6 @@ const LOG_CF_NAME: &'static str = "raft_log_cf";
 const HARD_STATE_PREFIX: &'static str = "hs";
 const CONF_STATE_PREFIX: &'static str = "cs";
 const GROUP_STORE_PREFIX: &'static str = "gs";
-const GROUP_DESC_PREFIX: &'static str = "gd";
 const REPLICA_DESC_PREFIX: &'static str = "rd";
 
 const LOG_EMPTY_FLAG: &'static str = "log_empty";
@@ -95,16 +93,6 @@ impl DBEnv {
     #[inline]
     fn empty_logs_flag_key(group_id: u64, replica_id: u64) -> String {
         format!("{}_{}_{}", group_id, replica_id, LOG_EMPTY_FLAG)
-    }
-
-    // #[inline]
-    // fn entry_key(group_id: u64, index: u64) -> String {
-    //     format!("{}_{}", group_id, index)
-    // }
-
-    #[inline]
-    fn group_desc_key(group_id: u64) -> String {
-        format!("{}_{}", GROUP_DESC_PREFIX, group_id)
     }
 
     #[inline]
@@ -278,60 +266,7 @@ where
         }
     }
 
-    fn set_group_desc(&self, group_id: u64, gd: &RaftGroupDesc) -> Result<()> {
-        let metacf = DBEnv::get_log_cf(&self.db)?;
-        let value = gd.encode_to_vec();
-
-        let key = DBEnv::group_desc_key(group_id);
-        let mut writeopts = WriteOptions::default();
-        writeopts.set_sync(true);
-        self.db
-            .put_cf_opt(&metacf, &key, value, &writeopts)
-            .map_err(|err| Error::Other(Box::new(err)))
-    }
-
-    fn create_group_desc_if_missing(&self, group_id: u64) -> Result<RaftGroupDesc> {
-        let metacf = DBEnv::get_log_cf(&self.db)?;
-        let key = DBEnv::group_desc_key(group_id);
-        let readopts = ReadOptions::default();
-        let mut gd = RaftGroupDesc::default();
-        match self
-            .db
-            .get_pinned_cf_opt(&metacf, &key, &readopts)
-            .map_err(|err| Error::Other(Box::new(err)))?
-        {
-            Some(data) => {
-                gd.merge(data.as_ref()).unwrap();
-                Ok(gd)
-            }
-            None => {
-                self.set_group_desc(group_id, &gd)?;
-                Ok(gd)
-            }
-        }
-    }
-
-    fn create_replica_desc(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        rd: &ReplicaDesc,
-        metacf: &Arc<BoundColumnFamily>,
-    ) -> Result<()> {
-        let key = DBEnv::replica_desc_key(group_id, replica_id);
-        let value = rd.encode_to_vec();
-        let writeopts = WriteOptions::default();
-        // TODO: with fsync by config
-        self.db
-            .put_cf_opt(metacf, &key, value, &writeopts)
-            .map_err(|err| Error::Other(Box::new(err)))
-    }
-
-    fn create_replica_desc_if_missing(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-    ) -> Result<ReplicaDesc> {
+    fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<Option<ReplicaDesc>> {
         let metacf = DBEnv::get_metadata_cf(&self.db)?;
         let key = DBEnv::replica_desc_key(group_id, replica_id);
         let readopts = ReadOptions::default();
@@ -343,17 +278,31 @@ where
         {
             Some(data) => {
                 let rd = ReplicaDesc::decode(data.as_ref()).unwrap();
-                Ok(rd)
+                Ok(Some(rd))
             }
-            None => {
-                let rd = ReplicaDesc {
-                    node_id: self.node_id,
-                    replica_id: replica_id,
-                };
-                self.create_replica_desc(group_id, replica_id, &rd, &metacf)?;
-                Ok(rd)
-            }
+            None => Ok(None),
         }
+    }
+
+    fn set_replica_desc(&self, group_id: u64, rd: &ReplicaDesc) -> Result<()> {
+        let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = DBEnv::replica_desc_key(group_id, rd.replica_id);
+        let value = rd.encode_to_vec();
+        let writeopts = WriteOptions::default();
+        // TODO: with fsync by config
+        self.db
+            .put_cf_opt(&metacf, &key, value, &writeopts)
+            .map_err(|err| Error::Other(Box::new(err)))
+    }
+
+    fn remove_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<()> {
+        let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = DBEnv::replica_desc_key(group_id, replica_id);
+        let writeopts = WriteOptions::default();
+        // TODO: with fsync by config
+        self.db
+            .delete_cf_opt(&metacf, &key, &writeopts)
+            .map_err(|err| Error::Other(Box::new(err)))
     }
 }
 
@@ -844,29 +793,11 @@ where
         async move { self.create_group_store_if_missing(group_id, replica_id) }
     }
 
-    type GroupDescFuture<'life0> = impl Future<Output = Result<RaftGroupDesc>> + 'life0
-    where
-        Self: 'life0;
-    fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_> {
-        async move { self.create_group_desc_if_missing(group_id) }
-    }
-
-    type SetGroupDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
-    where
-        Self: 'life0;
-    fn set_group_desc(
-        &self,
-        group_id: u64,
-        group_desc: RaftGroupDesc,
-    ) -> Self::SetGroupDescFuture<'_> {
-        async move { self.set_group_desc(group_id, &group_desc) }
-    }
-
     type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
     where
         Self: 'life0;
-    fn replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
-        async move { unimplemented!() }
+    fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
+        async move { self.get_replica_desc(group_id, replica_id) }
     }
 
     type SetReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
@@ -877,7 +808,18 @@ where
         group_id: u64,
         replica_desc: ReplicaDesc,
     ) -> Self::SetReplicaDescFuture<'_> {
-        async move { unimplemented!() }
+        async move { self.set_replica_desc(group_id, &replica_desc) }
+    }
+
+    type RemoveReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+    where
+        Self: 'life0;
+    fn remove_replica_desc(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Self::RemoveReplicaDescFuture<'_> {
+        async move { self.remove_replica_desc(group_id, replica_id) }
     }
 
     type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
@@ -885,6 +827,21 @@ where
         Self: 'life0;
 
     fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
-        async move { unimplemented!() }
+        async move {
+            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let seek = format!("{}_{}_", REPLICA_DESC_PREFIX, group_id);
+            let iter_mode = IteratorMode::From(seek.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+            for item in iter {
+                let (_, value) = item.unwrap();
+                let rd = ReplicaDesc::decode(value.as_ref()).unwrap();
+                if rd.node_id == node_id {
+                    return Ok(Some(rd));
+                }
+            }
+
+            return Ok(None);
+        }
     }
 }

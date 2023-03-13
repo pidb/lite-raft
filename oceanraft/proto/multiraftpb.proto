@@ -9,12 +9,6 @@ message ReplicaDesc {
   // uint64 store_id = 3;
 }
 
-message RaftGroupDesc {
-  uint64 group_id = 1;
-  repeated uint64 nodes = 2;
-  repeated ReplicaDesc replicas = 3;
-}
-
 // MultiRaftMessage wraps eraft.Message and includes the node information.
 // 1. `group_id` is the raft group identifier. it must define that 0 is invalid.
 // 2. `from_node` represents which node the message came from, so `msg.from`

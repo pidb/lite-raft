@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
-use crate::prelude::RaftGroupDesc;
 use crate::prelude::ReplicaDesc;
 
 use super::error::Error;
@@ -17,7 +16,8 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     storage: MRS,
-    pub groups: HashMap<u64, RaftGroupDesc>,
+    // pub groups: HashMap<u64, RaftGroupDesc>,
+    cache: HashMap<u64, Vec<ReplicaDesc>>,
     _m: PhantomData<RS>,
 }
 
@@ -29,7 +29,8 @@ where
     pub fn new(storage: MRS) -> Self {
         Self {
             storage,
-            groups: Default::default(),
+            // groups: Default::default(),
+            cache: HashMap::new(),
             _m: PhantomData,
         }
     }
@@ -43,12 +44,35 @@ where
         group_id: u64,
         replica_id: u64,
     ) -> Result<Option<ReplicaDesc>, Error> {
-        let _ = self.ensure_cache_group(group_id).await?;
-        let group_desc = self.groups.get(&group_id).unwrap();
-        Ok(
-            ReplicaCache::<RS, MRS>::find(group_desc, |replica| replica.replica_id == replica_id)
-                .await,
-        )
+        match self.cache.get_mut(&group_id) {
+            None => {
+                let mut rds = vec![];
+                if let Some(rd) = self.storage.get_replica_desc(group_id, replica_id).await? {
+                    rds.push(rd.clone());
+                    self.cache.insert(group_id, rds);
+                    return Ok(Some(rd));
+                }
+                self.cache.insert(group_id, rds);
+                return Ok(None);
+            }
+
+            Some(rds) => {
+                if let Some(find) = ReplicaCache::<RS, MRS>::find_in_cache(rds, |replica| {
+                    replica.replica_id == replica_id
+                })
+                .await
+                {
+                    return Ok(Some(find));
+                }
+
+                if let Some(rd) = self.storage.get_replica_desc(group_id, replica_id).await? {
+                    rds.push(rd.clone());
+                    return Ok(Some(rd));
+                }
+
+                return Ok(None);
+            }
+        }
     }
 
     /// Get replica description from this cache when node_id equals,
@@ -60,31 +84,47 @@ where
         group_id: u64,
         node_id: u64,
     ) -> Result<Option<ReplicaDesc>, Error> {
-        let _ = self.ensure_cache_group(group_id).await?;
-        let group_desc = self.groups.get(&group_id).unwrap();
-        Ok(ReplicaCache::<RS, MRS>::find(group_desc, |replica| replica.node_id == node_id).await)
-    }
+        match self.cache.get_mut(&group_id) {
+            None => {
+                let mut rds = vec![];
+                if let Some(rd) = self.storage.replica_for_node(group_id, node_id).await? {
+                    rds.push(rd.clone());
+                    self.cache.insert(group_id, rds);
+                    return Ok(Some(rd));
+                }
+                self.cache.insert(group_id, rds);
+                return Ok(None);
+            }
 
-    #[inline]
-    async fn ensure_cache_group(&mut self, group_id: u64) -> Result<(), Error> {
-        if self.groups.get(&group_id).is_none() {
-            let group_desc = self.storage.group_desc(group_id).await?;
-            self.groups.insert(group_id, group_desc);
+            Some(rds) => {
+                if let Some(find) = ReplicaCache::<RS, MRS>::find_in_cache(rds, |replica| {
+                    replica.node_id == node_id
+                })
+                .await
+                {
+                    return Ok(Some(find));
+                }
+
+                if let Some(rd) = self.storage.replica_for_node(group_id, node_id).await? {
+                    rds.push(rd.clone());
+                    return Ok(Some(rd));
+                }
+
+                return Ok(None);
+            }
         }
-
-        Ok(())
     }
 
     #[inline]
-    async fn find<P>(group_desc: &RaftGroupDesc, predicate: P) -> Option<ReplicaDesc>
+    async fn find_in_cache<P>(replicas: &Vec<ReplicaDesc>, predicate: P) -> Option<ReplicaDesc>
     where
         P: Fn(&&ReplicaDesc) -> bool,
     {
-        if group_desc.replicas.is_empty() {
+        if replicas.is_empty() {
             return None;
         }
 
-        if let Some(replica) = group_desc.replicas.iter().find(predicate) {
+        if let Some(replica) = replicas.iter().find(predicate) {
             return Some(replica.clone());
         }
 
@@ -98,38 +138,33 @@ where
         replica_desc: ReplicaDesc,
         sync: bool,
     ) -> Result<(), Error> {
-        if let Some(group_desc) = self.groups.get_mut(&group_id) {
-            if group_desc
-                .replicas
+        if let Some(rds) = self.cache.get_mut(&group_id) {
+            if rds
                 .iter()
                 .find(|replica| **replica == replica_desc)
                 .is_some()
             {
                 return Ok(());
             }
-            // update cache
-            group_desc.nodes.push(replica_desc.node_id);
-            group_desc.replicas.push(replica_desc);
+
             if sync {
                 let _ = self
                     .storage
-                    .set_group_desc(group_id, group_desc.clone())
+                    .set_replica_desc(group_id, replica_desc.clone())
                     .await?;
             }
+
+            rds.push(replica_desc);
             return Ok(());
         }
 
-        let mut group_desc = RaftGroupDesc::default();
-        group_desc.nodes.push(replica_desc.node_id);
-        group_desc.replicas.push(replica_desc);
         if sync {
-            // set new group_desc in storage
             let _ = self
                 .storage
-                .set_group_desc(group_id, group_desc.clone())
+                .set_replica_desc(group_id, replica_desc.clone())
                 .await?;
         }
-        self.groups.insert(group_id, group_desc);
+        self.cache.insert(group_id, vec![replica_desc]);
         return Ok(());
     }
 
@@ -139,27 +174,15 @@ where
         replica_desc: ReplicaDesc,
         sync: bool,
     ) -> Result<(), Error> {
-        if let Some(group_desc) = self.groups.get_mut(&group_id) {
-            if let Some(index) = group_desc
-                .replicas
-                .iter()
-                .position(|replica| *replica == replica_desc)
-            {
-                let _ = group_desc.replicas.remove(index);
-            }
-
-            if let Some(index) = group_desc
-                .nodes
-                .iter()
-                .position(|node_id| *node_id == replica_desc.node_id)
-            {
-                group_desc.nodes.remove(index);
+        if let Some(rds) = self.cache.get_mut(&group_id) {
+            if let Some(index) = rds.iter().position(|replica| *replica == replica_desc) {
+                let _ = rds.remove(index);
             }
 
             if sync {
                 let _ = self
                     .storage
-                    .set_group_desc(group_id, group_desc.clone())
+                    .remove_replica_desc(group_id, replica_desc.replica_id)
                     .await?;
             }
             return Ok(());
