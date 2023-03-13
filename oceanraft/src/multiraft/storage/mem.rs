@@ -6,8 +6,6 @@ use raft::storage::MemStorage;
 use raft::Result as RaftResult;
 use tokio::sync::RwLock as AsyncRwLock;
 
-use crate::multiraft::error::Error;
-use crate::multiraft::error::Result;
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
 use crate::prelude::HardState;
@@ -17,9 +15,12 @@ use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
 use super::MultiRaftStorage;
+use super::RaftSnapshotReader;
+use super::RaftSnapshotWriter;
 use super::RaftStorage;
 use super::RaftStorageReader;
 use super::RaftStorageWriter;
+use super::Result;
 
 #[derive(Clone)]
 pub struct RaftMemStorage {
@@ -73,15 +74,15 @@ impl RaftStorageReader for RaftMemStorage {
 }
 
 impl RaftStorageWriter for RaftMemStorage {
-    fn append(&self, ents: &[Entry]) -> crate::multiraft::error::Result<()> {
-        self.core.wl().append(ents).map_err(|err| Error::Raft(err))
+    fn append(&self, ents: &[Entry]) -> Result<()> {
+        self.core.wl().append(ents).map_err(|err| err.into())
     }
 
-    fn apply_snapshot(&self, snapshot: Snapshot) -> crate::multiraft::error::Result<()> {
+    fn install_snapshot(&self, snapshot: Snapshot) -> Result<()> {
         self.core
             .wl()
             .apply_snapshot(snapshot)
-            .map_err(|err| Error::Raft(err))
+            .map_err(|err| err.into())
     }
 
     fn set_hardstate(&self, hs: HardState) -> Result<()> {
@@ -95,7 +96,45 @@ impl RaftStorageWriter for RaftMemStorage {
     }
 }
 
-impl RaftStorage for RaftMemStorage {}
+impl RaftSnapshotWriter for RaftMemStorage {
+    fn build_snapshot(&self, _group_id: u64, _replica_id: u64, _applied: u64) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
+        self.core
+            .wl()
+            .apply_snapshot(snapshot)
+            .map_err(|err| err.into())
+    }
+}
+
+impl RaftSnapshotReader for RaftMemStorage {
+    fn load_snapshot(
+        &self,
+        _group_id: u64,
+        _replica_id: u64,
+        request_index: u64,
+        to: u64,
+    ) -> Result<Snapshot> {
+        self.core
+            .snapshot(request_index, to)
+            .map_err(|err| err.into())
+    }
+
+    fn snapshot_metadata(
+        &self,
+        _group_id: u64,
+        _replica_id: u64,
+    ) -> Result<raft::prelude::SnapshotMetadata> {
+        Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
+    }
+}
+
+impl RaftStorage for RaftMemStorage {
+    type SnapshotReader = Self;
+    type SnapshotWriter = Self;
+}
 
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
