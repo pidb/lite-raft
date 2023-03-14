@@ -4,6 +4,9 @@ use std::time::Duration;
 
 use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
 use oceanraft::multiraft::ApplyNormal;
+use oceanraft::multiraft::Decode;
+use oceanraft::multiraft::Encode;
+use oceanraft::multiraft::WriteData;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
@@ -40,9 +43,38 @@ use super::rsm::FixtureStateMachine;
 //     (),
 // >;
 
+#[derive(thiserror::Error, Debug)]
+#[allow(unused)]
+pub enum FixtureWriteDataError {
+    #[error("fixture encode error")]
+    Encode,
+    #[error("fixture decode error")]
+    Decode,
+}
+
+#[derive(Clone)]
+pub struct FixtureWriteData(Vec<u8>);
+
+impl Encode for FixtureWriteData {
+    type EncodeError = FixtureWriteDataError;
+    fn encode(&mut self) -> Result<Vec<u8>, Self::EncodeError> {
+        Ok(self.0.clone())
+    }
+}
+
+impl Decode for FixtureWriteData {
+    type DecodeError = FixtureWriteDataError;
+    fn decode(&mut self, bytes: &mut [u8]) -> Result<(), Self::DecodeError> {
+        self.0 = bytes.to_vec();
+        Ok(())
+    }
+}
+
+impl WriteData for FixtureWriteData {}
+
 pub struct FixtureCluster {
     pub election_ticks: usize,
-    pub nodes: Vec<Arc<MultiRaft<()>>>,
+    pub nodes: Vec<Arc<MultiRaft<FixtureWriteData, ()>>>,
     pub apply_events: Vec<Option<Receiver<Vec<Apply<()>>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
@@ -344,7 +376,7 @@ impl FixtureCluster {
         group_id: u64,
         data: Vec<u8>,
     ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
-        self.nodes[to_index(node_id)].write_non_block(group_id, 0, data, None)
+        self.nodes[to_index(node_id)].write_non_block(group_id, 0, FixtureWriteData(data), None)
     }
 
     // Wait normal apply.

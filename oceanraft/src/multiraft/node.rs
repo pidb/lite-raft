@@ -63,6 +63,7 @@ use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport::Transport;
+use super::types::WriteData;
 use super::util::Ticker;
 
 /// Shrink queue if queue capacity more than and len less than
@@ -207,9 +208,13 @@ impl NodeManager {
     }
 }
 
-pub struct NodeActor<RES: AppWriteResponse> {
+pub struct NodeActor<WD, RES>
+where
+    WD: WriteData,
+    RES: AppWriteResponse,
+{
     // TODO: queue should have one per-group.
-    pub propose_tx: Sender<ProposeMessage<RES>>,
+    pub propose_tx: Sender<ProposeMessage<WD, RES>>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         MultiRaftMessage,
@@ -220,7 +225,11 @@ pub struct NodeActor<RES: AppWriteResponse> {
     apply: ApplyActor,
 }
 
-impl<RES: AppWriteResponse> NodeActor<RES> {
+impl<WD, RES> NodeActor<WD, RES>
+where
+    WD: WriteData,
+    RES: AppWriteResponse,
+{
     pub fn spawn<TR, RS, MRS, RSM, TK>(
         cfg: &Config,
         transport: &TR,
@@ -258,7 +267,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
             task_group,
         );
 
-        let worker = NodeWorker::<TR, RS, MRS, RES>::new(
+        let worker = NodeWorker::<TR, RS, MRS, WD, RES>::new(
             cfg,
             transport,
             storage,
@@ -288,11 +297,12 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
     }
 }
 
-pub struct NodeWorker<TR, RS, MRS, RES>
+pub struct NodeWorker<TR, RS, MRS, WD, RES>
 where
     TR: Transport,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    WD: WriteData,
     RES: AppWriteResponse,
 {
     cfg: Config,
@@ -309,7 +319,7 @@ where
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    propose_rx: Receiver<ProposeMessage<RES>>,
+    propose_rx: Receiver<ProposeMessage<WD, RES>>,
     manage_rx: Receiver<ManageMessage>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
@@ -318,18 +328,19 @@ where
     shared_states: GroupStates,
 }
 
-impl<TR, RS, MRS, RES> NodeWorker<TR, RS, MRS, RES>
+impl<TR, RS, MRS, WD, RES> NodeWorker<TR, RS, MRS, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    WD: WriteData,
     RES: AppWriteResponse,
 {
     fn new(
         cfg: &Config,
         transport: &TR,
         storage: &MRS,
-        propose_rx: Receiver<ProposeMessage<RES>>,
+        propose_rx: Receiver<ProposeMessage<WD, RES>>,
         campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
         raft_message_rx: Receiver<(
             MultiRaftMessage,
@@ -342,7 +353,7 @@ where
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
         shared_states: GroupStates,
     ) -> Self {
-        NodeWorker::<TR, RS, MRS, RES> {
+        NodeWorker::<TR, RS, MRS, WD, RES> {
             cfg: cfg.clone(),
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
@@ -814,9 +825,9 @@ where
         name = "NodeActor::handle_propose",
         skip_all
     )]
-    fn handle_propose(&mut self, msg: ProposeMessage<RES>) -> Option<ResponseCallback> {
+    fn handle_propose(&mut self, msg: ProposeMessage<WD, RES>) -> Option<ResponseCallback> {
         match msg {
-            ProposeMessage::WriteData(data) => {
+            ProposeMessage::Write(data) => {
                 let group_id = data.group_id;
                 match self.groups.get_mut(&group_id) {
                     None => {
@@ -1188,7 +1199,7 @@ where
         {
             match conf_change.change_type() {
                 ConfChangeType::AddNode => {
-                    NodeWorker::<TR, RS, MRS, RES>::membership_add(
+                    NodeWorker::<TR, RS, MRS, WD, RES>::membership_add(
                         self.node_id,
                         group,
                         change_request,
@@ -1198,7 +1209,7 @@ where
                     .await;
                 }
                 ConfChangeType::RemoveNode => {
-                    NodeWorker::<TR, RS, MRS, RES>::membership_remove(
+                    NodeWorker::<TR, RS, MRS, WD, RES>::membership_remove(
                         self.node_id,
                         group,
                         change_request,
@@ -1481,6 +1492,7 @@ mod tests {
 
     use crate::multiraft::replica_cache::ReplicaCache;
     use crate::multiraft::transport::LocalTransport;
+    use crate::multiraft::types::EmptyWriteData;
     use crate::multiraft::Error;
     use crate::multiraft::MultiRaftMessageSenderImpl;
     use crate::prelude::ReplicaDesc;
@@ -1488,11 +1500,11 @@ mod tests {
 
     use super::NodeManager;
     use crate::multiraft::state::GroupState;
-
     type TestMultiRaftActorRuntime = NodeWorker<
         LocalTransport<MultiRaftMessageSenderImpl>,
         RaftMemStorage,
         MultiRaftMemoryStorage,
+        EmptyWriteData,
         (),
     >;
     fn new_raft_group(

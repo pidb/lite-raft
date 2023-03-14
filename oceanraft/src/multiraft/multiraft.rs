@@ -24,13 +24,14 @@ use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
 use super::msg::ReadIndexContext;
 use super::msg::ReadIndexData;
-use super::msg::WriteData;
+use super::msg::WriteRequest;
 use super::node::NodeActor;
 use super::response::AppWriteResponse;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport::Transport;
+use super::types::WriteData;
 use super::util::Ticker;
 use super::RaftGroupError;
 use super::StateMachine;
@@ -87,16 +88,21 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<RES: AppWriteResponse> {
+pub struct MultiRaft<WD, RES>
+where
+    WD: WriteData,
+    RES: AppWriteResponse,
+{
     node_id: u64,
     task_group: TaskGroup,
-    actor: NodeActor<RES>,
+    actor: NodeActor<WD,RES>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
 }
 
-impl<RES> MultiRaft<RES>
+impl<WD, RES> MultiRaft<WD, RES>
 where
+    WD: WriteData,
     RES: AppWriteResponse,
 {
     pub fn new<TR, RS, MRS, RSM, TK>(
@@ -142,7 +148,7 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: Vec<u8>,
+        data: WD,
         context: Option<Vec<u8>>,
         duration: Duration,
     ) -> Result<RES, Error> {
@@ -163,7 +169,7 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: Vec<u8>,
+        data: WD,
         context: Option<Vec<u8>>,
     ) -> Result<RES, Error> {
         let rx = self.write_non_block(group_id, term, data, context)?;
@@ -178,7 +184,7 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: Vec<u8>,
+        data: WD,
         context: Option<Vec<u8>>,
     ) -> Result<RES, Error> {
         let rx = self.write_non_block(group_id, term, data, context)?;
@@ -210,7 +216,7 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: Vec<u8>,
+        data: WD,
         context: Option<Vec<u8>>,
     ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
@@ -219,7 +225,7 @@ where
         match self
             .actor
             .propose_tx
-            .try_send(ProposeMessage::WriteData(WriteData {
+            .try_send(ProposeMessage::Write(WriteRequest {
                 group_id,
                 term,
                 data,

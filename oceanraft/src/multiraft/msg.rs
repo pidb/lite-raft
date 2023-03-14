@@ -11,14 +11,17 @@ use crate::prelude::ReplicaDesc;
 use super::error::Error;
 use super::proposal::Proposal;
 use super::response::AppWriteResponse;
+use super::types::WriteData;
 
-pub struct WriteData<RES>
+pub struct WriteRequest<WD, RES>
 where
     RES: AppWriteResponse,
+    WD: WriteData,
 {
     pub group_id: u64,
     pub term: u64,
-    pub data: Vec<u8>,
+    // pub data: Vec<u8>,
+    pub data: WD,
     pub context: Option<Vec<u8>>,
     pub tx: oneshot::Sender<Result<RES, Error>>,
 }
@@ -39,8 +42,12 @@ pub struct ReadIndexData {
     pub tx: oneshot::Sender<Result<(), Error>>,
 }
 
-pub enum ProposeMessage<RES: AppWriteResponse> {
-    WriteData(WriteData<RES>),
+pub enum ProposeMessage<WD, RES>
+where
+    WD: WriteData,
+    RES: AppWriteResponse,
+{
+    Write(WriteRequest<WD, RES>),
     ReadIndexData(ReadIndexData),
     MembershipData(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
 }
@@ -102,7 +109,10 @@ where
     }
 }
 
-pub enum ApplyMessage<RES: AppWriteResponse> {
+pub enum ApplyMessage< RES>
+where
+    RES: AppWriteResponse,
+{
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,
     },
