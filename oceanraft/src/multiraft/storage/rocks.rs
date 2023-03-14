@@ -20,6 +20,10 @@ use crate::prelude::HardState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
+use crate::multiraft::types::Decode;
+use crate::multiraft::types::Encode;
+use crate::multiraft::types::WriteData;
+
 use super::Error;
 use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
@@ -42,6 +46,40 @@ const LOG_FIRST_INDEX_PREFIX: &'static str = "fidx";
 const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
 
 // const SNAPSHOT_METADATA_PREFIX: &str = "sm";
+
+#[derive(Clone)]
+pub struct RocksData {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(thiserror::Error, Debug)]
+pub enum RocksDataError {
+    #[error("{0}")]
+    Encode(String),
+    #[error("{0}")]
+    Decode(String),
+}
+
+impl Encode for RocksData {
+    type EncodeError = RocksDataError;
+
+    fn encode(&mut self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
+        unimplemented!()
+    }
+}
+
+impl Decode for RocksData {
+    type DecodeError = RocksDataError;
+
+    fn decode(&mut self, bytes: &mut [u8]) -> std::result::Result<(), Self::DecodeError> {
+        unimplemented!()
+    }
+}
+
+impl WriteData for RocksData {}
+
+
 
 type MDB = DBWithThreadMode<MultiThreaded>;
 
@@ -154,155 +192,6 @@ impl DBEnv {
         let key = Self::empty_logs_flag_key(group_id, replica_id);
         let value = "true".as_bytes();
         batch.put_cf(log_cf, key, value)
-    }
-}
-
-#[derive(Clone)]
-struct RockStore<SR, SW>
-where
-    SR: RaftSnapshotReader,
-    SW: RaftSnapshotWriter,
-{
-    node_id: u64,
-    db: Arc<MDB>,
-    rsnap: Arc<SR>,
-    wsnap: Arc<SW>,
-}
-
-impl<SR, SW> RockStore<SR, SW>
-where
-    SR: RaftSnapshotReader,
-    SW: RaftSnapshotWriter,
-{
-    pub fn new<P>(node_id: u64, path: P, snapshot_reader: SR, snapshot_writer: SW) -> Self
-    where
-        P: AsRef<std::path::Path>,
-    {
-        let mut db_opts = RocksdbOptions::default();
-        db_opts.create_if_missing(true);
-        db_opts.create_missing_column_families(true);
-
-        let mut cfs = vec![];
-        let metadata_cf_opts = RocksdbOptions::default();
-        cfs.push(ColumnFamilyDescriptor::new(
-            METADATA_CF_NAME,
-            metadata_cf_opts,
-        ));
-
-        let raft_log_cf_opts = RocksdbOptions::default();
-        cfs.push(ColumnFamilyDescriptor::new(LOG_CF_NAME, raft_log_cf_opts));
-
-        let db = MDB::open_cf_descriptors(&db_opts, &path, cfs).unwrap();
-        Self {
-            node_id,
-            db: Arc::new(db),
-            rsnap: Arc::new(snapshot_reader),
-            wsnap: Arc::new(snapshot_writer),
-        }
-    }
-
-    #[inline]
-    fn group_store_key(&self, group_id: u64, replica_id: u64) -> String {
-        format!("{}_{}_{}", GROUP_STORE_PREFIX, group_id, replica_id)
-    }
-
-    fn create_group_store(&self, group_id: u64, replica_id: u64) -> Result<RockStoreCore<SR, SW>> {
-        let meta_cf = DBEnv::get_metadata_cf(&self.db)?;
-        let log_cf = DBEnv::get_log_cf(&self.db)?;
-
-        DBEnv::set_empty_logs_flag(group_id, replica_id, true, &log_cf, &self.db)?;
-
-        let mut batch = WriteBatch::default();
-        DBEnv::set_hardstate_with_batch(
-            group_id,
-            replica_id,
-            HardState::default(),
-            &meta_cf,
-            &mut batch,
-        );
-        DBEnv::set_confstate_with_batch(
-            group_id,
-            replica_id,
-            ConfState::default(),
-            &meta_cf,
-            &mut batch,
-        );
-        let mut writeopts = WriteOptions::default();
-        writeopts.set_sync(true);
-        self.db
-            .write_opt(batch, &writeopts)
-            .map_err(|err| Error::Other(Box::new(err)))?;
-
-        Ok(RockStoreCore {
-            group_id,
-            replica_id,
-            db: self.db.clone(),
-            rsnap: self.rsnap.clone(),
-            wsnap: self.wsnap.clone(),
-        })
-    }
-
-    fn create_group_store_if_missing(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-    ) -> Result<RockStoreCore<SR, SW>> {
-        let meta_cf = DBEnv::get_metadata_cf(&self.db)?;
-        let key = self.group_store_key(group_id, replica_id);
-        let readopts = ReadOptions::default();
-        match self
-            .db
-            .get_cf_opt(&meta_cf, &key, &readopts)
-            .map_err(|err| Error::Other(Box::new(err)))?
-        {
-            Some(_) => Ok(RockStoreCore {
-                group_id,
-                replica_id,
-                db: self.db.clone(),
-                rsnap: self.rsnap.clone(),
-                wsnap: self.wsnap.clone(),
-            }),
-            None => self.create_group_store(group_id, replica_id),
-        }
-    }
-
-    fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<Option<ReplicaDesc>> {
-        let metacf = DBEnv::get_metadata_cf(&self.db)?;
-        let key = DBEnv::replica_desc_key(group_id, replica_id);
-        let readopts = ReadOptions::default();
-
-        match self
-            .db
-            .get_pinned_cf_opt(&metacf, &key, &readopts)
-            .map_err(|err| Error::Other(Box::new(err)))?
-        {
-            Some(data) => {
-                let rd = ReplicaDesc::decode(data.as_ref()).unwrap();
-                Ok(Some(rd))
-            }
-            None => Ok(None),
-        }
-    }
-
-    fn set_replica_desc(&self, group_id: u64, rd: &ReplicaDesc) -> Result<()> {
-        let metacf = DBEnv::get_metadata_cf(&self.db)?;
-        let key = DBEnv::replica_desc_key(group_id, rd.replica_id);
-        let value = rd.encode_to_vec();
-        let writeopts = WriteOptions::default();
-        // TODO: with fsync by config
-        self.db
-            .put_cf_opt(&metacf, &key, value, &writeopts)
-            .map_err(|err| Error::Other(Box::new(err)))
-    }
-
-    fn remove_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<()> {
-        let metacf = DBEnv::get_metadata_cf(&self.db)?;
-        let key = DBEnv::replica_desc_key(group_id, replica_id);
-        let writeopts = WriteOptions::default();
-        // TODO: with fsync by config
-        self.db
-            .delete_cf_opt(&metacf, &key, &writeopts)
-            .map_err(|err| Error::Other(Box::new(err)))
     }
 }
 
@@ -780,6 +669,155 @@ impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorage for RockStoreCo
     type SnapshotReader = SR;
 }
 
+#[derive(Clone)]
+struct RockStore<SR, SW>
+where
+    SR: RaftSnapshotReader,
+    SW: RaftSnapshotWriter,
+{
+    node_id: u64,
+    db: Arc<MDB>,
+    rsnap: Arc<SR>,
+    wsnap: Arc<SW>,
+}
+
+impl<SR, SW> RockStore<SR, SW>
+where
+    SR: RaftSnapshotReader,
+    SW: RaftSnapshotWriter,
+{
+    pub fn new<P>(node_id: u64, path: P, snapshot_reader: SR, snapshot_writer: SW) -> Self
+    where
+        P: AsRef<std::path::Path>,
+    {
+        let mut db_opts = RocksdbOptions::default();
+        db_opts.create_if_missing(true);
+        db_opts.create_missing_column_families(true);
+
+        let mut cfs = vec![];
+        let metadata_cf_opts = RocksdbOptions::default();
+        cfs.push(ColumnFamilyDescriptor::new(
+            METADATA_CF_NAME,
+            metadata_cf_opts,
+        ));
+
+        let raft_log_cf_opts = RocksdbOptions::default();
+        cfs.push(ColumnFamilyDescriptor::new(LOG_CF_NAME, raft_log_cf_opts));
+
+        let db = MDB::open_cf_descriptors(&db_opts, &path, cfs).unwrap();
+        Self {
+            node_id,
+            db: Arc::new(db),
+            rsnap: Arc::new(snapshot_reader),
+            wsnap: Arc::new(snapshot_writer),
+        }
+    }
+
+    #[inline]
+    fn group_store_key(&self, group_id: u64, replica_id: u64) -> String {
+        format!("{}_{}_{}", GROUP_STORE_PREFIX, group_id, replica_id)
+    }
+
+    fn create_group_store(&self, group_id: u64, replica_id: u64) -> Result<RockStoreCore<SR, SW>> {
+        let meta_cf = DBEnv::get_metadata_cf(&self.db)?;
+        let log_cf = DBEnv::get_log_cf(&self.db)?;
+
+        DBEnv::set_empty_logs_flag(group_id, replica_id, true, &log_cf, &self.db)?;
+
+        let mut batch = WriteBatch::default();
+        DBEnv::set_hardstate_with_batch(
+            group_id,
+            replica_id,
+            HardState::default(),
+            &meta_cf,
+            &mut batch,
+        );
+        DBEnv::set_confstate_with_batch(
+            group_id,
+            replica_id,
+            ConfState::default(),
+            &meta_cf,
+            &mut batch,
+        );
+        let mut writeopts = WriteOptions::default();
+        writeopts.set_sync(true);
+        self.db
+            .write_opt(batch, &writeopts)
+            .map_err(|err| Error::Other(Box::new(err)))?;
+
+        Ok(RockStoreCore {
+            group_id,
+            replica_id,
+            db: self.db.clone(),
+            rsnap: self.rsnap.clone(),
+            wsnap: self.wsnap.clone(),
+        })
+    }
+
+    fn create_group_store_if_missing(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Result<RockStoreCore<SR, SW>> {
+        let meta_cf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = self.group_store_key(group_id, replica_id);
+        let readopts = ReadOptions::default();
+        match self
+            .db
+            .get_cf_opt(&meta_cf, &key, &readopts)
+            .map_err(|err| Error::Other(Box::new(err)))?
+        {
+            Some(_) => Ok(RockStoreCore {
+                group_id,
+                replica_id,
+                db: self.db.clone(),
+                rsnap: self.rsnap.clone(),
+                wsnap: self.wsnap.clone(),
+            }),
+            None => self.create_group_store(group_id, replica_id),
+        }
+    }
+
+    fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<Option<ReplicaDesc>> {
+        let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = DBEnv::replica_desc_key(group_id, replica_id);
+        let readopts = ReadOptions::default();
+
+        match self
+            .db
+            .get_pinned_cf_opt(&metacf, &key, &readopts)
+            .map_err(|err| Error::Other(Box::new(err)))?
+        {
+            Some(data) => {
+                let rd = ReplicaDesc::decode(data.as_ref()).unwrap();
+                Ok(Some(rd))
+            }
+            None => Ok(None),
+        }
+    }
+
+    fn set_replica_desc(&self, group_id: u64, rd: &ReplicaDesc) -> Result<()> {
+        let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = DBEnv::replica_desc_key(group_id, rd.replica_id);
+        let value = rd.encode_to_vec();
+        let writeopts = WriteOptions::default();
+        // TODO: with fsync by config
+        self.db
+            .put_cf_opt(&metacf, &key, value, &writeopts)
+            .map_err(|err| Error::Other(Box::new(err)))
+    }
+
+    fn remove_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<()> {
+        let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        let key = DBEnv::replica_desc_key(group_id, replica_id);
+        let writeopts = WriteOptions::default();
+        // TODO: with fsync by config
+        self.db
+            .delete_cf_opt(&metacf, &key, &writeopts)
+            .map_err(|err| Error::Other(Box::new(err)))
+    }
+}
+
 impl<SR, SW> MultiRaftStorage<RockStoreCore<SR, SW>> for RockStore<SR, SW>
 where
     SR: RaftSnapshotReader,
@@ -845,3 +883,6 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {}

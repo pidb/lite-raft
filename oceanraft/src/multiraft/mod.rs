@@ -14,6 +14,7 @@ mod state;
 pub mod storage;
 pub mod transport;
 mod util;
+mod types;
 
 pub use config::Config;
 pub use error::{Error, MultiRaftStorageError, RaftCoreError, RaftGroupError, WriteError};
