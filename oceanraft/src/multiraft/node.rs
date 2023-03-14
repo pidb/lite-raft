@@ -6,7 +6,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use raft::StateRole;
-use raft::Storage;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::Receiver;
@@ -62,6 +61,7 @@ use super::rsm::StateMachine;
 use super::state::GroupState;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
+use super::storage::RaftStorage;
 use super::transport::Transport;
 use super::util::Ticker;
 
@@ -233,7 +233,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
     ) -> Self
     where
         TR: Transport + Clone,
-        RS: Storage + Clone + Sync + Send + 'static,
+        RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
         RSM: StateMachine<RES>,
         TK: Ticker,
@@ -291,7 +291,7 @@ impl<RES: AppWriteResponse> NodeActor<RES> {
 pub struct NodeWorker<TR, RS, MRS, RES>
 where
     TR: Transport,
-    RS: Storage,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
     RES: AppWriteResponse,
 {
@@ -321,7 +321,7 @@ where
 impl<TR, RS, MRS, RES> NodeWorker<TR, RS, MRS, RES>
 where
     TR: Transport + Clone,
-    RS: Storage + Send + Sync + Clone + 'static,
+    RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
     RES: AppWriteResponse,
 {
@@ -1227,7 +1227,7 @@ where
             .storage
             .group_storage(group_id, group.replica_id)
             .await?;
-        gs.set_conf_state(conf_state);
+        gs.set_confstate(conf_state)?;
 
         return Ok(());
     }
@@ -1471,10 +1471,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::NodeWorker;
-    use crate::memstore::MultiRaftMemoryStorage;
-    use crate::memstore::RaftMemStorage;
     use crate::multiraft::proposal::ProposalQueue;
     use crate::multiraft::proposal::ReadIndexQueue;
+    use crate::multiraft::storage::MultiRaftMemoryStorage;
+    use crate::multiraft::storage::RaftMemStorage;
 
     use crate::multiraft::group::RaftGroup;
     use crate::multiraft::group::Status;
@@ -1483,8 +1483,8 @@ mod tests {
     use crate::multiraft::transport::LocalTransport;
     use crate::multiraft::Error;
     use crate::multiraft::MultiRaftMessageSenderImpl;
-    use raft_proto::prelude::ReplicaDesc;
-    use raft_proto::prelude::SingleMembershipChange;
+    use crate::prelude::ReplicaDesc;
+    use crate::prelude::SingleMembershipChange;
 
     use super::NodeManager;
     use crate::multiraft::state::GroupState;

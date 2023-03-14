@@ -9,7 +9,6 @@ use raft::ReadState;
 use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
-use raft::Storage;
 use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
@@ -46,6 +45,7 @@ use super::replica_cache::ReplicaCache;
 use super::response::AppWriteResponse;
 use super::state::GroupState;
 use super::storage::MultiRaftStorage;
+use super::storage::RaftStorage;
 use super::transport;
 use super::util;
 use super::Event;
@@ -55,7 +55,6 @@ pub enum Status {
     Delete,
 }
 
-
 #[derive(Default, Debug)]
 pub struct RaftGroupWriteRequest {
     pub replica_id: u64,
@@ -64,7 +63,11 @@ pub struct RaftGroupWriteRequest {
 }
 
 /// Represents a replica of a raft group.
-pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
+pub struct RaftGroup<RS, RES>
+where
+    RS: RaftStorage,
+    RES: AppWriteResponse,
+{
     /// Indicates the id of the node where the group resides.
     pub node_id: u64,
 
@@ -107,7 +110,7 @@ pub struct RaftGroup<RS: Storage, RES: AppWriteResponse> {
 //===----------------------------------------------------------------------===//
 impl<RS, RES> RaftGroup<RS, RES>
 where
-    RS: Storage,
+    RS: RaftStorage,
     RES: AppWriteResponse,
 {
     #[inline]
@@ -131,7 +134,7 @@ where
 //===----------------------------------------------------------------------===//
 impl<RS, RES> RaftGroup<RS, RES>
 where
-    RS: Storage,
+    RS: RaftStorage,
     RES: AppWriteResponse,
 {
     #[tracing::instrument(
@@ -476,7 +479,7 @@ where
                 entries[0].index,
                 entries[entries.len() - 1].index
             );
-            if let Err(_error) = gs.append_entries(&entries) {
+            if let Err(_error) = gs.append(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
             }
@@ -577,10 +580,7 @@ where
         // self.raft_group.advance_apply();
     }
 
-    fn pre_propose_write(&mut self, write_data: &WriteData<RES>) -> Result<(), Error>
-    where
-        RS: Storage,
-    {
+    fn pre_propose_write(&mut self, write_data: &WriteData<RES>) -> Result<(), Error> {
         if write_data.data.is_empty() {
             return Err(Error::BadParameter(
                 "write request data must not be empty".to_owned(),
@@ -670,10 +670,7 @@ where
         None
     }
 
-    fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error>
-    where
-        RS: Storage,
-    {
+    fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error> {
         if data.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
@@ -808,8 +805,7 @@ where
         self.applied_term = result.applied_term;
 
         // update shared state for apply
-        self.shared_state
-            .set_applied_index(result.applied_index);
+        self.shared_state.set_applied_index(result.applied_index);
         self.shared_state.set_applied_term(result.applied_term);
     }
 }

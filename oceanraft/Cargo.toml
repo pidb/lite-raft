@@ -4,13 +4,12 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-raft-proto = { path = "../proto", default-features = false, features = ["prost-codec"] }
-raft = { path = "../core", version = "0.7.0", default-features = false, features=["default-logger"]}
+raft-proto = { version = "0.7.0", default-features = false, features = ["prost-codec"] }
+raft = { version = "0.7.0", default-features = false, features=["default-logger", "prost-codec"]}
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 slog = { version = "2.2", features = ["max_level_debug"] }
 uuid = { version = "1", features = ["v4"] }
-protobuf = { version = "3" }
 lazy_static = { version = "1" }
 bincode = { version = "1" }
 # signal-hook-tokio = { version = "0.3" }
@@ -31,7 +30,7 @@ tonic = { version = "0.8", optional = true }
 flume = { version = "0.10.14" }
 abomonation = { version = "0.7.3" }
 abomonation_derive = { version = "0.5.0" }
-
+protobuf = {version = "2" }
 
 # [dependencies.rocksdb]
 # default-features = false
@@ -45,6 +44,8 @@ opentelemetry-jaeger = "0.17"
 lazy_static = { version = "1" }
 async-entry = { version = "0.3" }
 
+[build-dependencies]
+prost-build = { version = "0.11" }
 
 [features]
 grpc = ["tonic"]

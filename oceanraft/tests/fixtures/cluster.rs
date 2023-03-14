@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
 use oceanraft::multiraft::ApplyNormal;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -9,8 +10,8 @@ use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 
-use oceanraft::memstore::MultiRaftMemoryStorage;
 use oceanraft::multiraft::storage::MultiRaftStorage;
+use oceanraft::multiraft::storage::RaftStorageWriter;
 use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::ApplyMembership;
 use oceanraft::multiraft::Config;
@@ -215,7 +216,8 @@ impl FixtureCluster {
                 .push(ss.get_metadata().get_conf_state().clone());
 
             // apply cc
-            gs.wl().apply_snapshot(ss).unwrap();
+            // gs.wl().apply_snapshot(ss).unwrap();
+            gs.apply_snapshot(ss).unwrap();
 
             let node = &self.nodes[place_node_index];
 
