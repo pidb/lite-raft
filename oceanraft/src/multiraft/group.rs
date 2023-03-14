@@ -468,7 +468,7 @@ where
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
             // FIXME: handle error
-            gs.apply_snapshot(snapshot).unwrap();
+            gs.install_snapshot(snapshot).unwrap();
         }
 
         if !ready.entries().is_empty() {

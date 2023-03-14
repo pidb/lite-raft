@@ -6,20 +6,20 @@ use raft::storage::MemStorage;
 use raft::Result as RaftResult;
 use tokio::sync::RwLock as AsyncRwLock;
 
-use crate::multiraft::error::Error;
-use crate::multiraft::error::Result;
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
 use crate::prelude::HardState;
-use crate::prelude::RaftGroupDesc;
 use crate::prelude::RaftState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
 use super::MultiRaftStorage;
+use super::RaftSnapshotReader;
+use super::RaftSnapshotWriter;
 use super::RaftStorage;
 use super::RaftStorageReader;
 use super::RaftStorageWriter;
+use super::Result;
 
 #[derive(Clone)]
 pub struct RaftMemStorage {
@@ -73,15 +73,15 @@ impl RaftStorageReader for RaftMemStorage {
 }
 
 impl RaftStorageWriter for RaftMemStorage {
-    fn append(&self, ents: &[Entry]) -> crate::multiraft::error::Result<()> {
-        self.core.wl().append(ents).map_err(|err| Error::Raft(err))
+    fn append(&self, ents: &[Entry]) -> Result<()> {
+        self.core.wl().append(ents).map_err(|err| err.into())
     }
 
-    fn apply_snapshot(&self, snapshot: Snapshot) -> crate::multiraft::error::Result<()> {
+    fn install_snapshot(&self, snapshot: Snapshot) -> Result<()> {
         self.core
             .wl()
             .apply_snapshot(snapshot)
-            .map_err(|err| Error::Raft(err))
+            .map_err(|err| err.into())
     }
 
     fn set_hardstate(&self, hs: HardState) -> Result<()> {
@@ -95,13 +95,51 @@ impl RaftStorageWriter for RaftMemStorage {
     }
 }
 
-impl RaftStorage for RaftMemStorage {}
+impl RaftSnapshotWriter for RaftMemStorage {
+    fn build_snapshot(&self, _group_id: u64, _replica_id: u64, _applied: u64) -> Result<()> {
+        unimplemented!()
+    }
+
+    fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
+        self.core
+            .wl()
+            .apply_snapshot(snapshot)
+            .map_err(|err| err.into())
+    }
+}
+
+impl RaftSnapshotReader for RaftMemStorage {
+    fn load_snapshot(
+        &self,
+        _group_id: u64,
+        _replica_id: u64,
+        request_index: u64,
+        to: u64,
+    ) -> Result<Snapshot> {
+        self.core
+            .snapshot(request_index, to)
+            .map_err(|err| err.into())
+    }
+
+    fn snapshot_metadata(
+        &self,
+        _group_id: u64,
+        _replica_id: u64,
+    ) -> Result<raft::prelude::SnapshotMetadata> {
+        Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
+    }
+}
+
+impl RaftStorage for RaftMemStorage {
+    type SnapshotReader = Self;
+    type SnapshotWriter = Self;
+}
 
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
     node_id: u64,
     groups: Arc<AsyncRwLock<HashMap<u64, RaftMemStorage>>>,
-    group_desc_map: Arc<AsyncRwLock<HashMap<u64, RaftGroupDesc>>>,
+    replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaDesc>>>>,
 }
 
 impl MultiRaftMemoryStorage {
@@ -109,37 +147,12 @@ impl MultiRaftMemoryStorage {
         Self {
             node_id,
             groups: Default::default(),
-            group_desc_map: Default::default(),
+            replicas: Default::default(),
         }
     }
 }
 
 impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
-    // type CreateGroupStorageWithConfStateFuture<'life0, T> = impl Future<Output = Result<RaftMemStorage>> + 'life0
-    //     where
-    //         Self: 'life0,
-    //         ConfState: From<T>,
-    //         T: Send + 'life0;
-    // #[allow(unused)]
-    // fn create_group_storage_with_conf_state<'life0, T>(
-    //     &'life0 self,
-    //     group_id: u64,
-    //     replica_id: u64,
-    //     conf_state: T,
-    // ) -> Self::CreateGroupStorageWithConfStateFuture<'life0, T>
-    // where
-    //     ConfState: From<T>,
-    //     T: Send,
-    // {
-    //     async move {
-    //         let mut wl = self.groups.write().await;
-    //         assert_ne!(wl.contains_key(&group_id), true);
-    //         let storage = RaftMemStorage::new_with_conf_state(conf_state);
-    //         wl.insert(group_id, storage.clone());
-    //         Ok(storage)
-    //     }
-    // }
-
     type GroupStorageFuture<'life0> = impl Future<Output = Result<RaftMemStorage>> + 'life0
         where
             Self: 'life0;
@@ -158,35 +171,20 @@ impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
         }
     }
 
-    type SetGroupDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+    type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
     where
         Self: 'life0;
-    fn set_group_desc(
-        &self,
-        group_id: u64,
-        group_desc: RaftGroupDesc,
-    ) -> Self::SetGroupDescFuture<'_> {
+    fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
         async move {
-            let mut wl = self.group_desc_map.write().await;
-            wl.insert(group_id, group_desc);
-            return Ok(());
-        }
-    }
-
-    type GroupDescFuture<'life0> = impl Future<Output = Result<RaftGroupDesc>> + 'life0
-    where
-        Self: 'life0;
-    fn group_desc(&self, group_id: u64) -> Self::GroupDescFuture<'_> {
-        async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => Ok(desc.clone()),
-                None => {
-                    let mut desc = RaftGroupDesc::default();
-                    desc.group_id = group_id;
-                    wl.insert(group_id, desc.clone());
-                    Ok(desc)
+            let rl = self.replicas.read().await;
+            return match rl.get(&group_id) {
+                Some(replicas) => {
+                    if let Some(replica) = replicas.iter().find(|r| r.replica_id == replica_id) {
+                        return Ok(Some(replica.clone()));
+                    }
+                    Ok(None)
                 }
+                None => Ok(None),
             };
         }
     }
@@ -200,46 +198,44 @@ impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
         replica_desc: ReplicaDesc,
     ) -> Self::SetReplicaDescFuture<'_> {
         async move {
-            let mut wl = self.group_desc_map.write().await;
+            let mut wl = self.replicas.write().await;
             return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if desc.replicas.iter().find(|r| **r == replica_desc).is_some() {
+                Some(replicas) => {
+                    if replicas.iter().find(|r| **r == replica_desc).is_some() {
                         return Ok(());
                     }
-                    // invariant: if replica_desc are not present in the raft group desc,
-                    // then replica_desc.node_id not present in the nodes
-                    desc.nodes.push(replica_desc.node_id);
-                    desc.replicas.push(replica_desc);
+
+                    replicas.push(replica_desc);
                     Ok(())
                 }
                 None => {
-                    // if raft group desc is none, a new one is created in storage.
-                    let mut desc = RaftGroupDesc::default();
-                    desc.group_id = group_id;
-                    desc.nodes.push(replica_desc.node_id);
-                    desc.replicas.push(replica_desc);
-                    wl.insert(group_id, desc.clone());
+                    wl.insert(group_id, vec![replica_desc]);
                     Ok(())
                 }
             };
         }
     }
 
-    type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
+    type RemoveReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
     where
         Self: 'life0;
-    fn replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
+    fn remove_replica_desc(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Self::RemoveReplicaDescFuture<'_> {
         async move {
-            let mut wl = self.group_desc_map.write().await;
+            let mut wl = self.replicas.write().await;
             return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if let Some(replica) = desc.replicas.iter().find(|r| r.replica_id == replica_id)
-                    {
-                        return Ok(Some(replica.clone()));
+                Some(replicas) => {
+                    if let Some(idx) = replicas.iter().position(|r| r.replica_id == replica_id) {
+                        replicas.remove(idx);
                     }
-                    Ok(None)
+
+                    // TODO: if replicas is empty, we need remove it from map
+                    Ok(())
                 }
-                None => Ok(None),
+                None => Ok(()),
             };
         }
     }
@@ -250,10 +246,10 @@ impl MultiRaftStorage<RaftMemStorage> for MultiRaftMemoryStorage {
 
     fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
         async move {
-            let mut wl = self.group_desc_map.write().await;
-            return match wl.get_mut(&group_id) {
-                Some(desc) => {
-                    if let Some(replica) = desc.replicas.iter().find(|r| r.node_id == node_id) {
+            let rl = self.replicas.read().await;
+            return match rl.get(&group_id) {
+                Some(replicas) => {
+                    if let Some(replica) = replicas.iter().find(|r| r.node_id == node_id) {
                         return Ok(Some(replica.clone()));
                     }
                     Ok(None)

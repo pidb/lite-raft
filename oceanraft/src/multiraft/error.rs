@@ -1,4 +1,4 @@
-pub type Result<T> = std::result::Result<T, Error>;
+// pub type Result<T> = std::result::Result<T, Error>;
 
 /// RaftCoreError is raft::Error re-exported.
 pub type RaftCoreError = raft::Error;
@@ -101,9 +101,8 @@ pub enum Error {
     #[error("{0}")]
     NodeActor(#[from] NodeActorError),
 
-    /// Raft storage error occurred.
     #[error("{0}")]
-    Store(#[from] MultiRaftStorageError),
+    Storage(#[from] super::storage::Error),
 
     /// A raft error occurred.
     #[error("{0}")]

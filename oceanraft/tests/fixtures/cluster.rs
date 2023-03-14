@@ -217,7 +217,7 @@ impl FixtureCluster {
 
             // apply cc
             // gs.wl().apply_snapshot(ss).unwrap();
-            gs.apply_snapshot(ss).unwrap();
+            gs.install_snapshot(ss).unwrap();
 
             let node = &self.nodes[place_node_index];
 
