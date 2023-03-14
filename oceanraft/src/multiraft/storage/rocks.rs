@@ -20,10 +20,6 @@ use crate::prelude::HardState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
-use crate::multiraft::types::Decode;
-use crate::multiraft::types::Encode;
-use crate::multiraft::types::WriteData;
-
 use super::Error;
 use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
@@ -47,39 +43,146 @@ const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
 
 // const SNAPSHOT_METADATA_PREFIX: &str = "sm";
 
-#[derive(Clone)]
-pub struct RocksData {
-    pub key: String,
-    pub value: String,
-}
+mod rock_statemachine {
+    use std::marker::PhantomData;
+    use std::sync::Arc;
+    use std::vec::IntoIter;
 
-#[derive(thiserror::Error, Debug)]
-pub enum RocksDataError {
-    #[error("{0}")]
-    Encode(String),
-    #[error("{0}")]
-    Decode(String),
-}
+    use futures::Future;
+    use rocksdb::DBWithThreadMode;
+    use rocksdb::MultiThreaded;
 
-impl Encode for RocksData {
-    type EncodeError = RocksDataError;
+    use crate::multiraft::response::AppWriteResponse;
+    use crate::multiraft::storage::RaftSnapshotReader;
+    use crate::multiraft::storage::RaftSnapshotWriter;
+    use crate::multiraft::storage::Result;
+    use crate::multiraft::types::Decode;
+    use crate::multiraft::types::Encode;
+    use crate::multiraft::types::WriteData;
+    use crate::multiraft::Apply;
+    use crate::multiraft::StateMachine;
+    use crate::prelude::Snapshot;
+    use crate::prelude::SnapshotMetadata;
 
-    fn encode(&mut self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
-        unimplemented!()
+    impl Encode for RocksData {
+        type EncodeError = RocksDataError;
+
+        fn encode(&mut self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
+            let mut bytes = Vec::new();
+            unsafe {
+                abomonation::encode(self, &mut bytes)
+                    .map_err(|err| RocksDataError::Encode(err.to_string()))?;
+            }
+
+            Ok(bytes)
+        }
+    }
+
+    impl Decode for RocksData {
+        type DecodeError = RocksDataError;
+
+        fn decode(&mut self, bytes: &mut [u8]) -> std::result::Result<(), Self::DecodeError> {
+            let (rocks_data, remaining) = unsafe {
+                abomonation::decode::<RocksData>(bytes).map_or(
+                    Err(RocksDataError::Decode("decode failed".to_owned())),
+                    |v| Ok(v),
+                )?
+            };
+            assert_eq!(remaining.len(), 0);
+            *self = rocks_data.clone();
+            Ok(())
+        }
+    }
+
+    impl WriteData for RocksData {}
+
+    #[derive(Clone, Default, abomonation_derive::Abomonation)]
+    pub struct RocksData {
+        #[unsafe_abomonate_ignore]
+        pub key: Vec<u8>,
+
+        #[unsafe_abomonate_ignore]
+        pub value: Vec<u8>,
+    }
+
+    #[derive(thiserror::Error, Debug)]
+    pub enum RocksDataError {
+        #[error("{0}")]
+        Encode(String),
+        #[error("{0}")]
+        Decode(String),
+    }
+
+    #[test]
+    fn test_rocksdata_serialize() {
+        let mut data1 = RocksData {
+            key: "key".as_bytes().to_owned(),
+            value: "value".as_bytes().to_owned(),
+        };
+
+        let mut encoded = data1.encode().unwrap();
+        let mut data2 = RocksData::default();
+        data2.decode(&mut encoded).unwrap();
+        assert_eq!(data1.key, data2.key);
+        assert_eq!(data1.value, data2.value);
+    }
+
+    #[derive(Clone)]
+    pub struct RockStateMachine<R: AppWriteResponse> {
+        db: Arc<DBWithThreadMode<MultiThreaded>>,
+        _m: PhantomData<R>,
+    }
+
+    impl<R> StateMachine<R> for RockStateMachine<R>
+    where
+        R: AppWriteResponse,
+    {
+        type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<R>>>> + 'life0
+        where
+            Self: 'life0;
+
+        fn apply(
+            &mut self,
+            group_id: u64,
+            state: &crate::multiraft::GroupState,
+            iter: std::vec::IntoIter<crate::multiraft::Apply<R>>,
+        ) -> Self::ApplyFuture<'_> {
+            async move { unimplemented!() }
+        }
+    }
+
+    impl<R> RaftSnapshotReader for RockStateMachine<R>
+    where
+        R: AppWriteResponse,
+    {
+        fn load_snapshot(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+            request_index: u64,
+            to: u64,
+        ) -> Result<Snapshot> {
+            unimplemented!()
+        }
+
+        fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata> {
+            unimplemented!()
+        }
+    }
+
+    impl<R> RaftSnapshotWriter for RockStateMachine<R>
+    where
+        R: AppWriteResponse,
+    {
+        fn build_snapshot(&self, group_id: u64, replica_id: u64, applied: u64) -> Result<()> {
+            unimplemented!()
+        }
+
+        fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()> {
+            unimplemented!()
+        }
     }
 }
-
-impl Decode for RocksData {
-    type DecodeError = RocksDataError;
-
-    fn decode(&mut self, bytes: &mut [u8]) -> std::result::Result<(), Self::DecodeError> {
-        unimplemented!()
-    }
-}
-
-impl WriteData for RocksData {}
-
-
 
 type MDB = DBWithThreadMode<MultiThreaded>;
 
