@@ -13,6 +13,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
+use crate::multiraft::WriteResponse;
 use crate::prelude::EntryType;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
@@ -25,7 +26,6 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::proposal::Proposal;
-use super::response::AppWriteResponse;
 use super::state::GroupStates;
 use super::Apply;
 use super::ApplyMembership;
@@ -52,7 +52,7 @@ impl ApplyActor {
         task_group: &TaskGroup,
     ) -> Self
     where
-        RES: AppWriteResponse,
+        RES: WriteResponse,
         RSM: StateMachine<RES>,
     {
         let worker = ApplyWorker::new(cfg, rsm, shared_states, request_rx, response_tx, commit_tx);
@@ -68,7 +68,7 @@ impl ApplyActor {
 pub struct ApplyWorker<RSM, RES>
 where
     RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     node_id: u64,
     cfg: Config,
@@ -84,7 +84,7 @@ where
 impl<RSM, RES> ApplyWorker<RSM, RES>
 where
     RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     fn new(
         cfg: &Config,
@@ -283,7 +283,7 @@ const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
 struct PendingSender<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     index: u64,
     term: u64,
@@ -292,7 +292,7 @@ where
 
 impl<RES> PendingSender<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     fn new(index: u64, term: u64, tx: Option<oneshot::Sender<Result<RES, Error>>>) -> Self {
         Self { index, term, tx }
@@ -301,7 +301,7 @@ where
 
 struct PendingSenderQueue<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     normals: VecDeque<PendingSender<RES>>,
     conf_change: Option<PendingSender<RES>>,
@@ -309,7 +309,7 @@ where
 
 impl<RES> PendingSenderQueue<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     pub fn new() -> Self {
         Self {
@@ -365,7 +365,7 @@ where
 
 struct ApplyContext<RSM, RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
     RSM: StateMachine<RES>,
 {
     rsm: RSM,
@@ -375,7 +375,7 @@ where
 
 pub struct ApplyDelegate<RSM, RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     node_id: u64,
     pending_senders: PendingSenderQueue<RES>, // TODO: add generic
@@ -386,7 +386,7 @@ where
 impl<RSM, RES> ApplyDelegate<RSM, RES>
 where
     RSM: StateMachine<RES>,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     fn new(node_id: u64) -> Self {
         Self {

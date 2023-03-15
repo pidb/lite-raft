@@ -17,6 +17,7 @@ use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
+use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
 use crate::prelude::ConfChangeV2;
@@ -42,7 +43,6 @@ use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexProposal;
 use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
-use super::response::AppWriteResponse;
 use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
@@ -67,7 +67,7 @@ pub struct RaftGroupWriteRequest {
 pub struct RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     /// Indicates the id of the node where the group resides.
     pub node_id: u64,
@@ -112,7 +112,7 @@ where
 impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     #[inline]
     pub(crate) fn is_leader(&self) -> bool {
@@ -136,7 +136,7 @@ where
 impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     #[tracing::instrument(
         level = Level::TRACE,

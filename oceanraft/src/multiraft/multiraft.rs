@@ -7,6 +7,7 @@ use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::multiraft::WriteResponse;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
@@ -26,7 +27,6 @@ use super::msg::ReadIndexContext;
 use super::msg::ReadIndexData;
 use super::msg::WriteRequest;
 use super::node::NodeActor;
-use super::response::AppWriteResponse;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
@@ -91,11 +91,11 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 pub struct MultiRaft<WD, RES>
 where
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     node_id: u64,
     task_group: TaskGroup,
-    actor: NodeActor<WD,RES>,
+    actor: NodeActor<WD, RES>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
 }
@@ -103,7 +103,7 @@ where
 impl<WD, RES> MultiRaft<WD, RES>
 where
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     pub fn new<TR, RS, MRS, RSM, TK>(
         cfg: Config,
@@ -118,7 +118,7 @@ where
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
         RSM: StateMachine<RES>,
-        RES: AppWriteResponse,
+        RES: WriteResponse,
         TK: Ticker,
     {
         cfg.validate()?;

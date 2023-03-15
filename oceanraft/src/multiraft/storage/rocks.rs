@@ -52,36 +52,27 @@ mod rock_statemachine {
     use rocksdb::DBWithThreadMode;
     use rocksdb::MultiThreaded;
 
-    use crate::multiraft::response::AppWriteResponse;
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result;
-    use crate::multiraft::types::Decode;
-    use crate::multiraft::types::Encode;
     use crate::multiraft::types::WriteData;
     use crate::multiraft::Apply;
     use crate::multiraft::StateMachine;
+    use crate::multiraft::WriteResponse;
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
 
-    impl Encode for RocksData {
-        type EncodeError = RocksDataError;
+    #[derive(Clone, Default, abomonation_derive::Abomonation)]
+    pub struct RocksData {
+        #[unsafe_abomonate_ignore]
+        pub key: Vec<u8>,
 
-        fn encode(&mut self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
-            let mut bytes = Vec::new();
-            unsafe {
-                abomonation::encode(self, &mut bytes)
-                    .map_err(|err| RocksDataError::Encode(err.to_string()))?;
-            }
-
-            Ok(bytes)
-        }
+        #[unsafe_abomonate_ignore]
+        pub value: Vec<u8>,
     }
 
-    impl Decode for RocksData {
-        type DecodeError = RocksDataError;
-
-        fn decode(&mut self, bytes: &mut [u8]) -> std::result::Result<(), Self::DecodeError> {
+    impl RocksData {
+        fn decode(&mut self, bytes: &mut [u8]) -> std::result::Result<(), RocksDataError> {
             let (rocks_data, remaining) = unsafe {
                 abomonation::decode::<RocksData>(bytes).map_or(
                     Err(RocksDataError::Decode("decode failed".to_owned())),
@@ -94,15 +85,18 @@ mod rock_statemachine {
         }
     }
 
-    impl WriteData for RocksData {}
+    impl WriteData for RocksData {
+        type EncodeError = RocksDataError;
 
-    #[derive(Clone, Default, abomonation_derive::Abomonation)]
-    pub struct RocksData {
-        #[unsafe_abomonate_ignore]
-        pub key: Vec<u8>,
+        fn encode(&self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
+            let mut bytes = Vec::new();
+            unsafe {
+                abomonation::encode(self, &mut bytes)
+                    .map_err(|err| RocksDataError::Encode(err.to_string()))?;
+            }
 
-        #[unsafe_abomonate_ignore]
-        pub value: Vec<u8>,
+            Ok(bytes)
+        }
     }
 
     #[derive(thiserror::Error, Debug)]
@@ -128,14 +122,14 @@ mod rock_statemachine {
     }
 
     #[derive(Clone)]
-    pub struct RockStateMachine<R: AppWriteResponse> {
+    pub struct RockStateMachine<R: WriteResponse> {
         db: Arc<DBWithThreadMode<MultiThreaded>>,
         _m: PhantomData<R>,
     }
 
     impl<R> StateMachine<R> for RockStateMachine<R>
     where
-        R: AppWriteResponse,
+        R: WriteResponse,
     {
         type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<R>>>> + 'life0
         where
@@ -153,7 +147,7 @@ mod rock_statemachine {
 
     impl<R> RaftSnapshotReader for RockStateMachine<R>
     where
-        R: AppWriteResponse,
+        R: WriteResponse,
     {
         fn load_snapshot(
             &self,
@@ -172,7 +166,7 @@ mod rock_statemachine {
 
     impl<R> RaftSnapshotWriter for RockStateMachine<R>
     where
-        R: AppWriteResponse,
+        R: WriteResponse,
     {
         fn build_snapshot(&self, group_id: u64, replica_id: u64, applied: u64) -> Result<()> {
             unimplemented!()

@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use raft_proto::ConfChangeI;
 
 use crate::multiraft::error::ChannelError;
+use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
@@ -19,7 +20,6 @@ use crate::prelude::MembershipChangeData;
 use super::error::Error;
 use super::msg::ApplyCommitMessage;
 use super::msg::CommitMembership;
-use super::response::AppWriteResponse;
 use super::GroupState;
 
 #[derive(Debug)]
@@ -30,7 +30,7 @@ pub struct ApplyNoOp {
 }
 
 #[derive(Debug)]
-pub struct ApplyNormal<RES: AppWriteResponse> {
+pub struct ApplyNormal<RES: WriteResponse> {
     pub group_id: u64,
     // TODO: Consider exposing only internal fields instead of entry
     pub entry: Entry,
@@ -39,14 +39,14 @@ pub struct ApplyNormal<RES: AppWriteResponse> {
 }
 
 #[derive(Debug)]
-pub struct ApplyMembership<RES: AppWriteResponse> {
+pub struct ApplyMembership<RES: WriteResponse> {
     pub group_id: u64,
     pub entry: Entry,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
     pub(crate) commit_tx: UnboundedSender<ApplyCommitMessage>,
 }
 
-impl<RES: AppWriteResponse> ApplyMembership<RES> {
+impl<RES: WriteResponse> ApplyMembership<RES> {
     fn parse(&self) -> CommitMembership {
         match self.entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
@@ -108,13 +108,13 @@ impl<RES: AppWriteResponse> ApplyMembership<RES> {
 }
 
 #[derive(Debug)]
-pub enum Apply<RES: AppWriteResponse> {
+pub enum Apply<RES: WriteResponse> {
     NoOp(ApplyNoOp),
     Normal(ApplyNormal<RES>),
     Membership(ApplyMembership<RES>),
 }
 
-impl<RES: AppWriteResponse> Apply<RES> {
+impl<RES: WriteResponse> Apply<RES> {
     pub(crate) fn entry_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_index,
@@ -135,7 +135,7 @@ impl<RES: AppWriteResponse> Apply<RES> {
 
 pub trait StateMachine<R>: Send + 'static
 where
-    R: AppWriteResponse,
+    R: WriteResponse,
 {
     type ApplyFuture<'life0>: Send + Future<Output = Option<IntoIter<Apply<R>>>>
     where
