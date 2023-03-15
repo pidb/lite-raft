@@ -548,7 +548,15 @@ where
                         Apply::Normal(ApplyNormal {
                             group_id,
                             is_conf_change: false,
-                            entry,
+                            // entry,
+                            index: entry.index,
+                            term: entry.term,
+                            data: entry.data,
+                            context: if entry.context.is_empty() {
+                                None
+                            } else {
+                                Some(entry.context)
+                            },
                             tx,
                         })
                     }

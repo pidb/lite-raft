@@ -36,7 +36,7 @@ impl WriteChecker {
 
     fn fill_applys(&mut self, applys: &Vec<ApplyNormal<()>>) {
         for apply in applys.iter() {
-            self.applys.insert(apply.group_id, apply.entry.data.clone());
+            self.applys.insert(apply.group_id, apply.data.clone());
         }
     }
 }

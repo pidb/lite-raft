@@ -32,8 +32,11 @@ pub struct ApplyNoOp {
 #[derive(Debug)]
 pub struct ApplyNormal<RES: WriteResponse> {
     pub group_id: u64,
-    // TODO: Consider exposing only internal fields instead of entry
-    pub entry: Entry,
+    // pub entry: Entry,
+    pub index: u64,
+    pub term: u64,
+    pub data: Vec<u8>,
+    pub context: Option<Vec<u8>>,
     pub is_conf_change: bool,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
 }
@@ -118,7 +121,7 @@ impl<RES: WriteResponse> Apply<RES> {
     pub(crate) fn entry_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_index,
-            Self::Normal(normal) => normal.entry.index,
+            Self::Normal(normal) => normal.index,
             Self::Membership(membership) => membership.entry.index,
         }
     }
@@ -127,7 +130,7 @@ impl<RES: WriteResponse> Apply<RES> {
     pub(crate) fn entry_term(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_term,
-            Self::Normal(normal) => normal.entry.term,
+            Self::Normal(normal) => normal.term,
             Self::Membership(membership) => membership.entry.term,
         }
     }

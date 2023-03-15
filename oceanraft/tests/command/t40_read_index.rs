@@ -53,7 +53,7 @@ async fn test_group_read_index() {
     .unwrap();
 
     for event in events {
-        let kv_cmd: KVCommand = serde_json::from_slice(event.entry.get_data()).unwrap();
+        let kv_cmd: KVCommand = serde_json::from_slice(&event.data).unwrap();
         applied_kvs.insert(kv_cmd.key.clone(), kv_cmd);
 
         // TODO: use done method

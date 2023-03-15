@@ -12,6 +12,8 @@ use crate::prelude::HardState;
 use crate::prelude::RaftState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
+use crate::prelude::SnapshotMetadata;
+
 
 use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
@@ -96,7 +98,7 @@ impl RaftStorageWriter for RaftMemStorage {
 }
 
 impl RaftSnapshotWriter for RaftMemStorage {
-    fn build_snapshot(&self, _group_id: u64, _replica_id: u64, _applied: u64) -> Result<()> {
+    fn build_snapshot(&self, _group_id: u64, _replica_id: u64, meta: SnapshotMetadata) -> Result<()> {
         unimplemented!()
     }
 
