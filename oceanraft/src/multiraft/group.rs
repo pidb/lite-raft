@@ -32,7 +32,7 @@ use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
 use super::msg::ApplyResultMessage;
 use super::msg::ReadIndexData;
-use super::msg::WriteData;
+use super::msg::WriteRequest;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
 use super::node::ResponseCallback;
@@ -47,6 +47,7 @@ use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport;
+use super::types::WriteData;
 use super::util;
 use super::Event;
 
@@ -580,12 +581,15 @@ where
         // self.raft_group.advance_apply();
     }
 
-    fn pre_propose_write(&mut self, write_data: &WriteData<RES>) -> Result<(), Error> {
-        if write_data.data.is_empty() {
-            return Err(Error::BadParameter(
-                "write request data must not be empty".to_owned(),
-            ));
-        }
+    fn pre_propose_write<WD: WriteData>(
+        &mut self,
+        write_data: &WriteRequest<WD, RES>,
+    ) -> Result<(), Error> {
+        // if write_data.data.is_empty() {
+        //     return Err(Error::BadParameter(
+        //         "write request data must not be empty".to_owned(),
+        //     ));
+        // }
 
         if !self.is_leader() {
             return Err(Error::Write(WriteError::NotLeader {
@@ -605,27 +609,32 @@ where
         Ok(())
     }
 
-    pub fn propose_write(
+    pub fn propose_write<WD: WriteData>(
         &mut self,
-        write_data: WriteData<RES>,
-        // tx: oneshot::Sender<Result<RES, Error>>,
+        mut write_request: WriteRequest<WD, RES>,
     ) -> Option<ResponseCallback> {
-        if let Err(err) = self.pre_propose_write(&write_data) {
+        if let Err(err) = self.pre_propose_write(&write_request) {
             return Some(ResponseCallbackQueue::new_error_callback(
-                write_data.tx,
+                write_request.tx,
                 err,
             ));
         }
+
         let term = self.term();
+
+        let write_data = match write_request.data.encode() {
+            Err(err) => todo!(),
+            Ok(data) => data,
+        };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(
-            write_data.context.map_or(vec![], |ctx_data| ctx_data),
-            write_data.data,
+            write_request.context.map_or(vec![], |ctx_data| ctx_data),
+            write_data,
         ) {
             return Some(ResponseCallbackQueue::new_error_callback(
-                write_data.tx,
+                write_request.tx,
                 Error::Raft(err),
             ));
         }
@@ -633,7 +642,7 @@ where
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
-                write_data.tx,
+                write_request.tx,
                 Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
             ));
         }
@@ -642,7 +651,7 @@ where
             index: next_index,
             term,
             is_conf_change: false,
-            tx: Some(write_data.tx),
+            tx: Some(write_request.tx),
         };
 
         self.proposals.push(proposal);

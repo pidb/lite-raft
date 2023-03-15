@@ -661,7 +661,6 @@ where
 mod test {
     use futures::Future;
     use std::collections::HashMap;
-    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::multiraft::state::GroupState;

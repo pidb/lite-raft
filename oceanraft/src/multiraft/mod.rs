@@ -23,3 +23,4 @@ pub use multiraft::{MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImp
 pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
 pub use state::GroupState;
 pub use util::{ManualTick, Ticker};
+pub use types::{Encode, Decode, WriteData};
