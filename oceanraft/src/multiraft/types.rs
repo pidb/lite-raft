@@ -1,42 +1,30 @@
 use std::error::Error;
+use std::fmt::Debug;
 
-pub trait Encode {
+pub trait WriteData: Clone + Send + Sync + 'static {
     type EncodeError: Error + Send + Sync;
-    fn encode(&mut self) -> Result<Vec<u8>, Self::EncodeError>;
+    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError>;
 }
-
-pub trait Decode {
-    type DecodeError: Error + Send + Sync;
-    fn decode(&mut self, bytes: &mut [u8]) -> Result<(), Self::DecodeError>;
-}
-
-pub trait WriteData: Clone + Send + Sync + Encode + Decode + 'static {}
 
 /// Only use for tests
 #[derive(thiserror::Error, Debug)]
+#[allow(unused)]
 pub(crate) enum EmptyWriteDataError {
     #[error("encode")]
     Encode,
-    #[error("decode")]
-    Decode,
 }
 
 /// Only use for tests
 #[derive(Clone)]
 pub(crate) struct EmptyWriteData;
 
-impl Encode for EmptyWriteData {
+impl WriteData for EmptyWriteData {
     type EncodeError = EmptyWriteDataError;
-    fn encode(&mut self) -> Result<Vec<u8>, Self::EncodeError> {
+    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError> {
         Ok(vec![])
     }
 }
 
-impl Decode for EmptyWriteData {
-    type DecodeError = EmptyWriteDataError;
-    fn decode(&mut self, _: &mut [u8]) -> Result<(), Self::DecodeError> {
-        Ok(())
-    }
-}
+pub trait WriteResponse: Debug + Clone + Send + Sync + 'static {}
 
-impl WriteData for EmptyWriteData {}
+impl<R> WriteResponse for R where R: Debug + Clone + Send + Sync + 'static {}

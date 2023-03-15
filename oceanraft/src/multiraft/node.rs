@@ -22,6 +22,7 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::multiraft::NO_LEADER;
+use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
@@ -56,7 +57,6 @@ use super::multiraft::NO_NODE;
 use super::proposal::ProposalQueue;
 use super::proposal::ReadIndexQueue;
 use super::replica_cache::ReplicaCache;
-use super::response::AppWriteResponse;
 use super::rsm::StateMachine;
 use super::state::GroupState;
 use super::state::GroupStates;
@@ -211,7 +211,7 @@ impl NodeManager {
 pub struct NodeActor<WD, RES>
 where
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     // TODO: queue should have one per-group.
     pub propose_tx: Sender<ProposeMessage<WD, RES>>,
@@ -228,7 +228,7 @@ where
 impl<WD, RES> NodeActor<WD, RES>
 where
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     pub fn spawn<TR, RS, MRS, RSM, TK>(
         cfg: &Config,
@@ -303,7 +303,7 @@ where
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     cfg: Config,
     node_id: u64,
@@ -334,7 +334,7 @@ where
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     fn new(
         cfg: &Config,

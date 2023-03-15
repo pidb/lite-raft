@@ -8,10 +8,11 @@ use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
 
+use crate::multiraft::WriteResponse;
+
 use super::error::Error;
 use super::error::WriteError;
 use super::msg::ReadIndexContext;
-use super::response::AppWriteResponse;
 
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
@@ -108,7 +109,7 @@ impl ReadIndexQueue {
 }
 
 #[derive(Debug)]
-pub struct Proposal<RES: AppWriteResponse> {
+pub struct Proposal<RES: WriteResponse> {
     // index when proposing to raft group
     pub index: u64,
     // current term when proposing to raft group.
@@ -120,12 +121,12 @@ pub struct Proposal<RES: AppWriteResponse> {
 }
 
 #[derive(Debug)]
-pub struct ProposalQueue<RES: AppWriteResponse> {
+pub struct ProposalQueue<RES: WriteResponse> {
     pub replica_id: u64,
     pub queue: VecDeque<Proposal<RES>>,
 }
 
-impl<RES: AppWriteResponse> ProposalQueue<RES> {
+impl<RES: WriteResponse> ProposalQueue<RES> {
     pub fn new(replica_id: u64) -> Self {
         ProposalQueue {
             replica_id,

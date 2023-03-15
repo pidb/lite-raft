@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
@@ -10,12 +11,11 @@ use crate::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::proposal::Proposal;
-use super::response::AppWriteResponse;
 use super::types::WriteData;
 
 pub struct WriteRequest<WD, RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
     WD: WriteData,
 {
     pub group_id: u64,
@@ -45,7 +45,7 @@ pub struct ReadIndexData {
 pub enum ProposeMessage<WD, RES>
 where
     WD: WriteData,
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     Write(WriteRequest<WD, RES>),
     ReadIndexData(ReadIndexData),
@@ -74,7 +74,7 @@ pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct ApplyData<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     pub replica_id: u64,
     pub group_id: u64,
@@ -88,7 +88,7 @@ where
 
 impl<RES> ApplyData<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     pub fn try_batch(&mut self, that: &mut ApplyData<RES>, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
@@ -109,9 +109,9 @@ where
     }
 }
 
-pub enum ApplyMessage< RES>
+pub enum ApplyMessage<RES>
 where
-    RES: AppWriteResponse,
+    RES: WriteResponse,
 {
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,

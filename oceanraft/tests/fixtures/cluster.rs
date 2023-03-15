@@ -4,8 +4,6 @@ use std::time::Duration;
 
 use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
 use oceanraft::multiraft::ApplyNormal;
-use oceanraft::multiraft::Decode;
-use oceanraft::multiraft::Encode;
 use oceanraft::multiraft::WriteData;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -55,22 +53,12 @@ pub enum FixtureWriteDataError {
 #[derive(Clone)]
 pub struct FixtureWriteData(Vec<u8>);
 
-impl Encode for FixtureWriteData {
+impl WriteData for FixtureWriteData {
     type EncodeError = FixtureWriteDataError;
-    fn encode(&mut self) -> Result<Vec<u8>, Self::EncodeError> {
+    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError> {
         Ok(self.0.clone())
     }
 }
-
-impl Decode for FixtureWriteData {
-    type DecodeError = FixtureWriteDataError;
-    fn decode(&mut self, bytes: &mut [u8]) -> Result<(), Self::DecodeError> {
-        self.0 = bytes.to_vec();
-        Ok(())
-    }
-}
-
-impl WriteData for FixtureWriteData {}
 
 pub struct FixtureCluster {
     pub election_ticks: usize,
