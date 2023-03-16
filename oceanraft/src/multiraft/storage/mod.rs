@@ -152,7 +152,7 @@ pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
 pub trait RaftSnapshotWriter: Clone + Send + Sync + 'static {
     fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()>;
 
-    fn build_snapshot(&self, group_id: u64, replica_id: u64, meta: SnapshotMetadata) -> Result<()>;
+    fn build_snapshot(&self, group_id: u64, replica_id: u64) -> Result<()>;
 }
 
 /// RaftStorage provides read and writes all the information about the current Raft implementation,

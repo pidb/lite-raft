@@ -30,6 +30,8 @@ mod storage {
     use crate::multiraft::storage::RaftStorageWriter;
     use crate::multiraft::storage::Result;
 
+    use super::state_machine::RockStateMachine;
+
     const METADATA_CF_NAME: &'static str = "metadta_cf";
     const LOG_CF_NAME: &'static str = "raft_log_cf";
 
@@ -637,7 +639,7 @@ mod storage {
     }
 
     #[derive(Clone)]
-    struct RockStore<SR, SW>
+    pub struct RockStore<SR, SW>
     where
         SR: RaftSnapshotReader,
         SW: RaftSnapshotWriter,
@@ -877,7 +879,7 @@ mod state_machine {
 
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::Result;
+    use crate::multiraft::storage::Result as StorageResult;
     use crate::multiraft::types::WriteData;
     use crate::multiraft::Apply;
     use crate::multiraft::StateMachine;
@@ -886,14 +888,25 @@ mod state_machine {
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
 
+    use super::storage::RockStore;
+
+    type Result<T> = std::result::Result<T, RockStateMachineError>;
+
     const DATA_CF_NAME: &'static str = "data";
+    const META_CF_NAME: &'static str = "meta";
     const SNAP_CF_NAME: &'static str = "snapshot";
 
     const SNAP_META_POSTIFX: &'static str = "snap_meta";
     const SNAP_DATA_POSTIFX: &'static str = "snap_data";
 
+    const APPLIED_INDEX_POSTFIX: &'static str = "applied_index";
+    const APPLIED_TERM_POSTFIX: &'static str = "applied_term";
+
+    /*****************************************************************************
+     * DATA
+     *****************************************************************************/
     #[derive(thiserror::Error, Debug)]
-    pub enum RocksDataError {
+    pub enum RockDataError {
         #[error("{0}")]
         Encode(String),
         #[error("{0}")]
@@ -906,8 +919,11 @@ mod state_machine {
         raw_key: Vec<u8>,
     }
 
+    /// RockData defines a general key-value data structure for applications
+    /// to store data to rocksdb. key is a string that needs to meet utf8,
+    /// and value can be any byte.
     #[derive(Clone, Default, abomonation_derive::Abomonation)]
-    pub struct RocksData {
+    pub struct RockData {
         #[unsafe_abomonate_ignore]
         pub key: String,
 
@@ -915,11 +931,11 @@ mod state_machine {
         pub value: Vec<u8>,
     }
 
-    impl RocksData {
-        pub fn decode(bytes: &mut [u8]) -> std::result::Result<Self, RocksDataError> {
+    impl RockData {
+        pub fn decode(bytes: &mut [u8]) -> std::result::Result<Self, RockDataError> {
             let (rocks_data, remaining) = unsafe {
-                abomonation::decode::<RocksData>(bytes).map_or(
-                    Err(RocksDataError::Decode("decode failed".to_owned())),
+                abomonation::decode::<RockData>(bytes).map_or(
+                    Err(RockDataError::Decode("decode failed".to_owned())),
                     |v| Ok(v),
                 )?
             };
@@ -928,29 +944,27 @@ mod state_machine {
         }
     }
 
-    impl WriteData for RocksData {
-        type EncodeError = RocksDataError;
+    impl WriteData for RockData {
+        type EncodeError = RockDataError;
 
         fn encode(&self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
             let mut bytes = Vec::new();
             unsafe {
                 abomonation::encode(self, &mut bytes)
-                    .map_err(|err| RocksDataError::Encode(err.to_string()))?;
+                    .map_err(|err| RockDataError::Encode(err.to_string()))?;
             }
 
             Ok(bytes)
         }
     }
 
+    /*****************************************************************************
+     * SNAPSHOT
+     *****************************************************************************/
     #[derive(serde::Serialize, serde::Deserialize, Default)]
-    struct RockStateMachineDataSerializer {
-        bt_map: BTreeMap<String, Vec<u8>>,
-    }
-
-    #[derive(serde::Serialize, serde::Deserialize, Default)]
-    struct RockStateMachineMetaSerializer {
-        index: u64,
-        term: u64,
+    struct RockStateMachineSnapshotMetaSerializer {
+        applied_index: u64,
+        applied_term: u64,
         voters: Vec<u64>,
         learners: Vec<u64>,
         voters_outgoing: Vec<u64>,
@@ -958,69 +972,50 @@ mod state_machine {
         auto_leave: bool,
     }
 
-    impl From<RockStateMachineMetaSerializer> for SnapshotMetadata {
-        fn from(val: RockStateMachineMetaSerializer) -> Self {
-            SnapshotMetadata {
-                index: val.index,
-                term: val.term,
-                conf_state: Some(ConfState {
-                    voters: val.voters,
-                    learners: val.learners,
-                    voters_outgoing: val.voters_outgoing,
-                    learners_next: val.learners_next,
-                    auto_leave: val.auto_leave,
-                }),
-            }
-        }
-    }
-
-    impl From<&SnapshotMetadata> for RockStateMachineMetaSerializer {
-        fn from(meta: &SnapshotMetadata) -> Self {
-            Self {
-                index: meta.index,
-                term: meta.term,
-                voters: meta
-                    .conf_state
-                    .as_ref()
-                    .map_or(vec![], |cs| cs.voters.clone()),
-                learners: meta
-                    .conf_state
-                    .as_ref()
-                    .map_or(vec![], |cs| cs.learners.clone()),
-                voters_outgoing: meta
-                    .conf_state
-                    .as_ref()
-                    .map_or(vec![], |cs| cs.voters_outgoing.clone()),
-                learners_next: meta
-                    .conf_state
-                    .as_ref()
-                    .map_or(vec![], |cs| cs.learners_next.clone()),
-                auto_leave: meta.conf_state.as_ref().map_or(false, |cs| cs.auto_leave),
-            }
-        }
-    }
-
-    #[derive(Default)]
-    struct RockStateMachineSerializer {
-        meta: RockStateMachineMetaSerializer,
-        data: RockStateMachineDataSerializer,
-    }
-
-    impl<R: WriteResponse> From<(u64, u64, &SnapshotMetadata, &RockStateMachine<R>)>
-        for RockStateMachineSerializer
+    impl<R> TryFrom<(u64, &RockStateMachine<R>)> for RockStateMachineSnapshotMetaSerializer
+    where
+        R: WriteResponse,
     {
-        fn from(val: (u64, u64, &SnapshotMetadata, &RockStateMachine<R>)) -> Self {
+        type Error = RockStateMachineError;
+        fn try_from(val: (u64, &RockStateMachine<R>)) -> std::result::Result<Self, Self::Error> {
             let group_id = val.0;
-            let _replica_id = val.1;
-            let snapshot_meta = val.2;
-            let state_machine = val.3;
+            let state_machine = val.1;
+            let (applied_index, applied_term) = state_machine.get_applied(group_id)?;
+            let conf_state = state_machine.get_last_conf_state(group_id)?;
 
-            let cf = state_machine.db.cf_handle(DATA_CF_NAME).unwrap();
+            Ok(RockStateMachineSnapshotMetaSerializer {
+                applied_index,
+                applied_term,
+                voters: conf_state.voters,
+                learners: conf_state.learners,
+                learners_next: conf_state.learners_next,
+                voters_outgoing: conf_state.voters_outgoing,
+                auto_leave: conf_state.auto_leave,
+            })
+        }
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    struct RockStateMachineSnapshotDataSerializer {
+        bt_map: BTreeMap<String, Vec<u8>>,
+    }
+
+    impl<R> TryFrom<(u64, &RockStateMachine<R>)> for RockStateMachineSnapshotDataSerializer
+    where
+        R: WriteResponse,
+    {
+        type Error = RockStateMachineError;
+
+        fn try_from(val: (u64, &RockStateMachine<R>)) -> std::result::Result<Self, Self::Error> {
+            let group_id = val.0;
+            let state_machine = val.1;
+
+            let cf = state_machine.get_data_cf()?;
             let prefix = format!("{}/", group_id);
             let iter_mode = IteratorMode::From(prefix.as_bytes(), Direction::Forward);
             let readopts = ReadOptions::default();
             let iter = state_machine.db.iterator_cf_opt(&cf, readopts, iter_mode);
-            let mut data = RockStateMachineDataSerializer::default();
+            let mut data = RockStateMachineSnapshotDataSerializer::default();
             for item in iter {
                 let (key, value) = item.unwrap();
                 let key = std::str::from_utf8(&key).unwrap();
@@ -1030,9 +1025,156 @@ mod state_machine {
                 data.bt_map.insert(raw_key, value.to_vec());
             }
 
-            let meta = RockStateMachineMetaSerializer::from(snapshot_meta);
-            Self { meta, data }
+            Ok(data)
         }
+    }
+
+    impl From<RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
+        fn from(ser: RockStateMachineSnapshotMetaSerializer) -> Self {
+            let conf_state = Some(ConfState {
+                voters: ser.voters,
+                voters_outgoing: ser.voters_outgoing,
+                learners: ser.learners,
+                learners_next: ser.learners_next,
+                auto_leave: ser.auto_leave,
+            });
+
+            SnapshotMetadata {
+                index: ser.applied_index,
+                term: ser.applied_term,
+                conf_state,
+            }
+        }
+    }
+
+    impl From<&RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
+        fn from(ser: &RockStateMachineSnapshotMetaSerializer) -> Self {
+            let conf_state = Some(ConfState {
+                voters: ser.voters.clone(),
+                voters_outgoing: ser.voters_outgoing.clone(),
+                learners: ser.learners.clone(),
+                learners_next: ser.learners_next.clone(),
+                auto_leave: ser.auto_leave.clone(),
+            });
+
+            SnapshotMetadata {
+                index: ser.applied_index,
+                term: ser.applied_term,
+                conf_state,
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct RockStateMachineSnapshotSerializer {
+        meta: RockStateMachineSnapshotMetaSerializer,
+        data: RockStateMachineSnapshotDataSerializer,
+    }
+
+    impl<R: WriteResponse>
+        TryFrom<(
+            u64,
+            u64,
+            &RockStore<RockStateMachineSnapshot<R>, RockStateMachineSnapshot<R>>,
+            &RockStateMachine<R>,
+        )> for RockStateMachineSnapshotSerializer
+    {
+        type Error = RockStateMachineError;
+
+        fn try_from(
+            val: (
+                u64,
+                u64,
+                &RockStore<RockStateMachineSnapshot<R>, RockStateMachineSnapshot<R>>,
+                &RockStateMachine<R>,
+            ),
+        ) -> std::result::Result<Self, Self::Error> {
+            let group_id = val.0;
+            let _replica_id = val.1;
+            let _rock_store = val.2;
+            let state_machine = val.3;
+
+            let meta = RockStateMachineSnapshotMetaSerializer::try_from((group_id, state_machine))?;
+            let data = RockStateMachineSnapshotDataSerializer::try_from((group_id, state_machine))?;
+            Ok(Self { meta, data })
+        }
+    }
+
+    /// `RockStateMachineSnapshot` provides `RockStateMachine` with the default
+    /// implementation of the snapshot reader and writer for the state machine.
+    #[derive(Clone)]
+    pub struct RockStateMachineSnapshot<R>
+    where
+        R: WriteResponse,
+    {
+        store: Arc<RockStore<Self, Self>>,
+        state_machine: Arc<RockStateMachine<R>>,
+    }
+
+    impl<R> RaftSnapshotReader for RockStateMachineSnapshot<R>
+    where
+        R: WriteResponse,
+    {
+        fn load_snapshot(
+            &self,
+            group_id: u64,
+            _replica_id: u64,
+            _request_index: u64,
+            _to: u64,
+        ) -> StorageResult<Snapshot> {
+            let snapshot = self.state_machine.get_snapshot(group_id).unwrap(); // TODO: map error
+            Ok(snapshot)
+        }
+
+        fn snapshot_metadata(
+            &self,
+            group_id: u64,
+            _replica_id: u64,
+        ) -> StorageResult<SnapshotMetadata> {
+            let meta = self.state_machine.get_snapshot_meta(group_id).unwrap(); // TODO: map error
+            Ok(meta)
+        }
+    }
+
+    impl<R> RaftSnapshotWriter for RockStateMachineSnapshot<R>
+    where
+        R: WriteResponse,
+    {
+        fn build_snapshot(&self, group_id: u64, replica_id: u64) -> StorageResult<()> {
+            let ser = RockStateMachineSnapshotSerializer::try_from((
+                group_id,
+                replica_id,
+                self.store.as_ref(),
+                self.state_machine.as_ref(),
+            ))
+            .unwrap(); // TODO: map error
+
+            self.state_machine
+                .serialize_snapshot(group_id, ser)
+                .unwrap(); // TODO: map error
+            Ok(())
+        }
+
+        fn save_snapshot(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+            snapshot: Snapshot,
+        ) -> StorageResult<()> {
+            unimplemented!()
+        }
+    }
+
+    /*****************************************************************************
+     * STATE MACHINE
+     *****************************************************************************/
+    #[derive(thiserror::Error, Debug)]
+    pub enum RockStateMachineError {
+        #[error("{0} cloumn family is missing")]
+        ColumnFamilyMissing(String),
+
+        #[error("{0}")]
+        Other(Box<dyn std::error::Error>),
     }
 
     #[derive(Clone)]
@@ -1042,71 +1184,181 @@ mod state_machine {
     }
 
     impl<R: WriteResponse> RockStateMachine<R> {
+        /// Get snapshot cloumn famly.
         #[inline]
-        fn snapshot_cf_unchecked(&self) -> Arc<BoundColumnFamily> {
-            self.db
-                .cf_handle(SNAP_CF_NAME)
-                .expect("snapshot cloumn family does not initialize.")
+        fn get_snapshot_cf(&self) -> Result<Arc<BoundColumnFamily>> {
+            self.db.cf_handle(SNAP_CF_NAME).map_or(
+                Err(RockStateMachineError::ColumnFamilyMissing(
+                    "snapshot".to_owned(),
+                )),
+                |cf| Ok(cf),
+            )
         }
 
-        fn read_snapshot(&self, group_id: u64) -> Snapshot {
-            let cf = self.snapshot_cf_unchecked();
+        /// Get data cloumn famly.
+        #[inline]
+        fn get_data_cf(&self) -> Result<Arc<BoundColumnFamily>> {
+            self.db.cf_handle(DATA_CF_NAME).map_or(
+                Err(RockStateMachineError::ColumnFamilyMissing(
+                    "meta".to_owned(),
+                )),
+                |cf| Ok(cf),
+            )
+        }
+
+        /// Get meta cloumn famly.
+        #[inline]
+        fn get_meta_cf(&self) -> Result<Arc<BoundColumnFamily>> {
+            self.db.cf_handle(META_CF_NAME).map_or(
+                Err(RockStateMachineError::ColumnFamilyMissing(
+                    "meta".to_owned(),
+                )),
+                |cf| Ok(cf),
+            )
+        }
+
+        /// Get saved applied index and term
+        fn get_applied(&self, group_id: u64) -> Result<(u64, u64)> {
+            let cf = self.get_data_cf()?;
+
+            let keys = vec![
+                format_applied_index_key(group_id),
+                format_applied_term_key(group_id),
+            ];
+
+            let readopts = ReadOptions::default();
+            let mut iter = self
+                .db
+                .batched_multi_get_cf_opt(&cf, &keys, false, &readopts)
+                .into_iter();
+            let index = iter
+                .next()
+                .unwrap()
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
+                .map_or(0, |data| {
+                    u64::from_be_bytes(data.as_ref().try_into().unwrap())
+                });
+
+            let term = iter
+                .next()
+                .unwrap()
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
+                .map_or(0, |data| {
+                    u64::from_be_bytes(data.as_ref().try_into().unwrap())
+                });
+
+            Ok((index, term))
+        }
+
+        fn save_last_confstate(&self, group_id: u64, cs: ConfState) -> Result<()> {
+            unimplemented!()
+        }
+
+        /// Get saved last membership change
+        fn get_last_conf_state(&self, group_id: u64) -> Result<ConfState> {
+            unimplemented!()
+        }
+
+        /// Get snapshot from rock storage.
+        ///
+        /// Note: default returned if does exists snapshot metadata.
+        fn get_snapshot(&self, group_id: u64) -> Result<Snapshot> {
+            let cf = self.get_snapshot_cf()?;
             let readopts = ReadOptions::default();
 
             let meta_key = snapshot_metadata_key(group_id);
             let meta = self
                 .db
                 .get_pinned_cf_opt(&cf, &meta_key, &readopts)
-                .unwrap();
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
             if meta.is_none() {
-                return Snapshot::default();
+                return Ok(Snapshot::default());
             }
-            let meta: RockStateMachineMetaSerializer =
-                serde_json::from_slice(&meta.unwrap()).unwrap();
+
+            let meta: RockStateMachineSnapshotMetaSerializer =
+                serde_json::from_slice(&meta.unwrap())
+                    .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
             let data_key = snapshot_data_key(group_id);
             let data = self
                 .db
                 .get_pinned_cf_opt(&cf, &data_key, &readopts)
-                .unwrap();
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
             let data = match data {
                 None => vec![],
                 Some(data) => data.to_owned(),
             };
 
-            let mut snap = Snapshot::default();
-            Snapshot {
+            Ok(Snapshot {
                 data,
                 metadata: Some(SnapshotMetadata::from(meta)),
+            })
+        }
+
+        /// Get snapshot metadata from rock storage.
+        ///
+        /// Note: default returned if does exists snapshot metadata.
+        fn get_snapshot_meta(&self, group_id: u64) -> Result<SnapshotMetadata> {
+            let cf = self.get_snapshot_cf()?;
+            let readopts = ReadOptions::default();
+            let meta_key = snapshot_metadata_key(group_id);
+            let meta = self
+                .db
+                .get_pinned_cf_opt(&cf, &meta_key, &readopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+
+            if meta.is_none() {
+                return Ok(SnapshotMetadata::default());
             }
+
+            let meta: RockStateMachineSnapshotMetaSerializer =
+                serde_json::from_slice(&meta.unwrap())
+                    .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+
+            Ok(SnapshotMetadata::from(meta))
         }
 
-        fn write_snapshot(&self, group_id: u64, ser: RockStateMachineSerializer) {
-            let meta = serde_json::to_vec(&ser.meta).unwrap();
-            let data = serde_json::to_vec(&ser.data).unwrap();
+        /// Save the current serialized to snapshot.
+        fn serialize_snapshot(
+            &self,
+            group_id: u64,
+            ser: RockStateMachineSnapshotSerializer,
+        ) -> Result<()> {
+            let meta = serde_json::to_vec(&ser.meta)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+            let data = serde_json::to_vec(&ser.data)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            self.persistent_snapshot_metadata(group_id, meta);
-            self.persistent_snapshot_data(group_id, data);
+            self.save_snapshot_metadata(group_id, meta)?;
+            self.save_snapshot_data(group_id, data)?;
+
+            Ok(())
         }
 
-        fn persistent_snapshot_metadata(&self, group_id: u64, meta: Vec<u8>) {
-            let cf = self.snapshot_cf_unchecked();
+        /// Save the current snapshot metadata by raw bytes.
+        fn save_snapshot_metadata(&self, group_id: u64, meta: Vec<u8>) -> Result<()> {
+            let cf = self.get_snapshot_cf()?;
             let key = snapshot_metadata_key(group_id);
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
 
-            self.db.put_cf_opt(&cf, key, meta, &writeopts).unwrap();
+            self.db
+                .put_cf_opt(&cf, key, meta, &writeopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
         }
 
-        fn persistent_snapshot_data(&self, group_id: u64, data: Vec<u8>) {
-            let cf = self.snapshot_cf_unchecked();
+        /// Save the current snapshot data by raw bytes.
+        fn save_snapshot_data(&self, group_id: u64, data: Vec<u8>) -> Result<()> {
+            let cf = self.get_snapshot_cf()?;
             let key = snapshot_data_key(group_id);
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
 
-            self.db.put_cf_opt(&cf, key, data, &writeopts).unwrap();
+            self.db
+                .put_cf_opt(&cf, key, data, &writeopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
         }
     }
 
@@ -1128,64 +1380,50 @@ mod state_machine {
                 let cf = self.db.cf_handle(DATA_CF_NAME).unwrap();
                 let mut batch = WriteBatch::default();
 
+                let mut applied_index = 0;
+                let mut applied_term = 0;
+
                 for apply in iter {
                     match apply {
                         Apply::NoOp(_) => unimplemented!(),
                         Apply::Normal(mut normal) => {
-                            let rockdata = RocksData::decode(&mut normal.data).unwrap();
+                            let rockdata = RockData::decode(&mut normal.data).unwrap();
                             let key = format_group_key(group_id, &rockdata.key);
                             batch.put_cf(&cf, key, rockdata.value);
+                            applied_index = normal.index;
+                            applied_term = normal.term;
                         }
-                        Apply::Membership(_) => unimplemented!(),
+                        Apply::Membership(changes) => unimplemented!(),
                     }
                 }
+
+                batch.put_cf(
+                    &cf,
+                    format_applied_index_key(group_id),
+                    applied_index.to_be_bytes(),
+                );
+                batch.put_cf(
+                    &cf,
+                    format_applied_term_key(group_id),
+                    applied_term.to_be_bytes(),
+                );
 
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db.write_opt(batch, &writeopts).unwrap();
-
                 None
             }
         }
     }
 
-    impl<R> RaftSnapshotReader for RockStateMachine<R>
-    where
-        R: WriteResponse,
-    {
-        fn load_snapshot(
-            &self,
-            group_id: u64,
-            replica_id: u64,
-            request_index: u64,
-            to: u64,
-        ) -> Result<Snapshot> {
-            unimplemented!()
-        }
-
-        fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata> {
-            unimplemented!()
-        }
+    #[inline]
+    fn format_applied_index_key(group_id: u64) -> String {
+        format!("{}/{}", group_id, APPLIED_INDEX_POSTFIX)
     }
 
-    impl<R> RaftSnapshotWriter for RockStateMachine<R>
-    where
-        R: WriteResponse,
-    {
-        fn build_snapshot(
-            &self,
-            group_id: u64,
-            replica_id: u64,
-            meta: SnapshotMetadata,
-        ) -> Result<()> {
-            let ser = RockStateMachineSerializer::from((group_id, replica_id, &meta, self));
-            self.write_snapshot(group_id, ser);
-            Ok(())
-        }
-
-        fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()> {
-            unimplemented!()
-        }
+    #[inline]
+    fn format_applied_term_key(group_id: u64) -> String {
+        format!("{}/{}", group_id, APPLIED_TERM_POSTFIX)
     }
 
     #[inline]
@@ -1218,13 +1456,13 @@ mod state_machine {
 
         #[test]
         fn test_rocksdata_serialize() {
-            let data1 = RocksData {
+            let data1 = RockData {
                 key: "key".to_owned(),
                 value: "value".as_bytes().to_owned(),
             };
 
             let mut encoded = data1.encode().unwrap();
-            let data2 = RocksData::decode(&mut encoded).unwrap();
+            let data2 = RockData::decode(&mut encoded).unwrap();
             assert_eq!(data1.key, data2.key);
             assert_eq!(data1.value, data2.value);
         }
@@ -1239,3 +1477,7 @@ mod state_machine {
         }
     }
 }
+
+pub use state_machine::{
+    RockData, RockDataError, RockStateMachine, RockStateMachineError, RockStateMachineSnapshot,
+};
