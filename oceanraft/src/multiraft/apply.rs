@@ -191,7 +191,7 @@ where
                     applys,
                     apply_state,
                     shared_state.as_ref(),
-                    &mut self.ctx,
+                    &self.ctx,
                 )
                 .await
                 .unwrap();
@@ -474,7 +474,7 @@ where
 
     async fn handle_apply(
         &mut self,
-        ctx: &mut ApplyContext<RSM, RES>,
+        ctx: &ApplyContext<RSM, RES>,
         mut apply: ApplyData<RES>,
         apply_state: &mut LocalApplyState,
         shared_state: &GroupState,
@@ -610,7 +610,7 @@ where
         applys: Vec<ApplyData<RES>>,
         apply_state: &mut LocalApplyState,
         shared_state: &GroupState,
-        ctx: &mut ApplyContext<RSM, RES>,
+        ctx: &ApplyContext<RSM, RES>,
     ) -> Result<ApplyResultMessage, Error> {
         for apply in applys {
             self.handle_apply(ctx, apply, apply_state, shared_state)
@@ -690,7 +690,7 @@ mod test {
         where
             Self: 'life0;
         fn apply(
-            &mut self,
+            &self,
             _: u64,
             _: &GroupState,
             _: std::vec::IntoIter<crate::multiraft::Apply<()>>,

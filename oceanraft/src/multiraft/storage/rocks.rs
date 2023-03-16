@@ -864,15 +864,18 @@ mod storage {
 mod state_machine {
     use std::collections::BTreeMap;
     use std::marker::PhantomData;
+    use std::path::Path;
     use std::sync::Arc;
     use std::vec::IntoIter;
 
     use futures::Future;
     use rocksdb::BoundColumnFamily;
+    use rocksdb::ColumnFamilyDescriptor;
     use rocksdb::DBWithThreadMode;
     use rocksdb::Direction;
     use rocksdb::IteratorMode;
     use rocksdb::MultiThreaded;
+    use rocksdb::Options as RocksdbOptions;
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
@@ -899,8 +902,8 @@ mod state_machine {
     const SNAP_META_POSTIFX: &'static str = "snap_meta";
     const SNAP_DATA_POSTIFX: &'static str = "snap_data";
 
-    const APPLIED_INDEX_POSTFIX: &'static str = "applied_index";
-    const APPLIED_TERM_POSTFIX: &'static str = "applied_term";
+    const APPLIED_INDEX_PREFIX: &'static str = "applied_index";
+    const APPLIED_TERM_PREFIX: &'static str = "applied_term";
 
     /*****************************************************************************
      * DATA
@@ -924,10 +927,7 @@ mod state_machine {
     /// and value can be any byte.
     #[derive(Clone, Default, abomonation_derive::Abomonation)]
     pub struct RockData {
-        #[unsafe_abomonate_ignore]
         pub key: String,
-
-        #[unsafe_abomonate_ignore]
         pub value: Vec<u8>,
     }
 
@@ -1019,10 +1019,13 @@ mod state_machine {
             for item in iter {
                 let (key, value) = item.unwrap();
                 let key = std::str::from_utf8(&key).unwrap();
-                let (owner_group_id, raw_key) = split_group_key_unchecked(key);
-                assert_eq!(owner_group_id, group_id);
-
-                data.bt_map.insert(raw_key, value.to_vec());
+                match split_group_key(key) {
+                    None => break,
+                    Some((owner_group_id, raw_key)) => {
+                        assert_eq!(owner_group_id, group_id);
+                        data.bt_map.insert(raw_key, value.to_vec());
+                    }
+                }
             }
 
             Ok(data)
@@ -1071,28 +1074,17 @@ mod state_machine {
         data: RockStateMachineSnapshotDataSerializer,
     }
 
-    impl<R: WriteResponse>
-        TryFrom<(
-            u64,
-            u64,
-            &RockStore<RockStateMachineSnapshot<R>, RockStateMachineSnapshot<R>>,
-            &RockStateMachine<R>,
-        )> for RockStateMachineSnapshotSerializer
+    impl<R: WriteResponse> TryFrom<(u64, u64, &RockStateMachine<R>)>
+        for RockStateMachineSnapshotSerializer
     {
         type Error = RockStateMachineError;
 
         fn try_from(
-            val: (
-                u64,
-                u64,
-                &RockStore<RockStateMachineSnapshot<R>, RockStateMachineSnapshot<R>>,
-                &RockStateMachine<R>,
-            ),
+            val: (u64, u64, &RockStateMachine<R>),
         ) -> std::result::Result<Self, Self::Error> {
             let group_id = val.0;
             let _replica_id = val.1;
-            let _rock_store = val.2;
-            let state_machine = val.3;
+            let state_machine = val.2;
 
             let meta = RockStateMachineSnapshotMetaSerializer::try_from((group_id, state_machine))?;
             let data = RockStateMachineSnapshotDataSerializer::try_from((group_id, state_machine))?;
@@ -1100,18 +1092,7 @@ mod state_machine {
         }
     }
 
-    /// `RockStateMachineSnapshot` provides `RockStateMachine` with the default
-    /// implementation of the snapshot reader and writer for the state machine.
-    #[derive(Clone)]
-    pub struct RockStateMachineSnapshot<R>
-    where
-        R: WriteResponse,
-    {
-        store: Arc<RockStore<Self, Self>>,
-        state_machine: Arc<RockStateMachine<R>>,
-    }
-
-    impl<R> RaftSnapshotReader for RockStateMachineSnapshot<R>
+    impl<R> RaftSnapshotReader for RockStateMachine<R>
     where
         R: WriteResponse,
     {
@@ -1122,7 +1103,7 @@ mod state_machine {
             _request_index: u64,
             _to: u64,
         ) -> StorageResult<Snapshot> {
-            let snapshot = self.state_machine.get_snapshot(group_id).unwrap(); // TODO: map error
+            let snapshot = self.get_snapshot(group_id).unwrap(); // TODO: map error
             Ok(snapshot)
         }
 
@@ -1131,27 +1112,20 @@ mod state_machine {
             group_id: u64,
             _replica_id: u64,
         ) -> StorageResult<SnapshotMetadata> {
-            let meta = self.state_machine.get_snapshot_meta(group_id).unwrap(); // TODO: map error
+            let meta = self.get_snapshot_meta(group_id).unwrap(); // TODO: map error
             Ok(meta)
         }
     }
 
-    impl<R> RaftSnapshotWriter for RockStateMachineSnapshot<R>
+    impl<R> RaftSnapshotWriter for RockStateMachine<R>
     where
         R: WriteResponse,
     {
         fn build_snapshot(&self, group_id: u64, replica_id: u64) -> StorageResult<()> {
-            let ser = RockStateMachineSnapshotSerializer::try_from((
-                group_id,
-                replica_id,
-                self.store.as_ref(),
-                self.state_machine.as_ref(),
-            ))
-            .unwrap(); // TODO: map error
+            let ser =
+                RockStateMachineSnapshotSerializer::try_from((group_id, replica_id, self)).unwrap(); // TODO: map error
 
-            self.state_machine
-                .serialize_snapshot(group_id, ser)
-                .unwrap(); // TODO: map error
+            self.serialize_snapshot(group_id, ser).unwrap(); // TODO: map error
             Ok(())
         }
 
@@ -1179,11 +1153,36 @@ mod state_machine {
 
     #[derive(Clone)]
     pub struct RockStateMachine<R: WriteResponse> {
+        node_id: u64,
         db: Arc<DBWithThreadMode<MultiThreaded>>,
         _m: PhantomData<R>,
     }
 
     impl<R: WriteResponse> RockStateMachine<R> {
+        pub fn new<P>(node_id: u64, path: P) -> Self
+        where
+            P: AsRef<Path>,
+        {
+            let mut db_opts = RocksdbOptions::default();
+            db_opts.create_if_missing(true);
+            db_opts.create_missing_column_families(true);
+
+            let mut cfs = vec![];
+            cfs.push(ColumnFamilyDescriptor::new(DATA_CF_NAME, db_opts.clone()));
+
+            cfs.push(ColumnFamilyDescriptor::new(META_CF_NAME, db_opts.clone()));
+
+            cfs.push(ColumnFamilyDescriptor::new(SNAP_CF_NAME, db_opts.clone()));
+
+            let db = DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&db_opts, &path, cfs)
+                .unwrap();
+            Self {
+                node_id,
+                db: Arc::new(db),
+                _m: PhantomData,
+            }
+        }
+
         /// Get snapshot cloumn famly.
         #[inline]
         fn get_snapshot_cf(&self) -> Result<Arc<BoundColumnFamily>> {
@@ -1200,7 +1199,7 @@ mod state_machine {
         fn get_data_cf(&self) -> Result<Arc<BoundColumnFamily>> {
             self.db.cf_handle(DATA_CF_NAME).map_or(
                 Err(RockStateMachineError::ColumnFamilyMissing(
-                    "meta".to_owned(),
+                    "data".to_owned(),
                 )),
                 |cf| Ok(cf),
             )
@@ -1256,7 +1255,8 @@ mod state_machine {
 
         /// Get saved last membership change
         fn get_last_conf_state(&self, group_id: u64) -> Result<ConfState> {
-            unimplemented!()
+            Ok(ConfState::default()) // TODO: impl me
+                                     // unimplemented!()
         }
 
         /// Get snapshot from rock storage.
@@ -1371,13 +1371,13 @@ mod state_machine {
         Self: 'life0;
 
         fn apply(
-            &mut self,
+            &self,
             group_id: u64,
             _: &crate::multiraft::GroupState,
             iter: std::vec::IntoIter<crate::multiraft::Apply<R>>,
         ) -> Self::ApplyFuture<'_> {
             async move {
-                let cf = self.db.cf_handle(DATA_CF_NAME).unwrap();
+                let cf = self.get_data_cf().unwrap();
                 let mut batch = WriteBatch::default();
 
                 let mut applied_index = 0;
@@ -1389,7 +1389,7 @@ mod state_machine {
                         Apply::Normal(mut normal) => {
                             let rockdata = RockData::decode(&mut normal.data).unwrap();
                             let key = format_group_key(group_id, &rockdata.key);
-                            batch.put_cf(&cf, key, rockdata.value);
+                            batch.put_cf(&cf, key.as_bytes(), rockdata.value);
                             applied_index = normal.index;
                             applied_term = normal.term;
                         }
@@ -1418,12 +1418,12 @@ mod state_machine {
 
     #[inline]
     fn format_applied_index_key(group_id: u64) -> String {
-        format!("{}/{}", group_id, APPLIED_INDEX_POSTFIX)
+        format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
     }
 
     #[inline]
     fn format_applied_term_key(group_id: u64) -> String {
-        format!("{}/{}", group_id, APPLIED_TERM_POSTFIX)
+        format!("{}_{}", APPLIED_TERM_PREFIX, group_id)
     }
 
     #[inline]
@@ -1442,17 +1442,34 @@ mod state_machine {
     }
 
     #[inline]
-    fn split_group_key_unchecked(key: &str) -> (u64, String) {
-        let mut iter = key.split('/');
-        (
-            iter.next().unwrap().parse().unwrap(),
-            iter.next().unwrap().to_string(),
-        )
+    fn split_group_key(key: &str) -> Option<(u64, String)> {
+        let splied = key.split('/').collect::<Vec<_>>();
+
+        // TODO: it doesn't work well enough, need improve
+        if splied.is_empty() {
+            return None;
+        }
+        if splied.len() != 2 {
+            return None;
+        }
+
+        Some((splied[0].parse().unwrap(), splied[1].to_string()))
     }
 
     #[cfg(test)]
     mod tests {
+        use std::env::temp_dir;
+
+        use rand::distributions::Alphanumeric;
+        use rand::Rng;
+
+        use crate::multiraft::ApplyNormal;
+        use crate::multiraft::GroupState;
+
         use super::*;
+
+        use super::RockStateMachine;
+        use super::RockStore;
 
         #[test]
         fn test_rocksdata_serialize() {
@@ -1471,13 +1488,108 @@ mod state_machine {
         fn test_state_machine_split_key() {
             let group_id = 1;
             let raw_key = "raw_key".to_owned();
-            let splited = split_group_key_unchecked(format_group_key(group_id, &raw_key).as_str());
+            let splited = split_group_key(format_group_key(group_id, &raw_key).as_str()).unwrap();
             assert_eq!(splited.0, group_id);
             assert_eq!(splited.1, raw_key);
         }
+
+        async fn apply_to(
+            group_id: u64,
+            n: usize,
+            term: u64,
+            state_machine: &RockStateMachine<()>,
+        ) {
+            let state = GroupState::default();
+            let mut applys = vec![];
+            for i in 0..n {
+                let data = RockData {
+                    key: format!("raw_key_{}", i),
+                    value: (0..100).map(|_| 1_u8).collect::<Vec<u8>>(),
+                }
+                .encode()
+                .unwrap();
+
+                applys.push(Apply::<()>::Normal(ApplyNormal {
+                    group_id,
+                    index: i as u64 + 1,
+                    term,
+                    data,
+                    context: None,
+                    is_conf_change: false,
+                    tx: None,
+                }));
+            }
+            state_machine
+                .apply(group_id, &state, applys.into_iter())
+                .await;
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        async fn test_snapshot_serialize_from_db() {
+            let node_id = 1;
+            let group_id = 1;
+            let replica_id = 1;
+            // create state machine
+            let state_machine_tmp_path = temp_dir().join("oceanraft_state_machine_db");
+            let state_machine =
+                RockStateMachine::<()>::new(node_id, state_machine_tmp_path.clone());
+            println!(
+                "🐿 create state machine store {}",
+                state_machine_tmp_path.display()
+            );
+
+            apply_to(group_id, 100, 1, &state_machine).await;
+
+            let ser = RockStateMachineSnapshotSerializer::try_from((
+                group_id,
+                replica_id,
+                &state_machine,
+            ))
+            .unwrap();
+
+            assert_eq!(ser.meta.applied_index, 100);
+            assert_eq!(ser.meta.applied_term, 1);
+            // TODO: snapshot should wrap to structure.
+
+            for i in 0..100 {
+                let key = format!("raw_key_{}", i);
+                let value = (0..100).map(|_| 1_u8).collect::<Vec<u8>>();
+                assert_eq!(*ser.data.bt_map.get(&key).unwrap(), value);
+            }
+
+
+            // create rock store
+            // let store_tmp_path = temp_dir().join("oceanraft_store_db");
+            // println!("🚛 create raft store {}", store_tmp_path.display());
+            // let rock_store = RockStore::new(
+            //     node_id,
+            //     store_tmp_path.clone(),
+            //     state_machine.clone(),
+            //     state_machine.clone(),
+            // );
+
+            // drop(rock_store);
+            // DBWithThreadMode::<MultiThreaded>::destroy(
+            //     &rocksdb::Options::default(),
+            //     store_tmp_path.clone(),
+            // )
+            // .unwrap();
+            // println!("🌪 destory raft store {}", state_machine_tmp_path.display());
+
+            drop(state_machine);
+            DBWithThreadMode::<MultiThreaded>::destroy(
+                &rocksdb::Options::default(),
+                state_machine_tmp_path.clone(),
+            )
+            .unwrap();
+            println!(
+                "👋 destory state machine store {}",
+                state_machine_tmp_path.display()
+            );
+        }
+
     }
 }
+pub use storage::{RockStore, RocksError};
 
-pub use state_machine::{
-    RockData, RockDataError, RockStateMachine, RockStateMachineError, RockStateMachineSnapshot,
-};
+pub use state_machine::{RockData, RockDataError, RockStateMachine, RockStateMachineError};

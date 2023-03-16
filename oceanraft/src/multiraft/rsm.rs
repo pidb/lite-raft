@@ -136,7 +136,7 @@ impl<RES: WriteResponse> Apply<RES> {
     }
 }
 
-pub trait StateMachine<R>: Send + 'static
+pub trait StateMachine<R>: Send + Sync + 'static
 where
     R: WriteResponse,
 {
@@ -145,7 +145,7 @@ where
         Self: 'life0;
 
     fn apply(
-        &mut self,
+        &self,
         group_id: u64,
         state: &GroupState,
         iter: IntoIter<Apply<R>>,

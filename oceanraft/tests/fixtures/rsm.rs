@@ -21,7 +21,7 @@ impl StateMachine<()> for FixtureStateMachine {
     where
         Self: 'life0;
     fn apply(
-        &mut self,
+        &self,
         _group_id: u64,
         _state: &GroupState,
         iter: IntoIter<Apply<()>>,
