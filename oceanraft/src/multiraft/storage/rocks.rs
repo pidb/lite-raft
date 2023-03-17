@@ -167,7 +167,7 @@ mod storage {
     }
 
     #[derive(Clone)]
-    struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
+    pub(crate) struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
         group_id: u64,
         replica_id: u64,
         db: Arc<MDB>,
@@ -237,9 +237,16 @@ mod storage {
         //     )
         // }
 
+        /// Format raft log entry prefix of key  with mode `ent_{group_id}/`.
         #[inline]
-        fn entry_key(&self, index: u64) -> String {
-            format!("{}_{}", self.group_id, index)
+        fn format_entry_key_prefix(&self) -> String {
+            format!("ent_{}/", self.group_id)
+        }
+
+        /// Format raft log entry key with mode `ent_{group_id}/{raw_key}`.
+        #[inline]
+        fn format_entry_key(&self, index: u64) -> String {
+            format!("ent_{}/{}", self.group_id, index)
         }
 
         // fn snapshot_metadata(&self, meta_cf: &Arc<BoundColumnFamily>) -> Result<SnapshotMetadata> {
@@ -376,6 +383,69 @@ mod storage {
         }
     }
 
+    /*****************************************************************************
+     * TESTS METHOD
+     *****************************************************************************/
+    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RockStoreCore<SR, SW> {
+        pub(crate) fn append_unchecked(&self, ents: &[Entry]) {
+            if ents.is_empty() {
+                return;
+            }
+
+            let log_cf = DBEnv::get_log_cf(&self.db).unwrap();
+            let log_meta = self.get_log_metaedata().unwrap();
+
+            let mut batch = WriteBatch::default();
+            if log_meta.empty {
+                // set first index
+                let key = self.first_index_key();
+                let value = ents[0].index.to_be_bytes();
+                batch.put_cf(&log_cf, key, value);
+
+                // set not empty
+                let key = DBEnv::empty_logs_flag_key(self.group_id, self.replica_id);
+                let value = "false".as_bytes();
+                batch.put_cf(&log_cf, key, value);
+            }
+
+            for ent in ents.iter() {
+                let key = self.format_entry_key(ent.index);
+                // TODO: use feature to use difference ser
+                let value = ent.encode_to_vec();
+                batch.put_cf(&log_cf, key, value);
+            }
+
+            // set last index
+            let key = self.last_index_key();
+            let value = ents.last().unwrap().index.to_be_bytes();
+            batch.put_cf(&log_cf, key, value);
+
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db.write_opt(batch, &writeopts).unwrap();
+        }
+
+        pub fn entries_unchecked(&self) -> Vec<Entry> {
+            let mut ents = vec![];
+            let log_cf = DBEnv::get_log_cf(&self.db).unwrap();
+            let prefix = self.format_entry_key_prefix();
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
+            for ent in iter {
+                let (key_data, value_data) = ent.unwrap();
+                let key = std::str::from_utf8(&key_data).unwrap();
+                if !key.contains("ent_") {
+                    break;
+                }
+                let ent = Entry::decode(value_data.as_ref()).unwrap();
+                ents.push(ent);
+            }
+
+            ents
+        }
+    }
+
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageReader for RockStoreCore<SR, SW> {
         fn initial_state(&self) -> RaftResult<RaftState> {
             let cf = DBEnv::get_metadata_cf(&self.db)?;
@@ -443,19 +513,22 @@ mod storage {
             let mut ents = Vec::with_capacity((high - low) as usize);
 
             let log_cf = DBEnv::get_log_cf(&self.db)?; // TODO handle error
-            let start_key = self.entry_key(low);
-            let last_key = self.entry_key(high);
+            let start_key = self.format_entry_key(low);
+            let last_key = self.format_entry_key(high);
             let iter_mode = IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward);
-            let readopts = ReadOptions::default();
+            let mut readopts = ReadOptions::default();
+            // skip delete_range to improve read performance
+            readopts.set_ignore_range_deletions(true);
             // TODO: handle if temporaily unavailable
             let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
             for ent in iter {
                 let (key_data, value_data) = ent.unwrap();
-                let ent = Entry::decode(value_data.as_ref()).unwrap(); // TODO: handle error
-                ents.push(ent);
                 if last_key.as_bytes() == key_data.as_ref() {
                     break;
                 }
+
+                let ent = Entry::decode(value_data.as_ref()).unwrap(); // TODO: handle error
+                ents.push(ent);
             }
 
             raft::util::limit_size(&mut ents, max_size.into());
@@ -483,7 +556,7 @@ mod storage {
             }
 
             let log_cf = DBEnv::get_log_cf(&self.db)?;
-            let key = self.entry_key(idx);
+            let key = self.format_entry_key(idx);
             let readopts = ReadOptions::default();
             let value = self
                 .db
@@ -609,8 +682,10 @@ mod storage {
                 batch.put_cf(&log_cf, key, value);
             }
 
+            // TODO: remove all entries overwritten by ents.
+
             for ent in ents.iter() {
-                let key = format!("{}_{}", self.group_id, ent.index);
+                let key = self.format_entry_key(ent.index);
                 // TODO: use feature to use difference ser
                 let value = ent.encode_to_vec();
                 batch.put_cf(&log_cf, key, value);
@@ -670,7 +745,7 @@ mod storage {
                 metadata_cf_opts,
             ));
 
-            let raft_log_cf_opts = RocksdbOptions::default();
+            let mut raft_log_cf_opts = RocksdbOptions::default();
             cfs.push(ColumnFamilyDescriptor::new(LOG_CF_NAME, raft_log_cf_opts));
 
             let db = MDB::open_cf_descriptors(&db_opts, &path, cfs).unwrap();
@@ -727,7 +802,7 @@ mod storage {
             })
         }
 
-        fn create_group_store_if_missing(
+        pub(crate) fn create_group_store_if_missing(
             &self,
             group_id: u64,
             replica_id: u64,
@@ -856,9 +931,6 @@ mod storage {
             }
         }
     }
-
-    #[cfg(test)]
-    mod tests {}
 }
 
 mod state_machine {
@@ -1592,3 +1664,303 @@ mod state_machine {
 pub use storage::{RockStore, RocksError};
 
 pub use state_machine::{RockData, RockDataError, RockStateMachine, RockStateMachineError};
+
+#[cfg(test)]
+mod tests {
+    use std::env::temp_dir;
+    use std::panic;
+    use std::panic::AssertUnwindSafe;
+
+    use protobuf::Message as PbMessage;
+    use raft::Error as RaftError;
+    use raft::GetEntriesContext;
+    use raft::Storage;
+    use raft::StorageError as RaftStorageError;
+    use rocksdb::DBWithThreadMode;
+    use rocksdb::MultiThreaded;
+
+    use crate::multiraft::storage::RaftStorageWriter;
+    use crate::multiraft::WriteResponse;
+    use crate::prelude::Entry;
+    use crate::prelude::Snapshot;
+
+    use super::RockStateMachine;
+    use super::RockStore;
+
+    fn new_entry(index: u64, term: u64) -> Entry {
+        let mut e = Entry::default();
+        e.term = term;
+        e.index = index;
+        e
+    }
+
+    fn size_of<T: PbMessage>(m: &Entry) -> u32 {
+        m.compute_size()
+    }
+
+    fn new_snapshot(index: u64, term: u64, voters: Vec<u64>) -> Snapshot {
+        let mut s = Snapshot::default();
+        s.mut_metadata().index = index;
+        s.mut_metadata().term = term;
+        s.mut_metadata().mut_conf_state().voters = voters;
+        s
+    }
+
+    fn new_state_machine<R: WriteResponse>(node_id: u64) -> RockStateMachine<R> {
+        let state_machine_tmp_path = temp_dir().join("oceanraft_state_machine_db");
+        DBWithThreadMode::<MultiThreaded>::destroy(
+            &rocksdb::Options::default(),
+            state_machine_tmp_path.clone(),
+        )
+        .unwrap();
+
+        // create state machine
+        let state_machine = RockStateMachine::<R>::new(node_id, state_machine_tmp_path.clone());
+
+        println!(
+            "🐿 create state machine store {}",
+            state_machine_tmp_path.display()
+        );
+
+        state_machine
+    }
+
+    fn new_rockstore<R: WriteResponse>(
+        node_id: u64,
+        state_machine: &RockStateMachine<R>,
+    ) -> RockStore<RockStateMachine<R>, RockStateMachine<R>> {
+        let store_tmp_path = temp_dir().join("oceanraft_store_db");
+        DBWithThreadMode::<MultiThreaded>::destroy(
+            &rocksdb::Options::default(),
+            store_tmp_path.clone(),
+        )
+        .unwrap();
+
+        //  create rock store
+        println!("🚛 create raft store {}", store_tmp_path.display());
+        let rock_store = RockStore::new(
+            node_id,
+            store_tmp_path.clone(),
+            state_machine.clone(),
+            state_machine.clone(),
+        );
+
+        rock_store
+    }
+
+    #[test]
+    fn test_storage_term() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let mut tests = vec![
+            (2, Err(RaftError::Store(RaftStorageError::Compacted))),
+            (3, Ok(3)),
+            (4, Ok(4)),
+            (5, Ok(5)),
+            (6, Err(RaftError::Store(RaftStorageError::Unavailable))),
+        ];
+
+        let node_id = 1;
+        let state_machine = new_state_machine::<()>(1);
+        let rock_store = new_rockstore::<()>(node_id, &state_machine);
+        let rock_store_core = rock_store.create_group_store_if_missing(1, 1).unwrap();
+
+        for (i, (idx, wterm)) in tests.drain(..).enumerate() {
+            rock_store_core.append_unchecked(&ents);
+
+            let t = rock_store_core.term(idx);
+            if t != wterm {
+                panic!("#{}: expect res {:?}, got {:?}", i, wterm, t);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_append() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+        let mut tests = vec![
+            (
+                vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)],
+                Some(vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                vec![new_entry(3, 3), new_entry(4, 6), new_entry(5, 6)],
+                Some(vec![new_entry(3, 3), new_entry(4, 6), new_entry(5, 6)]),
+            ),
+            (
+                vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 5),
+                ],
+                Some(vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 5),
+                ]),
+            ),
+            // overwrite compacted raft logs is not allowed
+            (
+                vec![new_entry(2, 3), new_entry(3, 3), new_entry(4, 5)],
+                None,
+            ),
+            // truncate the existing entries and append
+            (
+                vec![new_entry(4, 5)],
+                Some(vec![new_entry(3, 3), new_entry(4, 5)]),
+            ),
+            // direct append
+            (
+                vec![new_entry(6, 6)],
+                Some(vec![
+                    new_entry(3, 3),
+                    new_entry(4, 4),
+                    new_entry(5, 5),
+                    new_entry(6, 6),
+                ]),
+            ),
+        ];
+
+        for (i, (entries, wentries)) in tests.drain(..).enumerate() {
+            let node_id = 1;
+            let state_machine = new_state_machine::<()>(1);
+            let rock_store = new_rockstore::<()>(node_id, &state_machine);
+            let rock_store_core = rock_store.create_group_store_if_missing(1, 1).unwrap();
+
+            rock_store_core.append_unchecked(&ents);
+            let res = panic::catch_unwind(AssertUnwindSafe(|| rock_store_core.append(&entries)));
+            if let Some(wentries) = wentries {
+                let _ = res.unwrap();
+                let e = &rock_store_core.entries_unchecked();
+                if *e != wentries {
+                    panic!("#{}: want {:?}, entries {:?}", i, wentries, e);
+                }
+            } else {
+                res.unwrap_err();
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_entries() {
+        let ents = vec![
+            new_entry(3, 3),
+            new_entry(4, 4),
+            new_entry(5, 5),
+            new_entry(6, 6),
+        ];
+        let max_u64 = u64::max_value();
+        let mut tests = vec![
+            (
+                2,
+                6,
+                max_u64,
+                Err(RaftError::Store(RaftStorageError::Compacted)),
+            ),
+            (3, 4, max_u64, Ok(vec![new_entry(3, 3)])),
+            (4, 5, max_u64, Ok(vec![new_entry(4, 4)])),
+            (4, 6, max_u64, Ok(vec![new_entry(4, 4), new_entry(5, 5)])),
+            (
+                4,
+                7,
+                max_u64,
+                Ok(vec![new_entry(4, 4), new_entry(5, 5), new_entry(6, 6)]),
+            ),
+            // even if maxsize is zero, the first entry should be returned
+            (4, 7, 0, Ok(vec![new_entry(4, 4)])),
+            // limit to 2
+            (
+                4,
+                7,
+                u64::from(size_of::<Entry>(&ents[1]) + size_of::<Entry>(&ents[2])),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                4,
+                7,
+                u64::from(
+                    size_of::<Entry>(&ents[1])
+                        + size_of::<Entry>(&ents[2])
+                        + size_of::<Entry>(&ents[3]) / 2,
+                ),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            (
+                4,
+                7,
+                u64::from(
+                    size_of::<Entry>(&ents[1])
+                        + size_of::<Entry>(&ents[2])
+                        + size_of::<Entry>(&ents[3])
+                        - 1,
+                ),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5)]),
+            ),
+            // all
+            (
+                4,
+                7,
+                u64::from(
+                    size_of::<Entry>(&ents[1])
+                        + size_of::<Entry>(&ents[2])
+                        + size_of::<Entry>(&ents[3]),
+                ),
+                Ok(vec![new_entry(4, 4), new_entry(5, 5), new_entry(6, 6)]),
+            ),
+        ];
+
+        let node_id = 1;
+        let state_machine = new_state_machine::<()>(1);
+        let rock_store = new_rockstore::<()>(node_id, &state_machine);
+        let rock_store_core = rock_store.create_group_store_if_missing(1, 1).unwrap();
+
+        for (i, (lo, hi, maxsize, wentries)) in tests.drain(..).enumerate() {
+            rock_store_core.append_unchecked(&ents);
+            let e = rock_store_core.entries(lo, hi, maxsize, GetEntriesContext::empty(false));
+            if e != wentries {
+                panic!("#{}: expect entries {:?}, got {:?}", i, wentries, e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_storage_first_index() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+
+        let node_id = 1;
+        let state_machine = new_state_machine::<()>(1);
+        let rock_store = new_rockstore::<()>(node_id, &state_machine);
+        let rock_store_core = rock_store.create_group_store_if_missing(1, 1).unwrap();
+        rock_store_core.append_unchecked(&ents);
+
+        assert_eq!(rock_store_core.first_index(), Ok(3));
+        // storage.wl().compact(4).unwrap();
+        // assert_eq!(storage.first_index(), Ok(4));
+    }
+
+    #[test]
+    fn test_storage_last_index() {
+        let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
+
+        let node_id = 1;
+        let state_machine = new_state_machine::<()>(1);
+        let rock_store = new_rockstore::<()>(node_id, &state_machine);
+        let rock_store_core = rock_store.create_group_store_if_missing(1, 1).unwrap();
+
+        rock_store_core.append_unchecked(&ents);
+
+        let wresult = Ok(5);
+        let result = rock_store_core.last_index();
+        if result != wresult {
+            panic!("want {:?}, got {:?}", wresult, result);
+        }
+
+        rock_store_core.append(&[new_entry(6, 5)]).unwrap();
+        let wresult = Ok(6);
+        let result = rock_store_core.last_index();
+        if result != wresult {
+            panic!("want {:?}, got {:?}", wresult, result);
+        }
+    }
+}
