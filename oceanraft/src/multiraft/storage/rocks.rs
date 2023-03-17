@@ -1019,12 +1019,11 @@ mod state_machine {
             for item in iter {
                 let (key, value) = item.unwrap();
                 let key = std::str::from_utf8(&key).unwrap();
-                match split_group_key(key) {
-                    None => break,
-                    Some((owner_group_id, raw_key)) => {
-                        assert_eq!(owner_group_id, group_id);
+                match split_data_key(key) {
+                    Some((owner_group_id, raw_key)) if owner_group_id == group_id => {
                         data.bt_map.insert(raw_key, value.to_vec());
                     }
+                    None | Some(_) => break,
                 }
             }
 
@@ -1388,7 +1387,7 @@ mod state_machine {
                         Apply::NoOp(_) => unimplemented!(),
                         Apply::Normal(mut normal) => {
                             let rockdata = RockData::decode(&mut normal.data).unwrap();
-                            let key = format_group_key(group_id, &rockdata.key);
+                            let key = format_data_key(group_id, &rockdata.key);
                             batch.put_cf(&cf, key.as_bytes(), rockdata.value);
                             applied_index = normal.index;
                             applied_term = normal.term;
@@ -1436,40 +1435,40 @@ mod state_machine {
         format!("{}/{}", group_id, SNAP_META_POSTIFX)
     }
 
+    /// Format data key with mode `{group_id}/{raw_key}`.
     #[inline]
-    fn format_group_key(group_id: u64, raw_key: &str) -> String {
+    fn format_data_key(group_id: u64, raw_key: &str) -> String {
         format!("{}/{}", group_id, raw_key)
     }
 
+    /// Split mode `{group_id}/{raw_key}` and return `(group_id, raw_key)`.
+    /// Returned None if it doesn't fit the pattern.
     #[inline]
-    fn split_group_key(key: &str) -> Option<(u64, String)> {
+    fn split_data_key(key: &str) -> Option<(u64, String)> {
         let splied = key.split('/').collect::<Vec<_>>();
 
-        // TODO: it doesn't work well enough, need improve
-        if splied.is_empty() {
-            return None;
-        }
-        if splied.len() != 2 {
+        if splied.is_empty() || splied.len() != 2 {
             return None;
         }
 
-        Some((splied[0].parse().unwrap(), splied[1].to_string()))
+        let group_id = match splied[0].parse::<u64>() {
+            Err(_) => return None,
+            Ok(val) => val,
+        };
+
+        Some((group_id, splied[1].to_string()))
     }
 
     #[cfg(test)]
     mod tests {
         use std::env::temp_dir;
 
-        use rand::distributions::Alphanumeric;
-        use rand::Rng;
-
         use crate::multiraft::ApplyNormal;
         use crate::multiraft::GroupState;
 
-        use super::*;
-
         use super::RockStateMachine;
         use super::RockStore;
+        use super::*;
 
         #[test]
         fn test_rocksdata_serialize() {
@@ -1488,7 +1487,7 @@ mod state_machine {
         fn test_state_machine_split_key() {
             let group_id = 1;
             let raw_key = "raw_key".to_owned();
-            let splited = split_group_key(format_group_key(group_id, &raw_key).as_str()).unwrap();
+            let splited = split_data_key(format_data_key(group_id, &raw_key).as_str()).unwrap();
             assert_eq!(splited.0, group_id);
             assert_eq!(splited.1, raw_key);
         }
@@ -1539,6 +1538,8 @@ mod state_machine {
             );
 
             apply_to(group_id, 100, 1, &state_machine).await;
+            apply_to(2, 10, 1, &state_machine).await;
+            apply_to(3, 20, 1, &state_machine).await;
 
             let ser = RockStateMachineSnapshotSerializer::try_from((
                 group_id,
@@ -1556,7 +1557,6 @@ mod state_machine {
                 let value = (0..100).map(|_| 1_u8).collect::<Vec<u8>>();
                 assert_eq!(*ser.data.bt_map.get(&key).unwrap(), value);
             }
-
 
             // create rock store
             // let store_tmp_path = temp_dir().join("oceanraft_store_db");
@@ -1587,7 +1587,6 @@ mod state_machine {
                 state_machine_tmp_path.display()
             );
         }
-
     }
 }
 pub use storage::{RockStore, RocksError};
