@@ -520,11 +520,13 @@ where
 
         // processing messages between replicas from other nodes to self node.
         let from_replica = ReplicaDesc {
+            group_id,
             node_id: msg.from_node,
             replica_id: raft_msg.from,
         };
 
         let to_replica = ReplicaDesc {
+            group_id,
             node_id: msg.to_node,
             replica_id: raft_msg.to,
         };
@@ -1264,6 +1266,7 @@ where
             .cache_replica_desc(
                 group_id,
                 ReplicaDesc {
+                    group_id,
                     node_id: change.node_id,
                     replica_id: change.replica_id,
                 },
@@ -1302,6 +1305,7 @@ where
             .remove_replica_desc(
                 group_id,
                 ReplicaDesc {
+                    group_id,
                     node_id: change_request.node_id,
                     replica_id: change_request.replica_id,
                 },
@@ -1599,6 +1603,7 @@ mod tests {
             assert_eq!(
                 rep,
                 ReplicaDesc {
+                    group_id,
                     node_id: change.node_id,
                     replica_id: change.replica_id,
                 }

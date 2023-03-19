@@ -212,6 +212,7 @@ impl FixtureCluster {
             voters.push(replica_id);
             replicas.push(ReplicaDesc {
                 node_id,
+                group_id: plan.group_id,
                 replica_id,
             });
         }

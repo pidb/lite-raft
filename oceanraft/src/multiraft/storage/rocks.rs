@@ -1797,8 +1797,6 @@ mod tests {
     use std::path::PathBuf;
 
     use futures::future::BoxFuture;
-    use futures::future::LocalBoxFuture;
-    use futures::Future;
     use futures::FutureExt;
     use protobuf::Message as PbMessage;
     use raft::prelude::HardState;
@@ -1903,6 +1901,7 @@ mod tests {
     async fn db_test_async_env<F, R>(f: F)
     where
         F: for<'r> FnOnce(
+            u64,
             &'r RockStore<RockStateMachine<R>, RockStateMachine<R>>,
             &'r RockStateMachine<R>,
         ) -> BoxFuture<'r, ()>,
@@ -1912,10 +1911,10 @@ mod tests {
         let rock_store_temp_dir = rand_temp_dir().join("oceanraft_rock_store");
 
         let node_id = 1;
-        let state_machine = new_state_machine::<R>(&state_machine_temp_dir, 1);
+        let state_machine = new_state_machine::<R>(&state_machine_temp_dir, node_id);
         let rock_store = new_rockstore::<R>(&rock_store_temp_dir, node_id, &state_machine);
         {
-            f(&rock_store, &state_machine).boxed().await;
+            f(node_id, &rock_store, &state_machine).boxed().await;
         }
 
         drop(rock_store);
@@ -2207,68 +2206,85 @@ mod tests {
      */
     #[tokio::test(flavor = "multi_thread")]
     async fn test_multi_rock_storage_replicas() {
-        db_test_async_env(
-            |rock_store: &RockStore<RockStateMachine<()>, RockStateMachine<()>>,
-             state_machine: &RockStateMachine<()>| {
-                let fut = async move {
-                    let replicas = vec![
-                        ReplicaDesc {
-                            node_id: 1,
-                            replica_id: 1,
-                        },
-                        ReplicaDesc {
-                            node_id: 1,
-                            replica_id: 2,
-                        },
-                        ReplicaDesc {
-                            node_id: 1,
-                            replica_id: 3,
-                        },
-                    ];
+        db_test_async_env::<_, ()>(|_node_id, rock_store, _state_machine| {
+            let fut = async move {
+                let group_id = 1;
+                let replicas = vec![
+                    ReplicaDesc {
+                        node_id: 1,
+                        group_id,
+                        replica_id: 1,
+                    },
+                    ReplicaDesc {
+                        node_id: 2,
+                        group_id,
 
-                    for (i, wrep) in replicas.iter().enumerate() {
-                        if rock_store
-                            .get_replica_desc(1, wrep.replica_id)
-                            .await
-                            .unwrap()
-                            .is_some()
-                        {
-                            panic!("# {}: expecte replica desc is none", i)
-                        }
+                        replica_id: 2,
+                    },
+                    ReplicaDesc {
+                        node_id: 3,
+                        group_id,
+                        replica_id: 3,
+                    },
+                ];
 
-                        rock_store.set_replica_desc(1, wrep.clone()).await.unwrap();
+                for (i, wrep) in replicas.iter().enumerate() {
+                    if rock_store
+                        .get_replica_desc(group_id, wrep.replica_id)
+                        .await
+                        .unwrap()
+                        .is_some()
+                    {
+                        panic!("# {}: expecte replica desc is none", i)
                     }
 
-                    for (i, wrep) in replicas.iter().enumerate() {
-                        if let Some(grep) = rock_store
-                            .get_replica_desc(1, wrep.replica_id)
-                            .await
-                            .unwrap()
-                        {
-                            assert_eq!(grep, *wrep, "# {}: expect {:?}, got {:?}", i, *wrep, grep);
-                        } else {
-                            panic!("# {}: expecte some replica desc, got none", i)
-                        }
-                    }
+                    rock_store
+                        .set_replica_desc(group_id, wrep.clone())
+                        .await
+                        .unwrap();
+                }
 
-                    for (i, wrep) in replicas.iter().enumerate() {
-                        rock_store
-                            .remove_replica_desc(1, wrep.replica_id)
-                            .await
-                            .unwrap();
-
-                        if let Some(grep) = rock_store
-                            .get_replica_desc(1, wrep.replica_id)
-                            .await
-                            .unwrap()
-                        {
-                            panic!("# {}: expecte none replica desc, got {:?}", i, grep);
-                        }
+                for (i, wrep) in replicas.iter().enumerate() {
+                    if let Some(grep) = rock_store
+                        .get_replica_desc(group_id, wrep.replica_id)
+                        .await
+                        .unwrap()
+                    {
+                        assert_eq!(grep, *wrep, "# {}: expect {:?}, got {:?}", i, *wrep, grep);
+                    } else {
+                        panic!("# {}: expecte some replica desc, got none", i)
                     }
-                };
-                Box::pin(fut)
-            },
-        )
+                }
+
+                for (i, wrep) in replicas.iter().enumerate() {
+                    if let Some(grep) = rock_store
+                        .replica_for_node(group_id, wrep.node_id)
+                        .await
+                        .unwrap()
+                    {
+                        assert_eq!(grep, *wrep, "# {}: expect {:?}, got {:?}", i, *wrep, grep);
+                    } else {
+                        panic!("# {}: expecte some replica desc, got none", i)
+                    }
+                }
+
+                for (i, wrep) in replicas.iter().enumerate() {
+                    rock_store
+                        .remove_replica_desc(group_id, wrep.replica_id)
+                        .await
+                        .unwrap();
+
+                    if let Some(grep) = rock_store
+                        .get_replica_desc(group_id, wrep.replica_id)
+                        .await
+                        .unwrap()
+                    {
+                        panic!("# {}: expecte none replica desc, got {:?}", i, grep);
+                    }
+                }
+            };
+            Box::pin(fut)
+        })
         .await;
     }
 }

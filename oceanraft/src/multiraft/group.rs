@@ -181,6 +181,7 @@ where
                     // we know that one of the replicas must be ready, so we can repair the
                     // storage to store this replica.
                     let repaired_replica_desc = ReplicaDesc {
+                        group_id,
                         node_id,
                         replica_id: self.raft_group.raft.id,
                     };
@@ -423,6 +424,7 @@ where
                 );
 
                 ReplicaDesc {
+                    group_id,
                     node_id: NO_NODE,
                     replica_id: ss.leader_id,
                 }
