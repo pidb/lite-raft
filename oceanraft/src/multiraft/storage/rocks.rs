@@ -15,13 +15,6 @@ mod storage {
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
 
-    use crate::prelude::ConfState;
-    use crate::prelude::Entry;
-    use crate::prelude::HardState;
-    use crate::prelude::ReplicaDesc;
-    use crate::prelude::Snapshot;
-    use crate::prelude::SnapshotMetadata;
-
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::MultiRaftStorage;
     use crate::multiraft::storage::RaftSnapshotReader;
@@ -30,20 +23,26 @@ mod storage {
     use crate::multiraft::storage::RaftStorageReader;
     use crate::multiraft::storage::RaftStorageWriter;
     use crate::multiraft::storage::Result;
+    use crate::prelude::ConfState;
+    use crate::prelude::Entry;
+    use crate::prelude::HardState;
+    use crate::prelude::ReplicaDesc;
+    use crate::prelude::Snapshot;
+    use crate::prelude::SnapshotMetadata;
 
     const METADATA_CF_NAME: &'static str = "metadta_cf";
     const LOG_CF_NAME: &'static str = "raft_log_cf";
 
     const HARD_STATE_PREFIX: &'static str = "hs";
     const CONF_STATE_PREFIX: &'static str = "cs";
-    const GROUP_STORE_PREFIX: &'static str = "gs";
-    const REPLICA_DESC_PREFIX: &'static str = "rd";
 
-    const LOG_SNAP_DATA_PREFIX: &'static str = "snap_data";
     const LOG_SNAP_META_PREFIX: &'static str = "snap_meta";
     const LOG_EMPTY_PREFIX: &'static str = "log_empty";
     const LOG_FIRST_INDEX_PREFIX: &'static str = "fidx";
     const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
+
+    const GROUP_STORE_PREFIX: &'static str = "gs";
+    const REPLICA_DESC_PREFIX: &'static str = "rd";
 
     type MDB = DBWithThreadMode<MultiThreaded>;
 
@@ -215,6 +214,9 @@ mod storage {
         }
     }
 
+    /*****************************************************************************
+     * RockStore Core
+     *****************************************************************************/
     #[derive(Clone)]
     pub(crate) struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
         group_id: u64,
@@ -227,7 +229,7 @@ mod storage {
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RockStoreCore<SR, SW> {
         /// New and initialze RockStoreCore from db.
         ///
-        /// # Panic: if RockStoreCore has been initialized
+        /// ### Panic: if RockStoreCore has been initialized
         fn new(
             group_id: u64,
             replica_id: u64,
@@ -395,9 +397,6 @@ mod storage {
         }
     }
 
-    /*****************************************************************************
-     * TESTS METHOD
-     *****************************************************************************/
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RockStoreCore<SR, SW> {
         #[allow(unused)]
         pub(crate) fn append_unchecked(&self, ents: &[Entry]) {
@@ -591,9 +590,6 @@ mod storage {
             match self.is_empty(&log_cf)? {
                 true => {
                     let snap_meta = self.get_snapshot_metadata()?;
-                    // let snap_meta = self
-                    //     .rsnap
-                    //     .snapshot_metadata(self.group_id, self.replica_id)?;
                     Ok(snap_meta.index + 1)
                 }
                 false => {
@@ -615,9 +611,6 @@ mod storage {
             match self.is_empty(&log_cf)? {
                 true => {
                     let snap_meta = self.get_snapshot_metadata()?;
-                    // let snap_meta = self
-                    //     .rsnap
-                    //     .snapshot_metadata(self.group_id, self.replica_id)?;
                     Ok(snap_meta.index)
                 }
                 false => {
@@ -702,7 +695,6 @@ mod storage {
 
             let ent_meta =
                 EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)?;
-            // let log_meta = self.get_log_metaedata()?;
 
             if ent_meta.first_index > ents[0].index {
                 panic!(
@@ -721,7 +713,7 @@ mod storage {
 
             let log_cf = DBEnv::get_log_cf(&self.db)?;
 
-            // TODO: remove all entries overwritten by ents.
+            // remove all entries overwritten by ents.
             if ents[0].index <= ent_meta.last_index {
                 let start_key = DBEnv::format_entry_key(self.group_id, ents[0].index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
@@ -776,6 +768,7 @@ mod storage {
             self.set_snapshot_metadata(&snap_meta)?;
             // save snapshot data to user statemachine
             // TODO: consider save snapshot metadata to user statemachine.
+            // TODO: consider use async method and add scheduler api
             self.wsnap.install_snapshot_data(
                 self.group_id,
                 self.replica_id,
@@ -792,6 +785,7 @@ mod storage {
             let ent_meta =
                 EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)?;
             if !ent_meta.empty {
+                // TODO: need add tests for here
                 let cf = DBEnv::get_log_cf(&self.db)?;
                 let start_key = DBEnv::format_entry_key(self.group_id, ent_meta.first_index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
@@ -802,7 +796,7 @@ mod storage {
                     .map_err(|err| Error::Other(Box::new(err)))?;
             }
 
-            // update  confstate
+            // update confstate
             self.set_confstate(snap_meta.take_conf_state())?;
 
             Ok(())
@@ -814,6 +808,9 @@ mod storage {
         type SnapshotReader = SR;
     }
 
+    /*****************************************************************************
+     * RockStore
+     *****************************************************************************/
     #[derive(Clone)]
     pub struct RockStore<SR, SW>
     where
@@ -831,6 +828,11 @@ mod storage {
         SR: RaftSnapshotReader,
         SW: RaftSnapshotWriter,
     {
+        #[inline]
+        fn group_store_key(&self, group_id: u64, replica_id: u64) -> String {
+            format!("{}_{}_{}", GROUP_STORE_PREFIX, group_id, replica_id)
+        }
+
         pub fn new<P>(node_id: u64, path: P, snapshot_reader: SR, snapshot_writer: SW) -> Self
         where
             P: AsRef<std::path::Path>,
@@ -839,15 +841,10 @@ mod storage {
             db_opts.create_if_missing(true);
             db_opts.create_missing_column_families(true);
 
-            let mut cfs = vec![];
-            let metadata_cf_opts = RocksdbOptions::default();
-            cfs.push(ColumnFamilyDescriptor::new(
-                METADATA_CF_NAME,
-                metadata_cf_opts,
-            ));
-
-            let mut raft_log_cf_opts = RocksdbOptions::default();
-            cfs.push(ColumnFamilyDescriptor::new(LOG_CF_NAME, raft_log_cf_opts));
+            let cfs = vec![
+                ColumnFamilyDescriptor::new(METADATA_CF_NAME, db_opts.clone()),
+                ColumnFamilyDescriptor::new(LOG_CF_NAME, db_opts.clone()),
+            ];
 
             let db = MDB::open_cf_descriptors(&db_opts, &path, cfs).unwrap();
             Self {
@@ -856,19 +853,6 @@ mod storage {
                 rsnap: Arc::new(snapshot_reader),
                 wsnap: Arc::new(snapshot_writer),
             }
-        }
-
-        #[inline]
-        fn group_store_key(&self, group_id: u64, replica_id: u64) -> String {
-            format!("{}_{}_{}", GROUP_STORE_PREFIX, group_id, replica_id)
-        }
-
-        fn create_group_store(
-            &self,
-            group_id: u64,
-            replica_id: u64,
-        ) -> Result<RockStoreCore<SR, SW>> {
-            RockStoreCore::<SR, SW>::new(group_id, replica_id, &self.db, &self.rsnap, &self.wsnap)
         }
 
         pub(crate) fn create_group_store_if_missing(
@@ -884,14 +868,31 @@ mod storage {
                 .get_cf_opt(&meta_cf, &key, &readopts)
                 .map_err(|err| Error::Other(Box::new(err)))?
             {
-                Some(_) => Ok(RockStoreCore {
+                Some(_) => {
+                    return Ok(RockStoreCore {
+                        group_id,
+                        replica_id,
+                        db: self.db.clone(),
+                        rsnap: self.rsnap.clone(),
+                        wsnap: self.wsnap.clone(),
+                    })
+                }
+                None => RockStoreCore::<SR, SW>::new(
                     group_id,
                     replica_id,
-                    db: self.db.clone(),
-                    rsnap: self.rsnap.clone(),
-                    wsnap: self.wsnap.clone(),
+                    &self.db,
+                    &self.rsnap,
+                    &self.wsnap,
+                )
+                .and_then(|core| {
+                    let mut writeopts = WriteOptions::default();
+                    writeopts.set_sync(true);
+                    // TODO: add added timestamp as data
+                    self.db
+                        .put_cf_opt(&meta_cf, key, b"".to_vec(), &writeopts)
+                        .map_err(|err| Error::Other(Box::new(err)))?;
+                    Ok(core)
                 }),
-                None => self.create_group_store(group_id, replica_id),
             }
         }
 
@@ -1795,6 +1796,10 @@ mod tests {
     use std::path::Path;
     use std::path::PathBuf;
 
+    use futures::future::BoxFuture;
+    use futures::future::LocalBoxFuture;
+    use futures::Future;
+    use futures::FutureExt;
     use protobuf::Message as PbMessage;
     use raft::prelude::HardState;
     use raft::Error as RaftError;
@@ -1806,14 +1811,15 @@ mod tests {
     use rocksdb::DBWithThreadMode;
     use rocksdb::MultiThreaded;
 
+    use super::RockStateMachine;
+    use super::RockStore;
+    use crate::multiraft::storage::MultiRaftStorage;
     use crate::multiraft::storage::RaftStorageWriter;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
+    use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
-
-    use super::RockStateMachine;
-    use super::RockStore;
 
     fn new_entry(index: u64, term: u64) -> Entry {
         let mut e = Entry::default();
@@ -1891,8 +1897,40 @@ mod tests {
         destroy_db(&state_machine_temp_dir);
     }
 
+    /// Provide async env for tests
+    ///
+    /// **Note:** a little of trick to see [Reference parameter to async fn does not live long enough](https://users.rust-lang.org/t/reference-parameter-to-async-fn-does-not-live-long-enough/65230) get more informactions.
+    async fn db_test_async_env<F, R>(f: F)
+    where
+        F: for<'r> FnOnce(
+            &'r RockStore<RockStateMachine<R>, RockStateMachine<R>>,
+            &'r RockStateMachine<R>,
+        ) -> BoxFuture<'r, ()>,
+        R: WriteResponse,
+    {
+        let state_machine_temp_dir = rand_temp_dir().join("oceanraft_state_machine");
+        let rock_store_temp_dir = rand_temp_dir().join("oceanraft_rock_store");
+
+        let node_id = 1;
+        let state_machine = new_state_machine::<R>(&state_machine_temp_dir, 1);
+        let rock_store = new_rockstore::<R>(&rock_store_temp_dir, node_id, &state_machine);
+        {
+            f(&rock_store, &state_machine).boxed().await;
+        }
+
+        drop(rock_store);
+        drop(state_machine);
+
+        destroy_db(&rock_store_temp_dir);
+        destroy_db(&state_machine_temp_dir);
+    }
+
+    /*****************************************************************************
+     * TEST ROCK STORAGE CORE
+     *****************************************************************************
+     */
     #[test]
-    fn test_storage_term() {
+    fn test_rock_storage_term() {
         db_test_env::<_, ()>(|rock_store, _state_machine| {
             let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
             let mut tests = vec![
@@ -1917,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_create_snapshot() {
+    fn test_rock_storage_create_snapshot() {
         let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
         let nodes = vec![1, 2, 3];
         let mut conf_state = ConfState::default();
@@ -1963,7 +2001,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_append() {
+    fn test_rock_storage_append() {
         let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
         let mut tests = vec![
             (
@@ -2031,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_entries() {
+    fn test_rock_storage_entries() {
         let ents = vec![
             new_entry(3, 3),
             new_entry(4, 4),
@@ -2111,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_first_index() {
+    fn test_rock_storage_first_index() {
         db_test_env::<_, ()>(|rock_store, _state_machine| {
             let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
 
@@ -2125,7 +2163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_last_index() {
+    fn test_rock_storage_last_index() {
         db_test_env::<_, ()>(|rock_store, _state_machine| {
             let ents = vec![new_entry(3, 3), new_entry(4, 4), new_entry(5, 5)];
 
@@ -2148,7 +2186,7 @@ mod tests {
     }
 
     #[test]
-    fn test_storage_apply_snapshot() {
+    fn test_rock_storage_apply_snapshot() {
         let nodes = vec![1, 2, 3];
 
         db_test_env::<_, ()>(|rock_store, _state_machine| {
@@ -2161,5 +2199,76 @@ mod tests {
             let snap = new_snapshot(3, 3, nodes);
             rock_store_core.install_snapshot(snap).unwrap_err();
         });
+    }
+
+    /*****************************************************************************
+     * TEST MULTI STORE
+     *****************************************************************************
+     */
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_multi_rock_storage_replicas() {
+        db_test_async_env(
+            |rock_store: &RockStore<RockStateMachine<()>, RockStateMachine<()>>,
+             state_machine: &RockStateMachine<()>| {
+                let fut = async move {
+                    let replicas = vec![
+                        ReplicaDesc {
+                            node_id: 1,
+                            replica_id: 1,
+                        },
+                        ReplicaDesc {
+                            node_id: 1,
+                            replica_id: 2,
+                        },
+                        ReplicaDesc {
+                            node_id: 1,
+                            replica_id: 3,
+                        },
+                    ];
+
+                    for (i, wrep) in replicas.iter().enumerate() {
+                        if rock_store
+                            .get_replica_desc(1, wrep.replica_id)
+                            .await
+                            .unwrap()
+                            .is_some()
+                        {
+                            panic!("# {}: expecte replica desc is none", i)
+                        }
+
+                        rock_store.set_replica_desc(1, wrep.clone()).await.unwrap();
+                    }
+
+                    for (i, wrep) in replicas.iter().enumerate() {
+                        if let Some(grep) = rock_store
+                            .get_replica_desc(1, wrep.replica_id)
+                            .await
+                            .unwrap()
+                        {
+                            assert_eq!(grep, *wrep, "# {}: expect {:?}, got {:?}", i, *wrep, grep);
+                        } else {
+                            panic!("# {}: expecte some replica desc, got none", i)
+                        }
+                    }
+
+                    for (i, wrep) in replicas.iter().enumerate() {
+                        rock_store
+                            .remove_replica_desc(1, wrep.replica_id)
+                            .await
+                            .unwrap();
+
+                        if let Some(grep) = rock_store
+                            .get_replica_desc(1, wrep.replica_id)
+                            .await
+                            .unwrap()
+                        {
+                            panic!("# {}: expecte none replica desc, got {:?}", i, grep);
+                        }
+                    }
+                };
+                Box::pin(fut)
+            },
+        )
+        .await;
     }
 }
