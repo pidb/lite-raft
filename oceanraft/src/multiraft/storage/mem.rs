@@ -129,13 +129,13 @@ impl RaftSnapshotReader for RaftMemStorage {
         unimplemented!()
     }
 
-    fn snapshot_metadata(
-        &self,
-        _group_id: u64,
-        _replica_id: u64,
-    ) -> Result<raft::prelude::SnapshotMetadata> {
-        Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
-    }
+    // fn snapshot_metadata(
+    //     &self,
+    //     _group_id: u64,
+    //     _replica_id: u64,
+    // ) -> Result<raft::prelude::SnapshotMetadata> {
+    //     Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
+    // }
 }
 
 impl RaftStorage for RaftMemStorage {

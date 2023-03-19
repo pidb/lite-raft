@@ -142,78 +142,6 @@ mod storage {
         empty: bool,
     }
 
-    impl EntryMetadata {
-        /// Get `EntryMetadata` from givn rocksdb.
-        fn get<SR>(group_id: u64, replica_id: u64, db: &Arc<MDB>, rsnap: &Arc<SR>) -> Result<Self>
-        where
-            SR: RaftSnapshotReader,
-        {
-            let cf = DBEnv::get_log_cf(db)?;
-
-            let keys = vec![
-                DBEnv::format_empty_key(group_id, replica_id),
-                DBEnv::format_first_index_key(group_id, replica_id),
-                DBEnv::format_last_index_key(group_id, replica_id),
-            ];
-
-            let readopts = ReadOptions::default();
-            let mut batchs = db
-                .batched_multi_get_cf_opt(&cf, &keys, false, &readopts)
-                .into_iter();
-            assert_eq!(batchs.len(), keys.len());
-
-            let empty = batchs
-                .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or_else(
-                    || {
-                        unreachable!(
-                            "the log empty flag should be created when storage is initialized"
-                        )
-                    },
-                    |data| match String::from_utf8(data.to_vec()).unwrap().as_str() {
-                        "true" => true,
-                        "false" => false,
-                        _ => unreachable!(
-                            "the log empty flag invalid, it can only be either true or false."
-                        ),
-                    },
-                );
-
-            if empty {
-                let snap_meta = rsnap.snapshot_metadata(group_id, replica_id).unwrap();
-                return Ok(EntryMetadata {
-                    first_index: snap_meta.index + 1,
-                    last_index: snap_meta.index,
-                    empty,
-                });
-            }
-
-            let first_index = batchs
-                .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or(0, |data| {
-                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
-                });
-
-            let last_index = batchs
-                .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or(0, |data| {
-                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
-                });
-
-            Ok(EntryMetadata {
-                first_index,
-                last_index,
-                empty,
-            })
-        }
-    }
-
     /*****************************************************************************
      * RockStore Core
      *****************************************************************************/
@@ -263,6 +191,75 @@ mod storage {
                 .map_err(|err| Error::Other(Box::new(err)))?;
 
             Ok(core)
+        }
+
+        /// Get `EntryMetadata` from givn rocksdb.
+        fn get_entry_meta(&self) -> Result<EntryMetadata> {
+            let cf = DBEnv::get_log_cf(&self.db)?;
+
+            let keys = vec![
+                DBEnv::format_empty_key(self.group_id, self.replica_id),
+                DBEnv::format_first_index_key(self.group_id, self.replica_id),
+                DBEnv::format_last_index_key(self.group_id, self.replica_id),
+            ];
+
+            let readopts = ReadOptions::default();
+            let mut batchs = self
+                .db
+                .batched_multi_get_cf_opt(&cf, &keys, false, &readopts)
+                .into_iter();
+            assert_eq!(batchs.len(), keys.len());
+
+            let empty = batchs
+                .next()
+                .unwrap()
+                .map_err(|err| Error::Other(Box::new(err)))?
+                .map_or_else(
+                    || {
+                        unreachable!(
+                            "the log empty flag should be created when storage is initialized"
+                        )
+                    },
+                    |data| match String::from_utf8(data.to_vec()).unwrap().as_str() {
+                        "true" => true,
+                        "false" => false,
+                        _ => unreachable!(
+                            "the log empty flag invalid, it can only be either true or false."
+                        ),
+                    },
+                );
+
+            if empty {
+                // let snap_meta = rsnap.snapshot_metadata(group_id, replica_id).unwrap();
+                let snap_meta = self.get_snapshot_metadata()?;
+                return Ok(EntryMetadata {
+                    first_index: snap_meta.index + 1,
+                    last_index: snap_meta.index,
+                    empty,
+                });
+            }
+
+            let first_index = batchs
+                .next()
+                .unwrap()
+                .map_err(|err| Error::Other(Box::new(err)))?
+                .map_or(0, |data| {
+                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
+                });
+
+            let last_index = batchs
+                .next()
+                .unwrap()
+                .map_err(|err| Error::Other(Box::new(err)))?
+                .map_or(0, |data| {
+                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
+                });
+
+            Ok(EntryMetadata {
+                first_index,
+                last_index,
+                empty,
+            })
         }
 
         fn is_empty(&self, log_cf: &Arc<BoundColumnFamily>) -> Result<bool> {
@@ -404,8 +401,7 @@ mod storage {
                 return;
             }
 
-            let log_meta =
-                EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap).unwrap();
+            let log_meta = self.get_entry_meta().unwrap();
             let log_cf = DBEnv::get_log_cf(&self.db).unwrap();
 
             let mut batch = WriteBatch::default();
@@ -509,9 +505,9 @@ mod storage {
             max_size: impl Into<Option<u64>>,
             _context: raft::GetEntriesContext,
         ) -> RaftResult<Vec<raft::prelude::Entry>> {
-            let log_meta =
-                EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)
-                    .map_err(|err| raft::Error::Store(raft::StorageError::Other(Box::new(err))))?;
+            let log_meta = self
+                .get_entry_meta()
+                .map_err(|err| raft::Error::Store(raft::StorageError::Other(Box::new(err))))?;
 
             if low < log_meta.first_index {
                 return Err(raft::Error::Store(raft::StorageError::Compacted));
@@ -555,16 +551,12 @@ mod storage {
         }
 
         fn term(&self, idx: u64) -> RaftResult<u64> {
-            let snap_meta = self
-                .rsnap
-                .snapshot_metadata(self.group_id, self.replica_id)
-                .unwrap();
+            let snap_meta = self.get_snapshot_metadata().unwrap();
             if idx == snap_meta.index {
                 return Ok(snap_meta.term);
             }
 
-            let log_meta =
-                EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)?;
+            let log_meta = self.get_entry_meta()?;
             if idx < log_meta.first_index {
                 return Err(raft::Error::Store(raft::StorageError::Compacted));
             }
@@ -693,8 +685,7 @@ mod storage {
                 return Ok(());
             }
 
-            let ent_meta =
-                EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)?;
+            let ent_meta = self.get_entry_meta()?;
 
             if ent_meta.first_index > ents[0].index {
                 panic!(
@@ -782,8 +773,7 @@ mod storage {
             self.set_hardstate(hs)?;
 
             // clear entries
-            let ent_meta =
-                EntryMetadata::get(self.group_id, self.replica_id, &self.db, &self.rsnap)?;
+            let ent_meta = self.get_entry_meta()?;
             if !ent_meta.empty {
                 // TODO: need add tests for here
                 let cf = DBEnv::get_log_cf(&self.db)?;
@@ -1166,23 +1156,23 @@ mod state_machine {
         }
     }
 
-    impl From<RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
-        fn from(ser: RockStateMachineSnapshotMetaSerializer) -> Self {
-            let conf_state = Some(ConfState {
-                voters: ser.voters,
-                voters_outgoing: ser.voters_outgoing,
-                learners: ser.learners,
-                learners_next: ser.learners_next,
-                auto_leave: ser.auto_leave,
-            });
+    // impl From<RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
+    //     fn from(ser: RockStateMachineSnapshotMetaSerializer) -> Self {
+    //         let conf_state = Some(ConfState {
+    //             voters: ser.voters,
+    //             voters_outgoing: ser.voters_outgoing,
+    //             learners: ser.learners,
+    //             learners_next: ser.learners_next,
+    //             auto_leave: ser.auto_leave,
+    //         });
 
-            SnapshotMetadata {
-                index: ser.applied_index,
-                term: ser.applied_term,
-                conf_state,
-            }
-        }
-    }
+    //         SnapshotMetadata {
+    //             index: ser.applied_index,
+    //             term: ser.applied_term,
+    //             conf_state,
+    //         }
+    //     }
+    // }
 
     // impl From<&RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
     //     fn from(ser: &RockStateMachineSnapshotMetaSerializer) -> Self {
@@ -1246,14 +1236,14 @@ mod state_machine {
                 .map_err(|err| Error::Other(Box::new(err)))
         }
 
-        fn snapshot_metadata(
-            &self,
-            group_id: u64,
-            _replica_id: u64,
-        ) -> StorageResult<SnapshotMetadata> {
-            let meta = self.get_snapshot_meta(group_id).unwrap(); // TODO: map error
-            Ok(meta)
-        }
+        // fn snapshot_metadata(
+        //     &self,
+        //     group_id: u64,
+        //     _replica_id: u64,
+        // ) -> StorageResult<SnapshotMetadata> {
+        //     let meta = self.get_snapshot_meta(group_id).unwrap(); // TODO: map error
+        //     Ok(meta)
+        // }
     }
 
     impl<R> RaftSnapshotWriter for RockStateMachine<R>
@@ -1442,40 +1432,40 @@ mod state_machine {
         /// Get snapshot from rock storage.
         ///
         /// Note: default returned if does exists snapshot metadata.
-        fn get_snapshot(&self, group_id: u64) -> Result<Snapshot> {
-            let cf = self.get_snapshot_cf()?;
-            let readopts = ReadOptions::default();
+        // fn get_snapshot(&self, group_id: u64) -> Result<Snapshot> {
+        //     let cf = self.get_snapshot_cf()?;
+        //     let readopts = ReadOptions::default();
 
-            let meta_key = snapshot_metadata_key(group_id);
-            let meta = self
-                .db
-                .get_pinned_cf_opt(&cf, &meta_key, &readopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+        //     let meta_key = snapshot_metadata_key(group_id);
+        //     let meta = self
+        //         .db
+        //         .get_pinned_cf_opt(&cf, &meta_key, &readopts)
+        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            if meta.is_none() {
-                return Ok(Snapshot::default());
-            }
+        //     if meta.is_none() {
+        //         return Ok(Snapshot::default());
+        //     }
 
-            let meta: RockStateMachineSnapshotMetaSerializer =
-                serde_json::from_slice(&meta.unwrap())
-                    .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+        //     let meta: RockStateMachineSnapshotMetaSerializer =
+        //         serde_json::from_slice(&meta.unwrap())
+        //             .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            let data_key = snapshot_data_key(group_id);
-            let data = self
-                .db
-                .get_pinned_cf_opt(&cf, &data_key, &readopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+        //     let data_key = snapshot_data_key(group_id);
+        //     let data = self
+        //         .db
+        //         .get_pinned_cf_opt(&cf, &data_key, &readopts)
+        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            let data = match data {
-                None => vec![],
-                Some(data) => data.to_owned(),
-            };
+        //     let data = match data {
+        //         None => vec![],
+        //         Some(data) => data.to_owned(),
+        //     };
 
-            Ok(Snapshot {
-                data,
-                metadata: Some(SnapshotMetadata::from(meta)),
-            })
-        }
+        //     Ok(Snapshot {
+        //         data,
+        //         metadata: Some(SnapshotMetadata::from(meta)),
+        //     })
+        // }
 
         // TODO: using serializer trait for adta
         fn get_snapshot_data(&self, group_id: u64) -> Result<Vec<u8>> {
@@ -1491,25 +1481,25 @@ mod state_machine {
         /// Get snapshot metadata from rock storage.
         ///
         /// Note: default returned if does exists snapshot metadata.
-        fn get_snapshot_meta(&self, group_id: u64) -> Result<SnapshotMetadata> {
-            let cf = self.get_snapshot_cf()?;
-            let readopts = ReadOptions::default();
-            let meta_key = snapshot_metadata_key(group_id);
-            let meta = self
-                .db
-                .get_pinned_cf_opt(&cf, &meta_key, &readopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+        // fn get_snapshot_meta(&self, group_id: u64) -> Result<SnapshotMetadata> {
+        //     let cf = self.get_snapshot_cf()?;
+        //     let readopts = ReadOptions::default();
+        //     let meta_key = snapshot_metadata_key(group_id);
+        //     let meta = self
+        //         .db
+        //         .get_pinned_cf_opt(&cf, &meta_key, &readopts)
+        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            if meta.is_none() {
-                return Ok(SnapshotMetadata::default());
-            }
+        //     if meta.is_none() {
+        //         return Ok(SnapshotMetadata::default());
+        //     }
 
-            let meta: RockStateMachineSnapshotMetaSerializer =
-                serde_json::from_slice(&meta.unwrap())
-                    .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+        //     let meta: RockStateMachineSnapshotMetaSerializer =
+        //         serde_json::from_slice(&meta.unwrap())
+        //             .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
 
-            Ok(SnapshotMetadata::from(meta))
-        }
+        //     Ok(SnapshotMetadata::from(meta))
+        // }
 
         /// Save the current serialized to snapshot.
         fn serialize_snapshot(

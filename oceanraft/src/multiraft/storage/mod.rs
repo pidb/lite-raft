@@ -139,7 +139,7 @@ pub trait RaftStorageWriter {
 }
 
 pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
-    fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata>;
+    // fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata>;
 
     // fn load_snapshot(
     //     &self,
