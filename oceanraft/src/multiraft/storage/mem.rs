@@ -12,7 +12,6 @@ use crate::prelude::HardState;
 use crate::prelude::RaftState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
-use crate::prelude::SnapshotMetadata;
 
 use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
@@ -97,29 +96,37 @@ impl RaftStorageWriter for RaftMemStorage {
 }
 
 impl RaftSnapshotWriter for RaftMemStorage {
-    fn build_snapshot(&self, _group_id: u64, _replica_id: u64) -> Result<()> {
+    fn build_snapshot(&self, group_id: u64, replica_id: u64, applied_index: u64, applied_term: u64, last_conf_state: ConfState) -> Result<()> {
+        unimplemented!()
+    } 
+
+    fn install_snapshot_data(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()> {
         unimplemented!()
     }
 
-    fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
-        self.core
-            .wl()
-            .apply_snapshot(snapshot)
-            .map_err(|err| err.into())
-    }
+    // fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
+    //     self.core
+    //         .wl()
+    //         .apply_snapshot(snapshot)
+    //         .map_err(|err| err.into())
+    // }
 }
 
 impl RaftSnapshotReader for RaftMemStorage {
-    fn load_snapshot(
-        &self,
-        _group_id: u64,
-        _replica_id: u64,
-        request_index: u64,
-        to: u64,
-    ) -> Result<Snapshot> {
-        self.core
-            .snapshot(request_index, to)
-            .map_err(|err| err.into())
+    // fn load_snapshot(
+    //     &self,
+    //     _group_id: u64,
+    //     _replica_id: u64,
+    //     request_index: u64,
+    //     to: u64,
+    // ) -> Result<Snapshot> {
+    //     self.core
+    //         .snapshot(request_index, to)
+    //         .map_err(|err| err.into())
+    // }
+
+    fn load_snapshot_data(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>> {
+        unimplemented!()
     }
 
     fn snapshot_metadata(

@@ -1,4 +1,5 @@
 use futures::Future;
+use prost::encoding::group;
 use raft::Error as RaftError;
 use raft::StorageError as RaftStorageError;
 use raft::StorageError;
@@ -140,19 +141,32 @@ pub trait RaftStorageWriter {
 pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
     fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata>;
 
-    fn load_snapshot(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        request_index: u64,
-        to: u64,
-    ) -> Result<Snapshot>;
+    // fn load_snapshot(
+    //     &self,
+    //     group_id: u64,
+    //     replica_id: u64,
+    //     request_index: u64,
+    //     to: u64,
+    // ) -> Result<Snapshot>;
+
+    // TODO: using serializer trait for adta
+    fn load_snapshot_data(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>>;
 }
 
 pub trait RaftSnapshotWriter: Clone + Send + Sync + 'static {
-    fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()>;
+    // fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()>;
 
-    fn build_snapshot(&self, group_id: u64, replica_id: u64) -> Result<()>;
+    // TODO: using serializer trait for adta
+    fn install_snapshot_data(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()>;
+
+    fn build_snapshot(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        applied_index: u64,
+        applied_term: u64,
+        last_conf_state: ConfState,
+    ) -> Result<()>;
 }
 
 /// RaftStorage provides read and writes all the information about the current Raft implementation,
