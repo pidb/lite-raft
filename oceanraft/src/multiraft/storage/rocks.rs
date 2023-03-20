@@ -622,9 +622,7 @@ mod storage {
         fn snapshot(&self, request_index: u64, _to: u64) -> RaftResult<Snapshot> {
             let mut snap = Snapshot::default();
             // get snapshot data from user state machine.
-            let data = self
-                .rsnap
-                .load_snapshot_data(self.group_id, self.replica_id)?;
+            let data = self.rsnap.load_snapshot(self.group_id, self.replica_id)?;
             snap.set_data(data);
 
             // constructor snapshot metadata from store.
@@ -760,11 +758,8 @@ mod storage {
             // save snapshot data to user statemachine
             // TODO: consider save snapshot metadata to user statemachine.
             // TODO: consider use async method and add scheduler api
-            self.wsnap.install_snapshot_data(
-                self.group_id,
-                self.replica_id,
-                snapshot.take_data(),
-            )?;
+            self.wsnap
+                .install_snapshot(self.group_id, self.replica_id, snapshot.take_data())?;
 
             // update hardstate
             let mut hs = self.get_hardstate()?;
@@ -1000,6 +995,7 @@ mod state_machine {
     use std::sync::Arc;
     use std::vec::IntoIter;
 
+    use futures::io::Write;
     use futures::Future;
     use rocksdb::BoundColumnFamily;
     use rocksdb::ColumnFamilyDescriptor;
@@ -1032,11 +1028,11 @@ mod state_machine {
     const META_CF_NAME: &'static str = "meta";
     const SNAP_CF_NAME: &'static str = "snapshot";
 
-    const SNAP_META_POSTIFX: &'static str = "snap_meta";
-    const SNAP_DATA_POSTIFX: &'static str = "snap_data";
+    const SNAP_POSTIFX: &'static str = "snapshot";
 
     const APPLIED_INDEX_PREFIX: &'static str = "applied_index";
     const APPLIED_TERM_PREFIX: &'static str = "applied_term";
+    const MEMBERSHIP_PREFIX: &'static str = "membership";
 
     /*****************************************************************************
      * DATA
@@ -1095,37 +1091,39 @@ mod state_machine {
      * SNAPSHOT
      *****************************************************************************/
     #[derive(serde::Serialize, serde::Deserialize, Default)]
-    struct RockStateMachineSnapshotMetaSerializer {
-        applied_index: u64,
-        applied_term: u64,
-        voters: Vec<u64>,
-        learners: Vec<u64>,
-        voters_outgoing: Vec<u64>,
-        learners_next: Vec<u64>,
-        auto_leave: bool,
+    pub(crate) struct SnapshotMembership {
+        pub(crate) voters: Vec<u64>,
+        pub(crate) learners: Vec<u64>,
+        pub(crate) voters_outgoing: Vec<u64>,
+        pub(crate) learners_next: Vec<u64>,
+        pub(crate) auto_leave: bool,
     }
 
-    impl From<SnapshotMetadata> for RockStateMachineSnapshotMetaSerializer {
-        fn from(mut val: SnapshotMetadata) -> Self {
-            let conf_state = val.take_conf_state();
-            RockStateMachineSnapshotMetaSerializer {
-                applied_index: val.index,
-                applied_term: val.term,
-                voters: conf_state.voters,
-                learners: conf_state.learners,
-                learners_next: conf_state.learners_next,
-                voters_outgoing: conf_state.voters_outgoing,
-                auto_leave: conf_state.auto_leave,
+    impl From<ConfState> for SnapshotMembership {
+        fn from(cs: ConfState) -> Self {
+            SnapshotMembership {
+                voters: cs.voters,
+                learners: cs.learners,
+                voters_outgoing: cs.voters_outgoing,
+                learners_next: cs.learners_next,
+                auto_leave: cs.auto_leave,
             }
         }
     }
 
     #[derive(serde::Serialize, serde::Deserialize, Default)]
-    struct RockStateMachineSnapshotDataSerializer {
-        bt_map: BTreeMap<String, Vec<u8>>,
+    pub(crate) struct SnapshotMetaSerializer {
+        pub(crate) applied_index: u64,
+        pub(crate) applied_term: u64,
+        pub(crate) last_membership: SnapshotMembership,
     }
 
-    impl<R> TryFrom<(u64, &RockStateMachine<R>)> for RockStateMachineSnapshotDataSerializer
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    pub(crate) struct SnapshotDataSerializer {
+        pub(crate) bt_map: BTreeMap<String, Vec<u8>>,
+    }
+
+    impl<R> TryFrom<(u64, &RockStateMachine<R>)> for SnapshotDataSerializer
     where
         R: WriteResponse,
     {
@@ -1140,7 +1138,7 @@ mod state_machine {
             let iter_mode = IteratorMode::From(prefix.as_bytes(), Direction::Forward);
             let readopts = ReadOptions::default();
             let iter = state_machine.db.iterator_cf_opt(&cf, readopts, iter_mode);
-            let mut data = RockStateMachineSnapshotDataSerializer::default();
+            let mut data = SnapshotDataSerializer::default();
             for item in iter {
                 let (key, value) = item.unwrap();
                 let key = std::str::from_utf8(&key).unwrap();
@@ -1156,94 +1154,31 @@ mod state_machine {
         }
     }
 
-    // impl From<RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
-    //     fn from(ser: RockStateMachineSnapshotMetaSerializer) -> Self {
-    //         let conf_state = Some(ConfState {
-    //             voters: ser.voters,
-    //             voters_outgoing: ser.voters_outgoing,
-    //             learners: ser.learners,
-    //             learners_next: ser.learners_next,
-    //             auto_leave: ser.auto_leave,
-    //         });
+    #[derive(serde::Serialize, serde::Deserialize, Default)]
+    pub(crate) struct SnapshotSerializer {
+        pub(crate) meta: SnapshotMetaSerializer,
+        pub(crate) data: SnapshotDataSerializer,
+    }
 
-    //         SnapshotMetadata {
-    //             index: ser.applied_index,
-    //             term: ser.applied_term,
-    //             conf_state,
-    //         }
-    //     }
-    // }
+    impl SnapshotSerializer {
+        pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
+            serde_json::to_vec(self).map_err(|err| RockStateMachineError::Other(Box::new(err)))
+        }
 
-    // impl From<&RockStateMachineSnapshotMetaSerializer> for SnapshotMetadata {
-    //     fn from(ser: &RockStateMachineSnapshotMetaSerializer) -> Self {
-    //         let conf_state = Some(ConfState {
-    //             voters: ser.voters.clone(),
-    //             voters_outgoing: ser.voters_outgoing.clone(),
-    //             learners: ser.learners.clone(),
-    //             learners_next: ser.learners_next.clone(),
-    //             auto_leave: ser.auto_leave.clone(),
-    //         });
-
-    //         SnapshotMetadata {
-    //             index: ser.applied_index,
-    //             term: ser.applied_term,
-    //             conf_state,
-    //         }
-    //     }
-    // }
-
-    // #[derive(Default)]
-    // struct RockStateMachineSnapshotSerializer {
-    //     // meta: RockStateMachineSnapshotMetaSerializer,
-    //     data: RockStateMachineSnapshotDataSerializer,
-    // }
-
-    // impl<R: WriteResponse> TryFrom<(u64, u64, &RockStateMachine<R>)>
-    //     for RockStateMachineSnapshotSerializer
-    // {
-    //     type Error = RockStateMachineError;
-
-    //     fn try_from(
-    //         val: (u64, u64, &RockStateMachine<R>),
-    //     ) -> std::result::Result<Self, Self::Error> {
-    //         let group_id = val.0;
-    //         let _replica_id = val.1;
-    //         let state_machine = val.2;
-
-    //         // let meta = RockStateMachineSnapshotMetaSerializer::try_from((group_id, state_machine))?;
-    //         let data = RockStateMachineSnapshotDataSerializer::try_from((group_id, state_machine))?;
-    //         Ok(Self { meta, data })
-    //     }
-    // }
+        pub(crate) fn deserialize(data: &[u8]) -> Result<Self> {
+            serde_json::from_slice::<SnapshotSerializer>(data)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+        }
+    }
 
     impl<R> RaftSnapshotReader for RockStateMachine<R>
     where
         R: WriteResponse,
     {
-        // fn load_snapshot(
-        //     &self,
-        //     group_id: u64,
-        //     _replica_id: u64,
-        //     _request_index: u64,
-        //     _to: u64,
-        // ) -> StorageResult<Snapshot> {
-        //     let snapshot = self.get_snapshot(group_id).unwrap(); // TODO: map error
-        //     Ok(snapshot)
-        // }
-
-        fn load_snapshot_data(&self, group_id: u64, replica_id: u64) -> StorageResult<Vec<u8>> {
-            self.get_snapshot_data(group_id)
+        fn load_snapshot(&self, group_id: u64, replica_id: u64) -> StorageResult<Vec<u8>> {
+            self.get_snapshot(group_id)
                 .map_err(|err| Error::Other(Box::new(err)))
         }
-
-        // fn snapshot_metadata(
-        //     &self,
-        //     group_id: u64,
-        //     _replica_id: u64,
-        // ) -> StorageResult<SnapshotMetadata> {
-        //     let meta = self.get_snapshot_meta(group_id).unwrap(); // TODO: map error
-        //     Ok(meta)
-        // }
     }
 
     impl<R> RaftSnapshotWriter for RockStateMachine<R>
@@ -1256,57 +1191,39 @@ mod state_machine {
             replica_id: u64,
             applied_index: u64,
             applied_term: u64,
-            last_membership: ConfState,
+            conf_state: ConfState,
         ) -> StorageResult<()> {
-            let meta = RockStateMachineSnapshotMetaSerializer {
-                applied_index,
-                applied_term,
-                voters: last_membership.voters,
-                learners: last_membership.learners,
-                voters_outgoing: last_membership.voters_outgoing,
-                learners_next: last_membership.learners_next,
-                auto_leave: last_membership.auto_leave,
+            let serializer = SnapshotSerializer {
+                meta: SnapshotMetaSerializer {
+                    applied_index,
+                    applied_term,
+                    last_membership: SnapshotMembership::from(conf_state),
+                },
+                data: SnapshotDataSerializer::try_from((group_id, self))
+                    .map_err(|err| Error::Other(Box::new(err)))?,
             };
 
-            let data = RockStateMachineSnapshotDataSerializer::try_from((group_id, self)).unwrap(); // TODO: map error
+            let data = serializer
+                .serialize()
+                .map_err(|err| Error::Other(Box::new(err)))?;
 
-            self.serialize_snapshot(group_id, meta, data).unwrap(); // TODO: map error
-            Ok(())
+            self.set_snapshot(group_id, &data)
+                .map_err(|err| Error::Other(Box::new(err)))
         }
 
-        fn install_snapshot_data(
+        fn install_snapshot(
             &self,
             group_id: u64,
-            replica_id: u64,
+            _replica_id: u64,
             data: Vec<u8>,
         ) -> StorageResult<()> {
             if data.is_empty() {
                 return Ok(());
             }
 
-            unimplemented!()
+            self.restore(group_id, data)
+                .map_err(|err| Error::Other(Box::new(err)))
         }
-
-        // fn save_snapshot(
-        //     &self,
-        //     group_id: u64,
-        //     replica_id: u64,
-        //     mut snapshot: Snapshot,
-        // ) -> StorageResult<()> {
-        //     let snap_meta = snapshot.take_metadata();
-        //     let meta_ser = RockStateMachineSnapshotMetaSerializer::from(snap_meta);
-        //     let meta = serde_json::to_vec(&meta_ser).unwrap();
-        //     self.save_snapshot_metadata(group_id, meta).unwrap();
-        //     // serialize snapshot data and replay to the state machine
-        //     let data = serde_json::from_slice::<RockStateMachineSnapshotDataSerializer>(
-        //         snapshot.get_data(),
-        //     )
-        //     .unwrap();
-
-        //     self.replay_serialized_snapshot(group_id, data);
-
-        //     unimplemented!()
-        // }
     }
 
     /*****************************************************************************
@@ -1386,6 +1303,54 @@ mod state_machine {
             )
         }
 
+        fn set_snapshot(&self, group_id: u64, data: &[u8]) -> Result<()> {
+            let snapcf = self.db.cf_handle(SNAP_CF_NAME).map_or(
+                Err(RockStateMachineError::ColumnFamilyMissing(
+                    "snapshot".to_owned(),
+                )),
+                |cf| Ok(cf),
+            )?;
+
+            let key = format_snapshot_key(group_id);
+
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+
+            self.db
+                .put_cf_opt(&snapcf, key, data, &writeopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+        }
+
+        // TODO: using serializer trait for data
+        fn get_snapshot(&self, group_id: u64) -> Result<Vec<u8>> {
+            let cf = self.get_snapshot_cf()?;
+            let readopts = ReadOptions::default();
+            let key = format_snapshot_key(group_id);
+            self.db
+                .get_pinned_cf_opt(&cf, &key, &readopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
+                .map_or(Ok(vec![]), |data| Ok(data.to_vec()))
+        }
+
+        /// Set current applied index and term.
+        fn set_applied(&self, group_id: u64, val: (u64, u64) /* index, term */) -> Result<()> {
+            let cf = self.get_data_cf()?;
+            let mut batch = WriteBatch::default();
+            let key = format_applied_index_key(group_id);
+            let value = val.0.to_be_bytes();
+            batch.put_cf(&cf, key, value);
+
+            let key = format_applied_term_key(group_id);
+            let value = val.1.to_be_bytes();
+            batch.put_cf(&cf, key, value);
+
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .write_opt(batch, &writeopts)
+                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+        }
+
         /// Get saved applied index and term
         fn get_applied(&self, group_id: u64) -> Result<(u64, u64)> {
             let cf = self.get_data_cf()?;
@@ -1419,140 +1384,35 @@ mod state_machine {
             Ok((index, term))
         }
 
-        fn save_last_confstate(&self, group_id: u64, cs: ConfState) -> Result<()> {
-            unimplemented!()
-        }
-
-        /// Get saved last membership change
-        fn get_last_conf_state(&self, group_id: u64) -> Result<ConfState> {
-            Ok(ConfState::default()) // TODO: impl me
-                                     // unimplemented!()
-        }
-
-        /// Get snapshot from rock storage.
-        ///
-        /// Note: default returned if does exists snapshot metadata.
-        // fn get_snapshot(&self, group_id: u64) -> Result<Snapshot> {
-        //     let cf = self.get_snapshot_cf()?;
-        //     let readopts = ReadOptions::default();
-
-        //     let meta_key = snapshot_metadata_key(group_id);
-        //     let meta = self
-        //         .db
-        //         .get_pinned_cf_opt(&cf, &meta_key, &readopts)
-        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-        //     if meta.is_none() {
-        //         return Ok(Snapshot::default());
-        //     }
-
-        //     let meta: RockStateMachineSnapshotMetaSerializer =
-        //         serde_json::from_slice(&meta.unwrap())
-        //             .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-        //     let data_key = snapshot_data_key(group_id);
-        //     let data = self
-        //         .db
-        //         .get_pinned_cf_opt(&cf, &data_key, &readopts)
-        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-        //     let data = match data {
-        //         None => vec![],
-        //         Some(data) => data.to_owned(),
-        //     };
-
-        //     Ok(Snapshot {
-        //         data,
-        //         metadata: Some(SnapshotMetadata::from(meta)),
-        //     })
-        // }
-
-        // TODO: using serializer trait for adta
-        fn get_snapshot_data(&self, group_id: u64) -> Result<Vec<u8>> {
-            let cf = self.get_snapshot_cf()?;
-            let readopts = ReadOptions::default();
-            let data_key = snapshot_data_key(group_id);
-            self.db
-                .get_pinned_cf_opt(&cf, &data_key, &readopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
-                .map_or(Ok(vec![]), |data| Ok(data.to_vec()))
-        }
-
-        /// Get snapshot metadata from rock storage.
-        ///
-        /// Note: default returned if does exists snapshot metadata.
-        // fn get_snapshot_meta(&self, group_id: u64) -> Result<SnapshotMetadata> {
-        //     let cf = self.get_snapshot_cf()?;
-        //     let readopts = ReadOptions::default();
-        //     let meta_key = snapshot_metadata_key(group_id);
-        //     let meta = self
-        //         .db
-        //         .get_pinned_cf_opt(&cf, &meta_key, &readopts)
-        //         .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-        //     if meta.is_none() {
-        //         return Ok(SnapshotMetadata::default());
-        //     }
-
-        //     let meta: RockStateMachineSnapshotMetaSerializer =
-        //         serde_json::from_slice(&meta.unwrap())
-        //             .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-        //     Ok(SnapshotMetadata::from(meta))
-        // }
-
-        /// Save the current serialized to snapshot.
-        fn serialize_snapshot(
+        /// Set current last membership to db.
+        fn set_membership(
             &self,
             group_id: u64,
-            meta: RockStateMachineSnapshotMetaSerializer,
-            data: RockStateMachineSnapshotDataSerializer,
+            last_memebrship: &SnapshotMembership,
         ) -> Result<()> {
-            let meta = serde_json::to_vec(&meta)
+            let cf = self.get_meta_cf()?;
+            let key = format_membership_key(group_id);
+            let value = serde_json::to_vec(last_memebrship)
                 .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-            let data = serde_json::to_vec(&data)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
-
-            self.save_snapshot_metadata(group_id, meta)?;
-            self.save_snapshot_data(group_id, data)?;
-
-            // TODO: remove snapshoted datas
-
-            Ok(())
-        }
-
-        /// Save the current snapshot metadata by raw bytes.
-        fn save_snapshot_metadata(&self, group_id: u64, meta: Vec<u8>) -> Result<()> {
-            let cf = self.get_snapshot_cf()?;
-            let key = snapshot_metadata_key(group_id);
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-
             self.db
-                .put_cf_opt(&cf, key, meta, &writeopts)
+                .put_cf_opt(&cf, key, value, &writeopts)
                 .map_err(|err| RockStateMachineError::Other(Box::new(err)))
         }
 
-        /// Save the current snapshot data by raw bytes.
-        fn save_snapshot_data(&self, group_id: u64, data: Vec<u8>) -> Result<()> {
-            let cf = self.get_snapshot_cf()?;
-            let key = snapshot_data_key(group_id);
-            let mut writeopts = WriteOptions::default();
-            writeopts.set_sync(true);
-
-            self.db
-                .put_cf_opt(&cf, key, data, &writeopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
-        }
-
-        fn replay_serialized_snapshot(
-            &self,
-            group_id: u64,
-            data: RockStateMachineSnapshotDataSerializer,
-        ) {
+        fn restore(&self, group_id: u64, data: Vec<u8>) -> Result<()> {
             let mut batch = WriteBatch::default();
             let cf = self.get_data_cf().unwrap();
-            for (raw_key, val) in data.bt_map.into_iter() {
+            let serializer = SnapshotSerializer::deserialize(&data)?;
+
+            self.set_applied(
+                group_id,
+                (serializer.meta.applied_index, serializer.meta.applied_term),
+            )?;
+            self.set_membership(group_id, &serializer.meta.last_membership)?;
+
+            for (raw_key, val) in serializer.data.bt_map.into_iter() {
                 let key = format_data_key(group_id, &raw_key);
                 // TODO: consider using groupings batch for large snapshot data.
                 batch.put_cf(&cf, key, val);
@@ -1561,6 +1421,7 @@ mod state_machine {
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
             self.db.write_opt(batch, &writeopts).unwrap();
+            Ok(())
         }
     }
 
@@ -1618,24 +1479,27 @@ mod state_machine {
         }
     }
 
+    /// Format applied index key with mode `applied_index_{group_id}`.
     #[inline]
     fn format_applied_index_key(group_id: u64) -> String {
         format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
     }
 
+    /// Format applied term key with mode `applied_term_{group_id}`.
     #[inline]
     fn format_applied_term_key(group_id: u64) -> String {
         format!("{}_{}", APPLIED_TERM_PREFIX, group_id)
     }
 
+    /// Format applied term key with mode `membership_{group_id}`.
     #[inline]
-    fn snapshot_data_key(group_id: u64) -> String {
-        format!("{}/{}", group_id, SNAP_META_POSTIFX)
+    fn format_membership_key(group_id: u64) -> String {
+        format!("{}_{}", MEMBERSHIP_PREFIX, group_id)
     }
 
     #[inline]
-    fn snapshot_metadata_key(group_id: u64) -> String {
-        format!("{}/{}", group_id, SNAP_META_POSTIFX)
+    fn format_snapshot_key(group_id: u64) -> String {
+        format!("{}/{}", group_id, SNAP_POSTIFX)
     }
 
     /// Format data key with mode `{group_id}/{raw_key}`.
@@ -1664,13 +1528,11 @@ mod state_machine {
 
     #[cfg(test)]
     mod tests {
-        use std::env::temp_dir;
 
         use crate::multiraft::ApplyNormal;
         use crate::multiraft::GroupState;
 
         use super::RockStateMachine;
-        use super::RockStore;
         use super::*;
 
         #[test]
@@ -1799,21 +1661,106 @@ mod tests {
     use rocksdb::DBWithThreadMode;
     use rocksdb::MultiThreaded;
 
+    use super::state_machine::SnapshotDataSerializer;
+    use super::state_machine::SnapshotMetaSerializer;
+    use super::state_machine::SnapshotSerializer;
+    use super::RockData;
     use super::RockStateMachine;
     use super::RockStore;
     use crate::multiraft::storage::MultiRaftStorage;
+    use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::RaftStorageWriter;
+    use crate::multiraft::Apply;
+    use crate::multiraft::ApplyNormal;
+    use crate::multiraft::GroupState;
+    use crate::multiraft::StateMachine;
+    use crate::multiraft::WriteData;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
 
+    fn rand_temp_dir() -> PathBuf {
+        let rand_str: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(8)
+            .map(char::from)
+            .collect();
+        temp_dir().join(rand_str)
+    }
+
+    fn rand_data(n: usize) -> String {
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(n)
+            .map(char::from)
+            .collect::<String>()
+    }
+
     fn new_entry(index: u64, term: u64) -> Entry {
         let mut e = Entry::default();
         e.term = term;
         e.index = index;
         e
+    }
+
+    fn new_rockdata_entry(index: u64, term: u64, data: &[u8]) -> Entry {
+        let mut e = Entry::default();
+        e.term = term;
+        e.index = index;
+        e.data = data.to_vec();
+        e
+    }
+
+    fn new_rockdata_apply<R: WriteResponse>(
+        group_id: u64,
+        index: u64,
+        term: u64,
+        data: RockData,
+    ) -> Apply<R> {
+        Apply::Normal(ApplyNormal {
+            group_id,
+            index,
+            term,
+            data: data.encode().unwrap(),
+            is_conf_change: false,
+            context: None,
+            tx: None,
+        })
+    }
+
+    fn new_snapshot_serializer_from_entries(
+        index: u64,
+        term: u64,
+        voters: Vec<u64>,
+        rockdatas: Vec<RockData>,
+    ) -> SnapshotSerializer {
+        let mut data = SnapshotDataSerializer::default();
+        for rockdata in rockdatas.into_iter() {
+            data.bt_map.insert(rockdata.key, rockdata.value);
+        }
+
+        let mut meta = SnapshotMetaSerializer::default();
+        meta.applied_index = index;
+        meta.applied_term = term;
+        meta.last_membership.voters = voters;
+
+        SnapshotSerializer { data, meta }
+    }
+
+    fn new_snapshot_with_data(
+        index: u64,
+        term: u64,
+        voters: Vec<u64>,
+        serializer: SnapshotSerializer,
+    ) -> Snapshot {
+        let mut s = Snapshot::default();
+        s.mut_metadata().index = index;
+        s.mut_metadata().term = term;
+        s.mut_metadata().mut_conf_state().voters = voters;
+        s.data = serializer.serialize().unwrap();
+        s
     }
 
     fn size_of<T: PbMessage>(m: &Entry) -> u32 {
@@ -1826,15 +1773,6 @@ mod tests {
         s.mut_metadata().term = term;
         s.mut_metadata().mut_conf_state().voters = voters;
         s
-    }
-
-    fn rand_temp_dir() -> PathBuf {
-        let rand_str: String = rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(8)
-            .map(char::from)
-            .collect();
-        temp_dir().join(rand_str)
     }
 
     fn destroy_db(path: &Path) {
@@ -1972,20 +1910,138 @@ mod tests {
                     })
                     .unwrap();
                 rock_store_core.set_confstate(conf_state.clone()).unwrap();
-                // storage.wl().entries = ents.clone();
-                // storage.wl().raft_state.hard_state.commit = idx;
-                // storage.wl().raft_state.hard_state.term = idx;
-                // storage.wl().raft_state.conf_state = conf_state.clone();
-
-                // if wresult.is_err() {
-                //     storage.wl().trigger_snap_unavailable();
-                // }
 
                 let result = rock_store_core.snapshot(windex, 0);
                 if result != wresult {
                     panic!("#{}: want {:?}, got {:?}", i, wresult, result);
                 }
             });
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_rock_storage_create_snapshot_with_data() {
+        let group_id = 1;
+        let nodes = vec![1, 2, 3];
+        let mut conf_state = ConfState::default();
+        conf_state.voters = nodes.clone();
+
+        // let unavailable = Err(RaftError::Store(
+        //     StorageError::SnapshotTemporarilyUnavailable,
+        // ));
+
+        let datas = vec![
+            RockData {
+                key: rand_data(4),
+                value: rand_data(8).into(),
+            },
+            RockData {
+                key: rand_data(4),
+                value: rand_data(8).into(),
+            },
+            RockData {
+                key: rand_data(4),
+                value: rand_data(8).into(),
+            },
+        ];
+
+        let applys = vec![
+            new_rockdata_apply::<()>(group_id, 3, 3, datas[0].clone()),
+            new_rockdata_apply::<()>(group_id, 4, 4, datas[1].clone()),
+            new_rockdata_apply::<()>(group_id, 5, 5, datas[2].clone()),
+        ];
+
+        let ents = applys
+            .iter()
+            .map(|apply| {
+                new_rockdata_entry(apply.entry_index(), apply.entry_term(), &apply.entry_data())
+            })
+            .collect::<Vec<_>>();
+
+        let mut tests = vec![
+            // applys, apply index, snapshot
+            (
+                vec![
+                    new_rockdata_apply(group_id, 3, 3, datas[0].clone()),
+                    new_rockdata_apply(group_id, 4, 4, datas[1].clone()),
+                ],
+                4,
+                Ok(new_snapshot_with_data(
+                    4,
+                    4,
+                    nodes.clone(),
+                    new_snapshot_serializer_from_entries(4, 4, nodes.clone(), datas[0..2].to_vec()),
+                )),
+                0,
+            ),
+            (
+                vec![
+                    new_rockdata_apply(group_id, 3, 3, datas[0].clone()),
+                    new_rockdata_apply(group_id, 4, 4, datas[1].clone()),
+                    new_rockdata_apply(group_id, 5, 5, datas[2].clone()),
+                ],
+                5,
+                // Ok(new_snapshot(5, 5, nodes.clone())),
+                Ok(new_snapshot_with_data(
+                    5,
+                    5,
+                    nodes.clone(),
+                    new_snapshot_serializer_from_entries(5, 5, nodes.clone(), datas.clone()),
+                )),
+                5,
+            ),
+            (
+                vec![
+                    new_rockdata_apply(group_id, 3, 3, datas[0].clone()),
+                    new_rockdata_apply(group_id, 4, 4, datas[1].clone()),
+                    new_rockdata_apply(group_id, 5, 5, datas[2].clone()),
+                ],
+                5,
+                // Ok(new_snapshot(6, 5, nodes)),
+                Ok(new_snapshot_with_data(
+                    6,
+                    5,
+                    nodes.clone(),
+                    new_snapshot_serializer_from_entries(5, 5, nodes.clone(), datas.clone()),
+                )),
+                6,
+            ),
+            // (5, unavailable, 6),
+        ];
+        for (i, (applys, apply_idx, wresult, windex)) in tests.drain(..).enumerate() {
+            let conf_state = conf_state.clone();
+            let ents = ents.clone();
+            db_test_async_env::<_, ()>(|node_id, rock_store, state_machine| {
+                let fut = async move {
+                    let rock_store_core = rock_store
+                        .create_group_store_if_missing(group_id, 1)
+                        .unwrap();
+                    rock_store_core.append_unchecked(&ents);
+                    rock_store_core
+                        .set_hardstate(HardState {
+                            term: apply_idx,
+                            vote: 0,
+                            commit: apply_idx,
+                        })
+                        .unwrap();
+                    rock_store_core.set_confstate(conf_state.clone()).unwrap();
+
+                    state_machine
+                        .apply(group_id, &GroupState::default(), applys.into_iter())
+                        .await;
+                    state_machine
+                        .build_snapshot(group_id, 1, apply_idx, apply_idx, conf_state.clone())
+                        .unwrap();
+
+                    let result = rock_store_core.snapshot(windex, 0);
+                    if result != wresult {
+                        // println!("{:?}", result);
+                        panic!("#{}: want {:?}, got {:?}", i, wresult, result);
+                    }
+                };
+                Box::pin(fut)
+            })
+            .await;
         }
     }
 

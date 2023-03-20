@@ -100,7 +100,7 @@ impl RaftSnapshotWriter for RaftMemStorage {
         unimplemented!()
     } 
 
-    fn install_snapshot_data(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()> {
+    fn install_snapshot(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()> {
         unimplemented!()
     }
 
@@ -113,29 +113,9 @@ impl RaftSnapshotWriter for RaftMemStorage {
 }
 
 impl RaftSnapshotReader for RaftMemStorage {
-    // fn load_snapshot(
-    //     &self,
-    //     _group_id: u64,
-    //     _replica_id: u64,
-    //     request_index: u64,
-    //     to: u64,
-    // ) -> Result<Snapshot> {
-    //     self.core
-    //         .snapshot(request_index, to)
-    //         .map_err(|err| err.into())
-    // }
-
-    fn load_snapshot_data(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>> {
+    fn load_snapshot(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>> {
         unimplemented!()
     }
-
-    // fn snapshot_metadata(
-    //     &self,
-    //     _group_id: u64,
-    //     _replica_id: u64,
-    // ) -> Result<raft::prelude::SnapshotMetadata> {
-    //     Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
-    // }
 }
 
 impl RaftStorage for RaftMemStorage {

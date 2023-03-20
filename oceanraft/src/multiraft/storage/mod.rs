@@ -139,25 +139,13 @@ pub trait RaftStorageWriter {
 }
 
 pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
-    // fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata>;
-
-    // fn load_snapshot(
-    //     &self,
-    //     group_id: u64,
-    //     replica_id: u64,
-    //     request_index: u64,
-    //     to: u64,
-    // ) -> Result<Snapshot>;
-
     // TODO: using serializer trait for adta
-    fn load_snapshot_data(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>>;
+    fn load_snapshot(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>>;
 }
 
 pub trait RaftSnapshotWriter: Clone + Send + Sync + 'static {
-    // fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()>;
-
     // TODO: using serializer trait for adta
-    fn install_snapshot_data(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()>;
+    fn install_snapshot(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()>;
 
     fn build_snapshot(
         &self,

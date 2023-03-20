@@ -134,6 +134,16 @@ impl<RES: WriteResponse> Apply<RES> {
             Self::Membership(membership) => membership.entry.term,
         }
     }
+
+   
+    #[allow(unused)]
+    pub(crate) fn entry_data(&self) -> Vec<u8> {
+        match self {
+            Self::NoOp(noop) => vec![],
+            Self::Normal(normal) => normal.data.clone(),
+            Self::Membership(membership) => membership.entry.data.clone(),
+        }
+    }
 }
 
 pub trait StateMachine<R>: Send + Sync + 'static
