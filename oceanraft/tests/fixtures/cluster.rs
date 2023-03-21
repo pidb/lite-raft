@@ -50,15 +50,15 @@ pub enum FixtureWriteDataError {
     Decode,
 }
 
-#[derive(Clone)]
-pub struct FixtureWriteData(Vec<u8>);
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct FixtureWriteData(pub Vec<u8>);
 
-impl WriteData for FixtureWriteData {
-    type EncodeError = FixtureWriteDataError;
-    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError> {
-        Ok(self.0.clone())
-    }
-}
+// impl WriteData for FixtureWriteData {
+    // type EncodeError = FixtureWriteDataError;
+    // fn encode(&self) -> Result<Vec<u8>, Self::EncodeError> {
+    //     Ok(self.0.clone())
+    // }
+// }
 
 pub struct FixtureCluster {
     pub election_ticks: usize,

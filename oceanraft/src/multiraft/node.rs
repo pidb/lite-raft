@@ -1496,7 +1496,6 @@ mod tests {
 
     use crate::multiraft::replica_cache::ReplicaCache;
     use crate::multiraft::transport::LocalTransport;
-    use crate::multiraft::types::EmptyWriteData;
     use crate::multiraft::Error;
     use crate::multiraft::MultiRaftMessageSenderImpl;
     use crate::prelude::ReplicaDesc;
@@ -1508,7 +1507,7 @@ mod tests {
         LocalTransport<MultiRaftMessageSenderImpl>,
         RaftMemStorage,
         MultiRaftMemoryStorage,
-        EmptyWriteData,
+        (),
         (),
     >;
     fn new_raft_group(

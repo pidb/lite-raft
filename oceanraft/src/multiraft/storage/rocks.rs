@@ -29,6 +29,7 @@ mod storage {
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
+    use crate::prelude::StoreData;
 
     const METADATA_CF_NAME: &'static str = "metadta_cf";
     const LOG_CF_NAME: &'static str = "raft_log_cf";
@@ -1007,6 +1008,7 @@ mod state_machine {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
+    use serde::Deserialize;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::RaftSnapshotReader;
@@ -1019,6 +1021,7 @@ mod state_machine {
     use crate::prelude::ConfState;
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
+    use crate::protos::StoreData;
 
     use super::storage::RockStore;
 
@@ -1054,38 +1057,38 @@ mod state_machine {
     /// RockData defines a general key-value data structure for applications
     /// to store data to rocksdb. key is a string that needs to meet utf8,
     /// and value can be any byte.
-    #[derive(Clone, Default, abomonation_derive::Abomonation)]
-    pub struct RockData {
-        pub key: String,
-        pub value: Vec<u8>,
-    }
+    // #[derive(Clone, Default, abomonation_derive::Abomonation)]
+    // pub struct RockData {
+    //     pub key: String,
+    //     pub value: Vec<u8>,
+    // }
 
-    impl RockData {
-        pub fn decode(bytes: &mut [u8]) -> std::result::Result<Self, RockDataError> {
-            let (rocks_data, remaining) = unsafe {
-                abomonation::decode::<RockData>(bytes).map_or(
-                    Err(RockDataError::Decode("decode failed".to_owned())),
-                    |v| Ok(v),
-                )?
-            };
-            assert_eq!(remaining.len(), 0);
-            Ok(rocks_data.clone())
-        }
-    }
+    // impl RockData {
+    //     pub fn decode(bytes: &mut [u8]) -> std::result::Result<Self, RockDataError> {
+    //         let (rocks_data, remaining) = unsafe {
+    //             abomonation::decode::<RockData>(bytes).map_or(
+    //                 Err(RockDataError::Decode("decode failed".to_owned())),
+    //                 |v| Ok(v),
+    //             )?
+    //         };
+    //         assert_eq!(remaining.len(), 0);
+    //         Ok(rocks_data.clone())
+    //     }
+    // }
 
-    impl WriteData for RockData {
-        type EncodeError = RockDataError;
+    // impl WriteData for RockData {
+    //     type EncodeError = RockDataError;
 
-        fn encode(&self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
-            let mut bytes = Vec::new();
-            unsafe {
-                abomonation::encode(self, &mut bytes)
-                    .map_err(|err| RockDataError::Encode(err.to_string()))?;
-            }
+    //     fn encode(&self) -> std::result::Result<Vec<u8>, Self::EncodeError> {
+    //         let mut bytes = Vec::new();
+    //         unsafe {
+    //             abomonation::encode(self, &mut bytes)
+    //                 .map_err(|err| RockDataError::Encode(err.to_string()))?;
+    //         }
 
-            Ok(bytes)
-        }
-    }
+    //         Ok(bytes)
+    //     }
+    // }
 
     /*****************************************************************************
      * SNAPSHOT
@@ -1450,9 +1453,12 @@ mod state_machine {
                     match apply {
                         Apply::NoOp(_) => unimplemented!(),
                         Apply::Normal(mut normal) => {
-                            let rockdata = RockData::decode(&mut normal.data).unwrap();
-                            let key = format_data_key(group_id, &rockdata.key);
-                            batch.put_cf(&cf, key.as_bytes(), rockdata.value);
+                            let r = flexbuffers::Reader::get_root(normal.data.as_ref()).unwrap();
+                            let data = StoreData::deserialize(r).unwrap();
+                            
+                            // let rockdata = RockData::decode(&mut normal.data).unwrap();
+                            let key = format_data_key(group_id, &data.key);
+                            batch.put_cf(&cf, key.as_bytes(), data.value);
                             applied_index = normal.index;
                             applied_term = normal.term;
                         }
@@ -1529,6 +1535,8 @@ mod state_machine {
     #[cfg(test)]
     mod tests {
 
+        use serde::Serialize;
+
         use crate::multiraft::ApplyNormal;
         use crate::multiraft::GroupState;
 
@@ -1537,13 +1545,15 @@ mod state_machine {
 
         #[test]
         fn test_rocksdata_serialize() {
-            let data1 = RockData {
+            let data1 = StoreData {
                 key: "key".to_owned(),
                 value: "value".as_bytes().to_owned(),
             };
 
-            let mut encoded = data1.encode().unwrap();
-            let data2 = RockData::decode(&mut encoded).unwrap();
+            let mut s = flexbuffers::FlexbufferSerializer::new();
+            data1.serialize(&mut s).unwrap();
+            
+            let data2 = StoreData::deserialize(flexbuffers::Reader::get_root(s.view()).unwrap()).unwrap();
             assert_eq!(data1.key, data2.key);
             assert_eq!(data1.value, data2.value);
         }
@@ -1566,18 +1576,20 @@ mod state_machine {
             let state = GroupState::default();
             let mut applys = vec![];
             for i in 0..n {
-                let data = RockData {
+                let mut s = flexbuffers::FlexbufferSerializer::new();
+
+                StoreData {
                     key: format!("raw_key_{}", i),
                     value: (0..100).map(|_| 1_u8).collect::<Vec<u8>>(),
                 }
-                .encode()
+                .serialize(&mut s)
                 .unwrap();
 
                 applys.push(Apply::<()>::Normal(ApplyNormal {
                     group_id,
                     index: i as u64 + 1,
                     term,
-                    data,
+                    data: s.take_buffer(),
                     context: None,
                     is_conf_change: false,
                     tx: None,
@@ -1638,7 +1650,7 @@ mod state_machine {
 }
 pub use storage::{RockStore, RocksError};
 
-pub use state_machine::{RockData, RockDataError, RockStateMachine, RockStateMachineError};
+pub use state_machine::{RockDataError, RockStateMachine, RockStateMachineError};
 
 #[cfg(test)]
 mod tests {
@@ -1660,11 +1672,11 @@ mod tests {
     use rand::Rng;
     use rocksdb::DBWithThreadMode;
     use rocksdb::MultiThreaded;
+    use serde::Serialize;
 
     use super::state_machine::SnapshotDataSerializer;
     use super::state_machine::SnapshotMetaSerializer;
     use super::state_machine::SnapshotSerializer;
-    use super::RockData;
     use super::RockStateMachine;
     use super::RockStore;
     use crate::multiraft::storage::MultiRaftStorage;
@@ -1680,6 +1692,7 @@ mod tests {
     use crate::prelude::Entry;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
+    use crate::protos::StoreData;
 
     fn rand_temp_dir() -> PathBuf {
         let rand_str: String = rand::thread_rng()
@@ -1717,13 +1730,15 @@ mod tests {
         group_id: u64,
         index: u64,
         term: u64,
-        data: RockData,
+        data: StoreData,
     ) -> Apply<R> {
+        let mut s = flexbuffers::FlexbufferSerializer::new();
+        data.serialize(&mut s).unwrap();
         Apply::Normal(ApplyNormal {
             group_id,
             index,
             term,
-            data: data.encode().unwrap(),
+            data: s.take_buffer(),
             is_conf_change: false,
             context: None,
             tx: None,
@@ -1734,7 +1749,7 @@ mod tests {
         index: u64,
         term: u64,
         voters: Vec<u64>,
-        rockdatas: Vec<RockData>,
+        rockdatas: Vec<StoreData>,
     ) -> SnapshotSerializer {
         let mut data = SnapshotDataSerializer::default();
         for rockdata in rockdatas.into_iter() {
@@ -1931,15 +1946,15 @@ mod tests {
         // ));
 
         let datas = vec![
-            RockData {
+            StoreData {
                 key: rand_data(4),
                 value: rand_data(8).into(),
             },
-            RockData {
+            StoreData {
                 key: rand_data(4),
                 value: rand_data(8).into(),
             },
-            RockData {
+            StoreData {
                 key: rand_data(4),
                 value: rand_data(8).into(),
             },

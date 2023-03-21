@@ -7,6 +7,7 @@ pub use cluster::{
     FixtureCluster,
     MakeGroupPlan,
     MakeGroupPlanStatus,
+    FixtureWriteData,
     quickstart_multi_groups,
     quickstart_group,
 };

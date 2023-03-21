@@ -2,6 +2,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use oceanraft::multiraft::ApplyNormal;
+use serde::Deserialize;
+
+use super::cluster::FixtureWriteData;
 
 
 #[derive(Default)]
@@ -36,7 +39,11 @@ impl WriteChecker {
 
     fn fill_applys(&mut self, applys: &Vec<ApplyNormal<()>>) {
         for apply in applys.iter() {
-            self.applys.insert(apply.group_id, apply.data.clone());
+            // Fuck ugly, we need attach WriteData to Apply
+            let r = flexbuffers::Reader::get_root(apply.data.as_ref()).unwrap();
+            let wd = FixtureWriteData::deserialize(r).unwrap();
+
+            self.applys.insert(apply.group_id, wd.0);
         }
     }
 }

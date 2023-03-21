@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_group;
 use crate::fixtures::FixtureCluster;
+use crate::fixtures::FixtureWriteData;
 
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 struct KVCommand {
@@ -53,7 +54,10 @@ async fn test_group_read_index() {
     .unwrap();
 
     for event in events {
-        let kv_cmd: KVCommand = serde_json::from_slice(&event.data).unwrap();
+        // FIXME: Fuck ugly, use trait in Apply.
+        let r = flexbuffers::Reader::get_root(event.data.as_ref()).unwrap();
+        let wd = FixtureWriteData::deserialize(r).unwrap();
+        let kv_cmd: KVCommand = serde_json::from_slice(&wd.0).unwrap();
         applied_kvs.insert(kv_cmd.key.clone(), kv_cmd);
 
         // TODO: use done method

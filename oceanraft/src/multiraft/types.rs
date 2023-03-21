@@ -1,9 +1,17 @@
-use std::error::Error;
 use std::fmt::Debug;
 
-pub trait WriteData: Clone + Send + Sync + 'static {
-    type EncodeError: Error + Send + Sync;
-    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError>;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
+
+pub trait WriteData: Clone + Send + Sync + Serialize + DeserializeOwned + 'static {
+    // type EncodeError: Error + Send + Sync;
+    // fn encode(&self) -> Result<Vec<u8>, Self::EncodeError>;
+}
+
+impl<T> WriteData for T where
+    T: Clone + Send + Sync + Serialize + for<'a> Deserialize<'a> + 'static
+{
 }
 
 /// Only use for tests
@@ -15,15 +23,11 @@ pub(crate) enum EmptyWriteDataError {
 }
 
 /// Only use for tests
-#[derive(Clone)]
-pub(crate) struct EmptyWriteData;
+// #[derive(Clone, serde::Serialize, serde::Deserialize)]
+// pub(crate) struct EmptyWriteData;
 
-impl WriteData for EmptyWriteData {
-    type EncodeError = EmptyWriteDataError;
-    fn encode(&self) -> Result<Vec<u8>, Self::EncodeError> {
-        Ok(vec![])
-    }
-}
+// impl WriteData for EmptyWriteData {
+// }
 
 pub trait WriteResponse: Debug + Clone + Send + Sync + 'static {}
 

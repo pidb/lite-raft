@@ -32,7 +32,7 @@ abomonation = { version = "0.7.3" }
 abomonation_derive = { version = "0.5.0" }
 protobuf = {version = "2" }
 rocksdb = {version = "0.20", optional = true }
-
+flexbuffers = { version = "2.0.0" }
 
 
 [dev-dependencies]

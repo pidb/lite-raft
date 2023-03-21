@@ -17,6 +17,7 @@ use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
+
 use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -623,11 +624,14 @@ where
         }
 
         let term = self.term();
+        let mut s = flexbuffers::FlexbufferSerializer::new();
+        write_request.data.serialize(&mut s).unwrap();
+        let write_data = s.take_buffer();
 
-        let write_data = match write_request.data.encode() {
-            Err(err) => todo!(),
-            Ok(data) => data,
-        };
+        // let write_data = match write_request.data.encode() {
+        //     Err(err) => todo!(),
+        //     Ok(data) => data,
+        // };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
