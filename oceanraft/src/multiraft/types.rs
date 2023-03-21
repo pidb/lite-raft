@@ -3,7 +3,9 @@ use std::fmt::Debug;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-pub trait WriteData: Default + Clone + Send + Sync + Serialize + DeserializeOwned + 'static {
+pub trait WriteData:
+    Default + Clone + Send + Sync + Serialize + DeserializeOwned + 'static
+{
     // type EncodeError: Error + Send + Sync;
     // fn encode(&self) -> Result<Vec<u8>, Self::EncodeError>;
 }
@@ -20,13 +22,6 @@ pub(crate) enum EmptyWriteDataError {
     #[error("encode")]
     Encode,
 }
-
-/// Only use for tests
-// #[derive(Clone, serde::Serialize, serde::Deserialize)]
-// pub(crate) struct EmptyWriteData;
-
-// impl WriteData for EmptyWriteData {
-// }
 
 pub trait WriteResponse: Debug + Clone + Send + Sync + 'static {}
 

@@ -131,7 +131,7 @@ where
     W: WriteData,
     R: WriteResponse,
 {
-    pub(crate) fn entry_index(&self) -> u64 {
+    pub(crate) fn get_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_index,
             Self::Normal(normal) => normal.index,
@@ -140,7 +140,7 @@ where
     }
 
     #[allow(unused)]
-    pub(crate) fn entry_term(&self) -> u64 {
+    pub(crate) fn get_term(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_term,
             Self::Normal(normal) => normal.term,

@@ -110,8 +110,8 @@ where
             ctx: ApplyContext {
                 rsm,
                 commit_tx,
+                _m1: PhantomData,
                 _m2: PhantomData,
-                _m3: PhantomData,
             },
         }
     }
@@ -376,8 +376,8 @@ where
 {
     rsm: RSM,
     commit_tx: UnboundedSender<ApplyCommitMessage>,
-    _m2: PhantomData<W>,
-    _m3: PhantomData<R>,
+    _m1: PhantomData<W>,
+    _m2: PhantomData<R>,
 }
 
 pub struct ApplyDelegate<W, R, RSM>
@@ -608,7 +608,7 @@ where
         (apply_state.applied_index, apply_state.applied_term) = maybe_failed_iter
             .and_then(|mut iter| iter.next())
             .map_or((apply.commit_index, apply.commit_term), |next| {
-                let index = next.entry_index();
+                let index = next.get_index();
                 assert_ne!(index, 0);
                 if index == 1 {
                     (0, 0)

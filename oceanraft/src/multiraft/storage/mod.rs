@@ -1,5 +1,4 @@
 use futures::Future;
-use prost::encoding::group;
 use raft::Error as RaftError;
 use raft::StorageError as RaftStorageError;
 use raft::StorageError;
@@ -9,7 +8,6 @@ use crate::prelude::Entry;
 use crate::prelude::HardState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
-use crate::prelude::SnapshotMetadata;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

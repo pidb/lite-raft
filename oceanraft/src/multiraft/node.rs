@@ -208,13 +208,13 @@ impl NodeManager {
     }
 }
 
-pub struct NodeActor<WD, RES>
+pub struct NodeActor<W, R>
 where
-    WD: WriteData,
-    RES: WriteResponse,
+    W: WriteData,
+    R: WriteResponse,
 {
     // TODO: queue should have one per-group.
-    pub propose_tx: Sender<ProposeMessage<WD, RES>>,
+    pub propose_tx: Sender<ProposeMessage<W, R>>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(
         MultiRaftMessage,
@@ -225,10 +225,10 @@ where
     apply: ApplyActor,
 }
 
-impl<WD, RES> NodeActor<WD, RES>
+impl<W, R> NodeActor<W, R>
 where
-    WD: WriteData,
-    RES: WriteResponse,
+    W: WriteData,
+    R: WriteResponse,
 {
     pub fn spawn<TR, RS, MRS, RSM, TK>(
         cfg: &Config,
@@ -244,7 +244,7 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<WD, RES>,
+        RSM: StateMachine<W, R>,
         TK: Ticker,
     {
         let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
@@ -267,7 +267,7 @@ where
             task_group,
         );
 
-        let worker = NodeWorker::<TR, RS, MRS, WD, RES>::new(
+        let worker = NodeWorker::<TR, RS, MRS, W, R>::new(
             cfg,
             transport,
             storage,
@@ -297,13 +297,13 @@ where
     }
 }
 
-pub struct NodeWorker<TR, RS, MRS, WD, RES>
+pub struct NodeWorker<TR, RS, MRS, W, R>
 where
     TR: Transport,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    WD: WriteData,
-    RES: WriteResponse,
+    W: WriteData,
+    R: WriteResponse,
 {
     cfg: Config,
     node_id: u64,
@@ -311,7 +311,7 @@ where
     transport: TR,
     node_manager: NodeManager,
     replica_cache: ReplicaCache<RS, MRS>,
-    groups: HashMap<u64, RaftGroup<RS, RES>>,
+    groups: HashMap<u64, RaftGroup<RS, R>>,
     active_groups: HashSet<u64>,
     pending_responses: ResponseCallbackQueue,
     event_chan: EventChannel,
@@ -319,11 +319,11 @@ where
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    propose_rx: Receiver<ProposeMessage<WD, RES>>,
+    propose_rx: Receiver<ProposeMessage<W, R>>,
     manage_rx: Receiver<ManageMessage>,
     campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
-    apply_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
+    apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
     apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
     shared_states: GroupStates,
 }
