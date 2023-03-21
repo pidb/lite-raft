@@ -244,7 +244,7 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<RES>,
+        RSM: StateMachine<WD, RES>,
         TK: Ticker,
     {
         let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);

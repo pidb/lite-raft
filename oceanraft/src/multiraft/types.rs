@@ -1,16 +1,15 @@
 use std::fmt::Debug;
 
 use serde::de::DeserializeOwned;
-use serde::Deserialize;
 use serde::Serialize;
 
-pub trait WriteData: Clone + Send + Sync + Serialize + DeserializeOwned + 'static {
+pub trait WriteData: Default + Clone + Send + Sync + Serialize + DeserializeOwned + 'static {
     // type EncodeError: Error + Send + Sync;
     // fn encode(&self) -> Result<Vec<u8>, Self::EncodeError>;
 }
 
 impl<T> WriteData for T where
-    T: Clone + Send + Sync + Serialize + for<'a> Deserialize<'a> + 'static
+    T: Default + Clone + Send + Sync + Serialize + DeserializeOwned + 'static
 {
 }
 

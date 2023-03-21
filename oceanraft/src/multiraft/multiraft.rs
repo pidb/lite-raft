@@ -117,7 +117,7 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<RES>,
+        RSM: StateMachine<WD, RES>,
         RES: WriteResponse,
         TK: Ticker,
     {

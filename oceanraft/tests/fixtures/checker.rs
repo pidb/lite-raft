@@ -32,18 +32,15 @@ impl WriteChecker {
        self.writes.insert(group_id, data);
     }
 
-    pub fn check(&mut self, applys: &Vec<ApplyNormal<()>>) {
+    pub fn check(&mut self, applys: &Vec<ApplyNormal<FixtureWriteData, ()>>) {
         self.fill_applys(applys);
         assert_eq!(self.writes, self.applys)
     }
 
-    fn fill_applys(&mut self, applys: &Vec<ApplyNormal<()>>) {
+    fn fill_applys(&mut self, applys: &Vec<ApplyNormal<FixtureWriteData, ()>>) {
         for apply in applys.iter() {
             // Fuck ugly, we need attach WriteData to Apply
-            let r = flexbuffers::Reader::get_root(apply.data.as_ref()).unwrap();
-            let wd = FixtureWriteData::deserialize(r).unwrap();
-
-            self.applys.insert(apply.group_id, wd.0);
+            self.applys.insert(apply.group_id, apply.data.0.clone());
         }
     }
 }

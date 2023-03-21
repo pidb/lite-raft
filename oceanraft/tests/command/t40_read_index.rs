@@ -55,9 +55,9 @@ async fn test_group_read_index() {
 
     for event in events {
         // FIXME: Fuck ugly, use trait in Apply.
-        let r = flexbuffers::Reader::get_root(event.data.as_ref()).unwrap();
-        let wd = FixtureWriteData::deserialize(r).unwrap();
-        let kv_cmd: KVCommand = serde_json::from_slice(&wd.0).unwrap();
+        // let r = flexbuffers::Reader::get_root(event.data.as_ref()).unwrap();
+        // let wd = FixtureWriteData::deserialize(r).unwrap();
+        let kv_cmd: KVCommand = serde_json::from_slice(&event.data.0).unwrap();
         applied_kvs.insert(kv_cmd.key.clone(), kv_cmd);
 
         // TODO: use done method

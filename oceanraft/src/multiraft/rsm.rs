@@ -21,6 +21,7 @@ use super::error::Error;
 use super::msg::ApplyCommitMessage;
 use super::msg::CommitMembership;
 use super::GroupState;
+use super::WriteData;
 
 #[derive(Debug)]
 pub struct ApplyNoOp {
@@ -30,15 +31,19 @@ pub struct ApplyNoOp {
 }
 
 #[derive(Debug)]
-pub struct ApplyNormal<RES: WriteResponse> {
+pub struct ApplyNormal<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
     pub group_id: u64,
     // pub entry: Entry,
     pub index: u64,
     pub term: u64,
-    pub data: Vec<u8>,
+    pub data: W,
     pub context: Option<Vec<u8>>,
     pub is_conf_change: bool,
-    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
+    pub tx: Option<oneshot::Sender<Result<R, Error>>>,
 }
 
 #[derive(Debug)]
@@ -111,13 +116,21 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
 }
 
 #[derive(Debug)]
-pub enum Apply<RES: WriteResponse> {
+pub enum Apply<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
     NoOp(ApplyNoOp),
-    Normal(ApplyNormal<RES>),
-    Membership(ApplyMembership<RES>),
+    Normal(ApplyNormal<W, R>),
+    Membership(ApplyMembership<R>),
 }
 
-impl<RES: WriteResponse> Apply<RES> {
+impl<W, R> Apply<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
     pub(crate) fn entry_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.entry_index,
@@ -135,22 +148,22 @@ impl<RES: WriteResponse> Apply<RES> {
         }
     }
 
-   
     #[allow(unused)]
-    pub(crate) fn entry_data(&self) -> Vec<u8> {
+    pub(crate) fn get_data(&self) -> W {
         match self {
-            Self::NoOp(noop) => vec![],
+            Self::NoOp(noop) => W::default(),
             Self::Normal(normal) => normal.data.clone(),
-            Self::Membership(membership) => membership.entry.data.clone(),
+            Self::Membership(membership) => unimplemented!(),
         }
     }
 }
 
-pub trait StateMachine<R>: Send + Sync + 'static
+pub trait StateMachine<W, R>: Send + Sync + 'static
 where
+    W: WriteData,
     R: WriteResponse,
 {
-    type ApplyFuture<'life0>: Send + Future<Output = Option<IntoIter<Apply<R>>>>
+    type ApplyFuture<'life0>: Send + Future<Output = Option<IntoIter<Apply<W, R>>>>
     where
         Self: 'life0;
 
@@ -158,6 +171,6 @@ where
         &self,
         group_id: u64,
         state: &GroupState,
-        iter: IntoIter<Apply<R>>,
+        iter: IntoIter<Apply<W, R>>,
     ) -> Self::ApplyFuture<'_>;
 }

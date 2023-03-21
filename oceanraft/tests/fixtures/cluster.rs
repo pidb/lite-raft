@@ -50,7 +50,7 @@ pub enum FixtureWriteDataError {
     Decode,
 }
 
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 pub struct FixtureWriteData(pub Vec<u8>);
 
 // impl WriteData for FixtureWriteData {
@@ -63,7 +63,7 @@ pub struct FixtureWriteData(pub Vec<u8>);
 pub struct FixtureCluster {
     pub election_ticks: usize,
     pub nodes: Vec<Arc<MultiRaft<FixtureWriteData, ()>>>,
-    pub apply_events: Vec<Option<Receiver<Vec<Apply<()>>>>>,
+    pub apply_events: Vec<Option<Receiver<Vec<Apply<FixtureWriteData, ()>>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -271,7 +271,7 @@ impl FixtureCluster {
     //     self.events[to_index(node_id)].as_mut().unwrap()
     // }
 
-    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<()>>> {
+    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<FixtureWriteData, ()>>> {
         self.apply_events[to_index(node_id)].as_mut().unwrap()
     }
 
@@ -370,10 +370,10 @@ impl FixtureCluster {
 
     // Wait normal apply.
     pub async fn wait_for_command_apply(
-        rx: &mut Receiver<Vec<Apply<()>>>,
+        rx: &mut Receiver<Vec<Apply<FixtureWriteData, ()>>>,
         timeout: Duration,
         size: usize,
-    ) -> Result<Vec<ApplyNormal<()>>, String> {
+    ) -> Result<Vec<ApplyNormal<FixtureWriteData, ()>>, String> {
         let mut results_len = 0;
         let wait_loop_fut = async {
             let mut results = vec![];

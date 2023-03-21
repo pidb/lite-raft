@@ -6,25 +6,27 @@ use oceanraft::multiraft::GroupState;
 use oceanraft::multiraft::StateMachine;
 use tokio::sync::mpsc::Sender;
 
+use super::FixtureWriteData;
+
 pub struct FixtureStateMachine {
-    tx: Sender<Vec<Apply<()>>>,
+    tx: Sender<Vec<Apply<FixtureWriteData, ()>>>,
 }
 
 impl FixtureStateMachine {
-    pub fn new(tx: Sender<Vec<Apply<()>>>) -> Self {
+    pub fn new(tx: Sender<Vec<Apply<FixtureWriteData, ()>>>) -> Self {
         Self { tx }
     }
 }
 
-impl StateMachine<()> for FixtureStateMachine {
-    type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<()>>>> + 'life0
+impl StateMachine<FixtureWriteData, ()> for FixtureStateMachine {
+    type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<FixtureWriteData, ()>>>> + 'life0
     where
         Self: 'life0;
     fn apply(
         &self,
         _group_id: u64,
         _state: &GroupState,
-        iter: IntoIter<Apply<()>>,
+        iter: IntoIter<Apply<FixtureWriteData, ()>>,
     ) -> Self::ApplyFuture<'_> {
         async move {
             // self.tx.send(iter.collect()).await.unwrap();

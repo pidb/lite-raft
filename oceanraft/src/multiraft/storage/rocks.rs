@@ -1428,11 +1428,11 @@ mod state_machine {
         }
     }
 
-    impl<R> StateMachine<R> for RockStateMachine<R>
+    impl<R> StateMachine<StoreData, R> for RockStateMachine<R>
     where
         R: WriteResponse,
     {
-        type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<R>>>> + 'life0
+        type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<StoreData, R>>>> + 'life0
     where
         Self: 'life0;
 
@@ -1440,7 +1440,7 @@ mod state_machine {
             &self,
             group_id: u64,
             _: &crate::multiraft::GroupState,
-            iter: std::vec::IntoIter<crate::multiraft::Apply<R>>,
+            iter: std::vec::IntoIter<crate::multiraft::Apply<StoreData, R>>,
         ) -> Self::ApplyFuture<'_> {
             async move {
                 let cf = self.get_data_cf().unwrap();
@@ -1453,12 +1453,12 @@ mod state_machine {
                     match apply {
                         Apply::NoOp(_) => unimplemented!(),
                         Apply::Normal(mut normal) => {
-                            let r = flexbuffers::Reader::get_root(normal.data.as_ref()).unwrap();
-                            let data = StoreData::deserialize(r).unwrap();
+                            // let r = flexbuffers::Reader::get_root(normal.data.as_ref()).unwrap();
+                            // let data = StoreData::deserialize(r).unwrap();
                             
                             // let rockdata = RockData::decode(&mut normal.data).unwrap();
-                            let key = format_data_key(group_id, &data.key);
-                            batch.put_cf(&cf, key.as_bytes(), data.value);
+                            let key = format_data_key(group_id, &normal.data.key);
+                            batch.put_cf(&cf, key.as_bytes(), normal.data.value);
                             applied_index = normal.index;
                             applied_term = normal.term;
                         }
@@ -1576,20 +1576,20 @@ mod state_machine {
             let state = GroupState::default();
             let mut applys = vec![];
             for i in 0..n {
-                let mut s = flexbuffers::FlexbufferSerializer::new();
+                // let mut s = flexbuffers::FlexbufferSerializer::new();
 
-                StoreData {
-                    key: format!("raw_key_{}", i),
-                    value: (0..100).map(|_| 1_u8).collect::<Vec<u8>>(),
-                }
-                .serialize(&mut s)
-                .unwrap();
+               
+                // .serialize(&mut s)
+                // .unwrap();
 
-                applys.push(Apply::<()>::Normal(ApplyNormal {
+                applys.push(Apply::<StoreData,()>::Normal(ApplyNormal {
                     group_id,
                     index: i as u64 + 1,
                     term,
-                    data: s.take_buffer(),
+                    data:  StoreData {
+                        key: format!("raw_key_{}", i),
+                        value: (0..100).map(|_| 1_u8).collect::<Vec<u8>>(),
+                    },
                     context: None,
                     is_conf_change: false,
                     tx: None,
@@ -1731,14 +1731,14 @@ mod tests {
         index: u64,
         term: u64,
         data: StoreData,
-    ) -> Apply<R> {
+    ) -> Apply<StoreData, R> {
         let mut s = flexbuffers::FlexbufferSerializer::new();
         data.serialize(&mut s).unwrap();
         Apply::Normal(ApplyNormal {
             group_id,
             index,
             term,
-            data: s.take_buffer(),
+            data,
             is_conf_change: false,
             context: None,
             tx: None,
@@ -1969,7 +1969,9 @@ mod tests {
         let ents = applys
             .iter()
             .map(|apply| {
-                new_rockdata_entry(apply.entry_index(), apply.entry_term(), &apply.entry_data())
+                let mut s = flexbuffers::FlexbufferSerializer::new();
+                let w = apply.get_data().serialize(&mut s).unwrap();
+                new_rockdata_entry(apply.entry_index(), apply.entry_term(), &s.take_buffer())
             })
             .collect::<Vec<_>>();
 
