@@ -583,6 +583,8 @@ where
 
                     Apply::Membership(ApplyMembership {
                         group_id,
+                        index: entry_index,
+                        term: entry_term,
                         entry,
                         tx,
                         commit_tx: ctx.commit_tx.clone(),

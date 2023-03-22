@@ -1,15 +1,24 @@
 use std::time::Duration;
 
+use oceanraft::multiraft::storage::RockStateMachine;
+use oceanraft::multiraft::storage::RockStore;
+use oceanraft::multiraft::storage::RockStoreCore;
+use oceanraft::util::TaskGroup;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
-use oceanraft::util::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
+use crate::fixtures::new_rocks_state_machines;
+use crate::fixtures::new_rocks_storeages;
+use crate::fixtures::rand_temp_dir;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::RockCluster;
+use crate::fixtures::RockStorageEnv;
 
 async fn check_replica_should_elected(
-    cluster: &mut FixtureCluster,
+    cluster: &mut RockCluster<()>,
     node_id: u64,
     group_id: u64,
     // replica_desc: ReplicaDesc,
@@ -28,11 +37,27 @@ async fn check_replica_should_elected(
     assert_eq!(election.replica_id, replica_desc.replica_id);
 }
 
-#[async_entry::test(flavor = "multi_thread", init = "init_default_ut_tracing()", tracing_span = "debug")]
+#[async_entry::test(
+    flavor = "multi_thread",
+    init = "init_default_ut_tracing()",
+    tracing_span = "debug"
+)]
 async fn test_initial_leader_elect() {
     for i in 0..3 {
+        let rockstore_env = RockStorageEnv::new(3);
+
+        // let nodes = 3;
+
         let task_group = TaskGroup::new();
-        let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
+        let mut cluster = ClusterBuilder::new(3)
+            .election_ticks(2)
+            .task_group(task_group.clone())
+            .state_machines(rockstore_env.state_machines.clone())
+            .storages(rockstore_env.storages.clone())
+            .build()
+            .await;
+
+        // let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
         // cluster.start();
         let mut plan = MakeGroupPlan {
             group_id: 1,
@@ -61,5 +86,6 @@ async fn test_initial_leader_elect() {
         {
             panic!("wait cluster taks stop error")
         }
+        rockstore_env.destory();
     }
 }

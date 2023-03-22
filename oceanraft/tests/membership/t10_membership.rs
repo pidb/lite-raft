@@ -13,11 +13,14 @@ use tokio::time::timeout_at;
 use tokio::time::Instant;
 
 use crate::fixtures::init_default_ut_tracing;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::RockCluster;
+use crate::fixtures::RockStorageEnv;
 
 async fn check_cc<F>(
-    cluster: &mut FixtureCluster,
+    cluster: &mut RockCluster<()>,
     node_id: u64,
     wait_node_id: u64,
     timeout: Duration,
@@ -37,7 +40,6 @@ async fn check_cc<F>(
     check(&event);
     event.done().await.unwrap();
     // TODO: as method called
-    println!("event tx is none? = {}", event.tx.is_none());
     event.tx.map(|tx| tx.send(Ok(())));
 }
 
@@ -53,9 +55,18 @@ async fn test_single_step() {
     //     // FIXME: use sync wait
     //     // task_group.joinner().awa`it;
     // }
-
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
     // cluster.start();
+
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .state_machines(rockstore_env.state_machines.clone())
+        .storages(rockstore_env.storages.clone())
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;
@@ -88,6 +99,7 @@ async fn test_single_step() {
             };
             node.membership_change(req.clone()).await.unwrap();
         }
+
         done_tx.send(()).unwrap();
     });
 
@@ -137,6 +149,8 @@ async fn test_single_step() {
         Err(_) => panic!("timeouted for wait all membership change complte"),
         Ok(_) => {}
     }
+
+    rockstore_env.destory();
 }
 
 #[async_entry::test(
@@ -152,8 +166,18 @@ async fn test_joint_consensus() {
     //     // task_group.joinner().awa`it;
     // }
 
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+
     // cluster.start();
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .state_machines(rockstore_env.state_machines)
+        .storages(rockstore_env.storages)
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;
@@ -233,8 +257,18 @@ async fn test_joint_consensus() {
 )]
 async fn test_remove() {
     let task_group = TaskGroup::new();
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
     // cluster.start();
+
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .state_machines(rockstore_env.state_machines)
+        .storages(rockstore_env.storages)
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;

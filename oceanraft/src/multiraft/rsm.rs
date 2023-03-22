@@ -49,6 +49,8 @@ where
 #[derive(Debug)]
 pub struct ApplyMembership<RES: WriteResponse> {
     pub group_id: u64,
+    pub index: u64,
+    pub term: u64,
     pub entry: Entry,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
     pub(crate) commit_tx: UnboundedSender<ApplyCommitMessage>,

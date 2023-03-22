@@ -146,7 +146,7 @@ mod storage {
      * RockStore Core
      *****************************************************************************/
     #[derive(Clone)]
-    pub(crate) struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
+    pub struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
         group_id: u64,
         replica_id: u64,
         db: Arc<MDB>,
@@ -746,6 +746,7 @@ mod storage {
         fn install_snapshot(&self, mut snapshot: Snapshot) -> Result<()> {
             let mut snap_meta = snapshot.metadata.as_ref().expect("unreachable").clone();
             if self.first_index()? > snap_meta.index {
+                println!("first index = {}, snap_meta.index = {}", self.first_index()?, snap_meta.index);
                 return Err(Error::SnapshotOutOfDate);
             }
 
@@ -1006,6 +1007,7 @@ mod state_machine {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
+    use tokio::sync::mpsc::Sender;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::RaftSnapshotReader;
@@ -1201,6 +1203,7 @@ mod state_machine {
     pub struct RockStateMachine<R: WriteResponse> {
         node_id: u64,
         db: Arc<DBWithThreadMode<MultiThreaded>>,
+        
         _m: PhantomData<R>,
     }
 
@@ -1399,25 +1402,33 @@ mod state_machine {
             iter: std::vec::IntoIter<crate::multiraft::Apply<StoreData, R>>,
         ) -> Self::ApplyFuture<'_> {
             async move {
-                let cf = self.get_data_cf().unwrap();
                 let mut batch = WriteBatch::default();
-
                 let mut applied_index = 0;
                 let mut applied_term = 0;
 
                 for apply in iter {
                     match apply {
-                        Apply::NoOp(_) => unimplemented!(),
-                        Apply::Normal(mut normal) => {
+                        Apply::NoOp(noop) => {
+                            applied_index = noop.entry_index;
+                            applied_term = noop.entry_term;
+                        },
+                        Apply::Normal(normal) => {
+                            let cf = self.get_data_cf().unwrap();
                             let key = format_data_key(group_id, &normal.data.key);
                             batch.put_cf(&cf, key.as_bytes(), normal.data.value);
                             applied_index = normal.index;
                             applied_term = normal.term;
                         }
-                        Apply::Membership(changes) => unimplemented!(),
+                        Apply::Membership(changes) => {
+
+                            changes.done().await.unwrap();
+                            applied_index = changes.index;
+                            applied_term = changes.term;
+                        },
                     }
                 }
 
+                let cf = self.get_data_cf().unwrap();
                 batch.put_cf(
                     &cf,
                     format_applied_index_key(group_id),
@@ -1601,7 +1612,7 @@ mod state_machine {
         // }
     }
 }
-pub use storage::{RockStore, RocksError};
+pub use storage::{RockStore, RockStoreCore, RocksError};
 
 pub use state_machine::{RockDataError, RockStateMachine, RockStateMachineError};
 
