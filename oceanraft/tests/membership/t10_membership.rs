@@ -62,7 +62,7 @@ async fn test_single_step() {
     let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .state_machines(rockstore_env.state_machines.clone())
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
         .build()
@@ -116,10 +116,10 @@ async fn test_single_step() {
 
     // check leader should recv all apply events.
     for i in 1..5 {
-        let check_fn = |event: &ApplyMembership<()>| {
-            let mut cc = ConfChange::default();
-            cc.merge_from_bytes(event.entry.get_data()).unwrap();
-
+        let check_fn = |apply: &ApplyMembership<()>| {
+            // let mut cc = ConfChange::default();
+            // cc.merge_from_bytes(event.entry.get_data()).unwrap();
+            let cc = &apply.conf_change.changes[0];
             assert_eq!(
                 cc.node_id,
                 i + 1,
@@ -173,8 +173,8 @@ async fn test_joint_consensus() {
     let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .state_machines(rockstore_env.state_machines)
-        .storages(rockstore_env.storages)
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
         .build()
         .await;
@@ -212,10 +212,9 @@ async fn test_joint_consensus() {
         })
         .unwrap();
 
-    let check_fn = |event: &ApplyMembership<()>| {
-        let mut cc = ConfChangeV2::default();
-        cc.merge_from_bytes(&event.entry.data).unwrap();
-        let changes = cc
+    let check_fn = |apply: &ApplyMembership<()>| {
+        let changes = apply
+            .conf_change
             .changes
             .iter()
             .map(|change| (change.node_id, change.get_change_type()))
@@ -264,8 +263,8 @@ async fn test_remove() {
     let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .state_machines(rockstore_env.state_machines)
-        .storages(rockstore_env.storages)
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
         .build()
         .await;
@@ -318,10 +317,9 @@ async fn test_remove() {
         done_tx.send(()).unwrap();
     });
 
-    let check_fn = |event: &ApplyMembership<()>| {
-        let mut cc = ConfChangeV2::default();
-        cc.merge_from_bytes(&event.entry.data).unwrap();
-        let changes = cc
+    let check_fn = |apply: &ApplyMembership<()>| {
+        let changes = apply
+            .conf_change
             .changes
             .iter()
             .map(|change| (change.node_id, change.get_change_type()))

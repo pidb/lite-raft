@@ -1,9 +1,12 @@
 use std::time::Duration;
 
+use oceanraft::prelude::StoreData;
+
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_group;
 use crate::fixtures::quickstart_multi_groups;
-use crate::fixtures::FixtureCluster;
+use crate::fixtures::rand_string;
+use crate::fixtures::RockStorageEnv;
 use crate::fixtures::WriteChecker;
 
 #[async_entry::test(
@@ -12,18 +15,19 @@ use crate::fixtures::WriteChecker;
     tracing_span = "debug"
 )]
 async fn test_group_write() {
-    let node_nums = 3;
+    let nodes = 3;
     let command_nums = 10;
-    let (_, mut cluster) = quickstart_group(node_nums).await;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
     let group_id = 1;
     for j in 0..command_nums {
-        let command_id = (j + 1) as u64;
-        let data = format!("{}: data on group_id = {}", command_id, group_id)
-            .as_bytes()
-            .to_vec();
+        let data = StoreData {
+            key: rand_string(4),
+            value: rand_string(8).as_bytes().to_vec(),
+        };
 
         let rx = cluster.write_command(1, group_id, data.clone());
         recvs.push(rx);
@@ -36,13 +40,10 @@ async fn test_group_write() {
     //     // tokio::time::sleep(Duration::from_millis(1)).await;
     // }
 
-    let events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_apply_event_rx(1),
-        Duration::from_millis(1000),
-        command_nums as usize,
-    )
-    .await
-    .unwrap();
+    let events = cluster
+        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .await
+        .unwrap();
 
     write_checker.check(&events);
 
@@ -55,6 +56,7 @@ async fn test_group_write() {
         assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
+    rockstore_env.destory()
     // cluster.stop().await;
 }
 
@@ -64,20 +66,23 @@ async fn test_group_write() {
     tracing_span = "debug"
 )]
 async fn test_multigroup_write() {
-    let group_nums = 3;
-    let node_nums = 3;
+    let groups = 3;
+    let nodes = 3;
     let command_nums = 10;
-    let (_, mut cluster) = quickstart_multi_groups(node_nums, group_nums).await;
+
+    let rockstore_env = RockStorageEnv::new(nodes);
+
+    let (_, mut cluster) = quickstart_multi_groups(&rockstore_env, nodes, groups).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
-    for i in 0..group_nums {
+    for i in 0..groups {
         let group_id = (i + 1) as u64;
         for j in 0..command_nums {
-            let command_id = (j + 1) as u64;
-            let data = format!("{}: data on group_id = {}", command_id, group_id)
-                .as_bytes()
-                .to_vec();
+            let data = StoreData {
+                key: rand_string(4),
+                value: rand_string(8).as_bytes().to_vec(),
+            };
 
             let rx = cluster.write_command(1, group_id, data.clone());
             recvs.push(rx);
@@ -86,13 +91,14 @@ async fn test_multigroup_write() {
         }
     }
 
-    let events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_apply_event_rx(1),
-        Duration::from_millis(5000),
-        (group_nums * command_nums) as usize,
-    )
-    .await
-    .unwrap();
+    let events = cluster
+        .wait_for_commands_apply(
+            1,
+            (groups * command_nums) as usize,
+            Duration::from_millis(5000),
+        )
+        .await
+        .unwrap();
 
     write_checker.check(&events);
 
@@ -104,6 +110,8 @@ async fn test_multigroup_write() {
     for rx in recvs {
         assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
+
+    rockstore_env.destory();
 
     // cluster.stop().await;
 }

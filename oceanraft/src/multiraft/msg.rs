@@ -131,15 +131,15 @@ pub struct ApplyResultMessage {
 /// from ConfChange. If ConfChangeV2 is used, changes contains multiple
 /// requests, otherwise changes contains only one request.
 #[derive(Debug)]
-pub(crate) struct CommitMembership {
+pub struct CommitMembership {
     #[allow(unused)]
-    pub(crate) entry_index: u64,
-    pub(crate) conf_change: ConfChangeV2,
-    pub(crate) change_request: MembershipChangeData,
+    pub entry_index: u64,
+    pub conf_change: ConfChangeV2,
+    pub change_request: MembershipChangeData,
 }
 
 #[derive(Debug)]
-pub(crate) enum ApplyCommitMessage {
+pub enum ApplyCommitMessage {
     None,
     Membership((CommitMembership, oneshot::Sender<Result<(), Error>>)),
 }

@@ -1,10 +1,12 @@
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::WriteError;
+use oceanraft::prelude::StoreData;
 use oceanraft::util::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::FixtureCluster;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::RockStorageEnv;
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
@@ -14,8 +16,16 @@ use crate::fixtures::MakeGroupPlan;
     tracing_span = "debug"
 )]
 async fn test_no_leader() {
-    let mut cluster = FixtureCluster::make(3, TaskGroup::new()).await;
-    // cluster.start();
+    let nodes = 3;
+    let task_group = TaskGroup::new();
+    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .task_group(task_group.clone())
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
+        .build()
+        .await;
 
     let mut plan = MakeGroupPlan {
         group_id: 1,
@@ -27,14 +37,17 @@ async fn test_no_leader() {
     // all replicas should no elected.
     for i in 0..3 {
         let node_id = i + 1;
-        if let Ok(ev) = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id).await {
+        if let Ok(ev) = cluster.wait_leader_elect_event(node_id).await {
             panic!("expected no leader elected, got {:?}", ev);
         }
     }
 
     for i in 0..3 {
         let node_id = i + 1;
-        let data = "data".as_bytes().to_vec();
+        let data = StoreData {
+            key: "key".to_string(),
+            value: "data".as_bytes().to_vec(),
+        };
         let expected_err = Error::Write(WriteError::NotLeader {
             node_id,
             group_id: plan.group_id,
@@ -47,6 +60,7 @@ async fn test_no_leader() {
         }
     }
 
+    rockstore_env.destory();
     // cluster.stop().await;
 }
 
@@ -60,11 +74,16 @@ async fn test_no_leader() {
     tracing_span = "debug"
 )]
 async fn test_bad_group() {
+    let nodes = 3;
     let task_group = TaskGroup::new();
-
-    let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-    // cluster.start();
-
+    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .task_group(task_group.clone())
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
+        .build()
+        .await;
     let mut plan = MakeGroupPlan {
         group_id: 1,
         first_node_id: 1,
@@ -74,14 +93,17 @@ async fn test_bad_group() {
     // now, trigger leader elect and it's should became leader.
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(1, plan.group_id).await;
-    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, 1)
+    let _ = cluster.wait_leader_elect_event(1)
         .await
         .unwrap();
 
     for i in 1..3 {
         let node_id = i + 1;
-        let data = "data".as_bytes().to_vec();
 
+        let data = StoreData {
+            key: "key".to_string(),
+            value: "data".as_bytes().to_vec(),
+        };
         let expected_err = Error::Write(WriteError::NotLeader {
             node_id,
             group_id: plan.group_id,

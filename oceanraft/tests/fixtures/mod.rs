@@ -4,14 +4,15 @@ mod rsm;
 mod tracing_log;
 
 pub use cluster::{
-    new_rocks_state_machines,
+    new_rock_kv_stores,
     new_rocks_storeages,
-    // quickstart_multi_groups,
-    // quickstart_group,
+    quickstart_multi_groups,
+    quickstart_group,
     rand_temp_dir,
+    rand_string,
     ClusterBuilder,
     FixtureCluster,
-    FixtureWriteData,
+    // FixtureWriteData,
     MakeGroupPlan,
     MakeGroupPlanStatus,
     RockCluster,

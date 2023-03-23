@@ -14,6 +14,7 @@ use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
 use crate::util::TaskGroup;
 
+use super::StateMachine;
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
@@ -34,7 +35,6 @@ use super::transport::Transport;
 use super::types::WriteData;
 use super::util::Ticker;
 use super::RaftGroupError;
-use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;

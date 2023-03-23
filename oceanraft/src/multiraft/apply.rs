@@ -581,14 +581,9 @@ where
                         .find_pending(entry.term, entry.index, true)
                         .map_or(None, |p| p.tx);
 
-                    Apply::Membership(ApplyMembership {
-                        group_id,
-                        index: entry_index,
-                        term: entry_term,
-                        entry,
-                        tx,
-                        commit_tx: ctx.commit_tx.clone(),
-                    })
+                    let apply_membership =
+                        ApplyMembership::parse(group_id, entry, tx, ctx.commit_tx.clone());
+                    Apply::Membership(apply_membership)
                 }
             };
 
@@ -603,21 +598,21 @@ where
         // 3. Otherwise, maybe_failed_iter.next() -1 fails. We set applied as the index of the successful application log
         //
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
-        let maybe_failed_iter = ctx
-            .rsm
-            .apply(group_id, shared_state, events.into_iter())
-            .await;
-        (apply_state.applied_index, apply_state.applied_term) = maybe_failed_iter
-            .and_then(|mut iter| iter.next())
-            .map_or((apply.commit_index, apply.commit_term), |next| {
-                let index = next.get_index();
-                assert_ne!(index, 0);
-                if index == 1 {
-                    (0, 0)
-                } else {
-                    (index - 1, 0 /* TODO: load term from stored entries*/)
-                }
-            });
+
+        ctx.rsm.apply(group_id, shared_state, events).await;
+        apply_state.applied_index = apply.commit_index;
+        apply_state.applied_term = apply.commit_term;
+        // (apply_state.applied_index, apply_state.applied_term) =
+        //     iter.next()
+        //         .map_or((apply.commit_index, apply.commit_term), |next| {
+        //             let index = next.get_index();
+        //             assert_ne!(index, 0);
+        //             if index == 1 {
+        //                 (0, 0)
+        //             } else {
+        //                 (index - 1, 0 /* TODO: load term from stored entries*/)
+        //             }
+        //         });
     }
 
     async fn handle_applys(
@@ -691,6 +686,7 @@ mod test {
     use crate::multiraft::state::GroupStates;
     use crate::multiraft::util::compute_entry_size;
     use crate::multiraft::Config;
+    // use crate::multiraft::MultiStateMachine;
     use crate::multiraft::StateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
@@ -701,16 +697,16 @@ mod test {
 
     struct NoOpStateMachine {}
     impl StateMachine<(), ()> for NoOpStateMachine {
-        type ApplyFuture<'life0> = impl Future<Output = Option<std::vec::IntoIter<crate::multiraft::Apply<(), ()>>>> + 'life0
+        type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
         fn apply(
             &self,
             _: u64,
             _: &GroupState,
-            _: std::vec::IntoIter<crate::multiraft::Apply<(), ()>>,
+            _: Vec<crate::multiraft::Apply<(), ()>>,
         ) -> Self::ApplyFuture<'_> {
-            async move { None }
+            async move {}
         }
     }
 

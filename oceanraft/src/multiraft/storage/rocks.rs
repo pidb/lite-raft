@@ -111,15 +111,22 @@ mod storage {
             format!("{}_{}_{}", LOG_LAST_INDEX_PREFIX, group_id, replica_id)
         }
 
-        /// Format log entry index key with mode `ent_{group_id}/{index}`.
+        /// Format log entry index key with mode `ent_{group_id}_{index}`.
+        /// 
+        /// # Notes
+        /// On rocksdb, the default lexicographical sorting is `ent_1_3 > ent_1_11`, 
+        /// which causes an error. although rocksdb can define additional comparactors, 
+        /// this incurs additional costs, so we align u64 to represent the maximum string 
+        /// length. For example, `ent_1_0000000000000003 < ent_1_00000000000000000011`, 
+        /// since we have prefix compression enabled (TODO), space consumption is not an issue.
         #[inline]
         fn format_entry_key(group_id: u64, index: u64) -> String {
-            format!("ent_{}/{}", group_id, index)
+            format!("ent_{}_{:0>20}", group_id, index)
         }
 
         #[inline]
         fn format_entry_key_prefix(group_id: u64) -> String {
-            format!("ent_{}/", group_id)
+            format!("ent_{}_", group_id)
         }
 
         /// Format snapshot metadata key with mode `snap_meta_{group_id}_{replica_id}/`
@@ -521,28 +528,34 @@ mod storage {
                 )
             }
 
+            let high = std::cmp::min(high, log_meta.last_index+1);
+
             let mut ents = Vec::with_capacity((high - low) as usize);
             let log_cf = DBEnv::get_log_cf(&self.db)?; // TODO handle error
             let start_key = DBEnv::format_entry_key(self.group_id, low);
-            let last_key = DBEnv::format_entry_key(self.group_id, log_meta.last_index);
-            let high_key = DBEnv::format_entry_key(self.group_id, high);
             let iter_mode = IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward);
             let mut readopts = ReadOptions::default();
             readopts.set_ignore_range_deletions(true); // skip delete_range to improve read performance
                                                        // TODO: handle if temporaily unavailable
             let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
+            
+            let mut next = low;
             for ent in iter {
+                if next == high {
+                    break;
+                }
+
+                // TODO: maybe need check
+                let next_key = DBEnv::format_entry_key(self.group_id, next);
                 let (key_data, value_data) = ent.unwrap();
-                if high_key.as_bytes() == key_data.as_ref() {
-                    break;
+                if next_key.as_bytes() != key_data.as_ref() {
+                    break
                 }
 
-                let ent = Entry::decode(value_data.as_ref()).unwrap(); // TODO: handle error
+                let ent = Entry::decode(value_data.as_ref())
+                    .expect(format!("prase error {:?}", value_data).as_str()); // TODO: handle error
                 ents.push(ent);
-
-                if last_key.as_bytes() == key_data.as_ref() {
-                    break;
-                }
+                next += 1;
             }
 
             raft::util::limit_size(&mut ents, max_size.into());
@@ -706,12 +719,14 @@ mod storage {
             if ents[0].index <= ent_meta.last_index {
                 let start_key = DBEnv::format_entry_key(self.group_id, ents[0].index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
+                println!("remove {} -> {}, {} {}", start_key, last_key, start_key > last_key, u64::MAX.to_string());
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db
                     .delete_range_cf_opt(&log_cf, start_key, last_key, &writeopts)
                     .map_err(|err| Error::Other(Box::new(err)))?;
             }
+
 
             let mut batch = WriteBatch::default();
             if ent_meta.empty {
@@ -746,7 +761,11 @@ mod storage {
         fn install_snapshot(&self, mut snapshot: Snapshot) -> Result<()> {
             let mut snap_meta = snapshot.metadata.as_ref().expect("unreachable").clone();
             if self.first_index()? > snap_meta.index {
-                println!("first index = {}, snap_meta.index = {}", self.first_index()?, snap_meta.index);
+                println!(
+                    "first index = {}, snap_meta.index = {}",
+                    self.first_index()?,
+                    snap_meta.index
+                );
                 return Err(Error::SnapshotOutOfDate);
             }
 
@@ -826,6 +845,7 @@ mod storage {
             let mut db_opts = RocksdbOptions::default();
             db_opts.create_if_missing(true);
             db_opts.create_missing_column_families(true);
+            // db_opts.set_comparator(name, compare_fn)
 
             let cfs = vec![
                 ColumnFamilyDescriptor::new(METADATA_CF_NAME, db_opts.clone()),
@@ -993,7 +1013,9 @@ mod state_machine {
     use std::collections::BTreeMap;
     use std::marker::PhantomData;
     use std::path::Path;
+    use std::slice::IterMut;
     use std::sync::Arc;
+    use std::sync::Weak;
     use std::vec::IntoIter;
 
     use futures::Future;
@@ -1007,17 +1029,24 @@ mod state_machine {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
+    use tokio::sync::mpsc::channel;
+    use tokio::sync::mpsc::Receiver;
     use tokio::sync::mpsc::Sender;
+    use tokio::sync::Mutex;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result as StorageResult;
     use crate::multiraft::Apply;
+    use crate::multiraft::ApplyMembership;
+    use crate::multiraft::ApplyNoOp;
+    use crate::multiraft::ApplyNormal;
     use crate::multiraft::StateMachine;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
-    use crate::protos::StoreData;
+    use crate::prelude::MembershipChangeData;
+    use crate::prelude::StoreData;
 
     type Result<T> = std::result::Result<T, RockStateMachineError>;
 
@@ -1084,13 +1113,13 @@ mod state_machine {
         pub(crate) bt_map: BTreeMap<String, Vec<u8>>,
     }
 
-    impl<R> TryFrom<(u64, &RockStateMachine<R>)> for SnapshotDataSerializer
+    impl<R> TryFrom<(u64, &KVStore<R>)> for SnapshotDataSerializer
     where
         R: WriteResponse,
     {
         type Error = RockStateMachineError;
 
-        fn try_from(val: (u64, &RockStateMachine<R>)) -> std::result::Result<Self, Self::Error> {
+        fn try_from(val: (u64, &KVStore<R>)) -> std::result::Result<Self, Self::Error> {
             let group_id = val.0;
             let state_machine = val.1;
 
@@ -1132,7 +1161,7 @@ mod state_machine {
         }
     }
 
-    impl<R> RaftSnapshotReader for RockStateMachine<R>
+    impl<R> RaftSnapshotReader for KVStore<R>
     where
         R: WriteResponse,
     {
@@ -1142,7 +1171,7 @@ mod state_machine {
         }
     }
 
-    impl<R> RaftSnapshotWriter for RockStateMachine<R>
+    impl<R> RaftSnapshotWriter for KVStore<R>
     where
         R: WriteResponse,
     {
@@ -1199,15 +1228,154 @@ mod state_machine {
         Other(Box<dyn std::error::Error + Sync + Send>),
     }
 
+    /*****************************************************************************
+     * ROCK KEY VALUE STATE MACHINE
+     *****************************************************************************/
+    // struct KVStateMachine<R: WriteResponse> {
+    //     group_id: u64,
+    //     noop_tx: Option<Sender<ApplyNoOp>>,
+    //     normal_tx: Option<Sender<ApplyNormal<StoreData, R>>>,
+    //     member_tx: Option<Sender<ApplyMembership<R>>>,
+    //     store: KVStore<R>, // TODO: use weak ref
+    // }
+    // impl<R> StateMachine<StoreData, R> for KVStateMachine<R>
+    // where
+    //     R: WriteResponse,
+    // {
+    //     type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<StoreData, R>>>> + 'life0
+    // where
+    //     Self: 'life0;
+
+    //     fn apply(
+    //         &self,
+    //         group_id: u64,
+    //         _: &crate::multiraft::GroupState,
+    //         iter: std::vec::IntoIter<crate::multiraft::Apply<StoreData, R>>,
+    //     ) -> Self::ApplyFuture<'_> {
+    //         async move {
+    //             let mut batch = WriteBatch::default();
+    //             let mut applied_index = 0;
+    //             let mut applied_term = 0;
+    //             let cf = self.store.get_data_cf().unwrap();
+    //             for apply in iter {
+    //                 match apply {
+    //                     Apply::NoOp(noop) => {
+    //                         applied_index = noop.entry_index;
+    //                         applied_term = noop.entry_term;
+    //                     }
+    //                     Apply::Normal(normal) => {
+    //                         let key = format_data_key(group_id, &normal.data.key);
+    //                         batch.put_cf(&cf, key.as_bytes(), normal.data.value);
+    //                         applied_index = normal.index;
+    //                         applied_term = normal.term;
+    //                     }
+    //                     Apply::Membership(changes) => {
+    //                         // changes.done().await.unwrap();
+    //                         // TODO: set change to rocksdb
+    //                         applied_index = changes.index;
+    //                         applied_term = changes.term;
+    //                     }
+    //                 }
+    //             }
+
+    //             batch.put_cf(
+    //                 &cf,
+    //                 format_applied_index_key(group_id),
+    //                 applied_index.to_be_bytes(),
+    //             );
+    //             batch.put_cf(
+    //                 &cf,
+    //                 format_applied_term_key(group_id),
+    //                 applied_term.to_be_bytes(),
+    //             );
+
+    //             let mut writeopts = WriteOptions::default();
+    //             writeopts.set_sync(true);
+    //             self.store.db.write_opt(batch, &writeopts).unwrap();
+    //             None
+    //         }
+    //     }
+    // }
+
+    // pub struct ApplyWriteBatch<R>
+    // where
+    //     R: WriteResponse,
+    // {
+    //     db: Arc<DBWithThreadMode<MultiThreaded>>,
+    //     batch: WriteBatch,
+    //     group_id: u64,
+    //     applied_index: u64,
+    //     applied_term: u64,
+    //     _m: PhantomData<R>,
+    // }
+
+    // impl<R> ApplyWriteBatch<R>
+    // where
+    //     R: WriteResponse,
+    // {
+    //     pub fn cf(&self) -> Arc<BoundColumnFamily> {
+    //         self.db.cf_handle(DATA_CF_NAME).unwrap()
+    //     }
+
+    //     #[inline]
+    //     pub fn put_noop(&mut self, noop: ApplyNoOp) {
+    //         self.applied_index = noop.entry_index;
+    //         self.applied_term = noop.entry_term;
+    //     }
+
+    //     #[inline]
+    //     pub fn put_normal(&mut self, normal: ApplyNormal<StoreData, R>) {
+    //         let cf = self.cf();
+    //         let key = format_data_key(self.group_id, &normal.data.key);
+    //         self.batch.put_cf(&cf, &key, normal.data.value);
+    //         self.applied_index = normal.index;
+    //         self.applied_index = normal.term;
+    //     }
+
+    //     #[inline]
+    //     pub fn put_membership(&mut self, membership: ApplyMembership<R>) {
+    //         // changes.done().await.unwrap();
+    //         // TODO: set change to rocksdb in data cf
+    //         self.applied_index = membership.index;
+    //         self.applied_term = membership.term;
+    //     }
+
+    //     #[inline]
+    //     pub fn put_apply(&mut self, apply: Apply<StoreData, R>) {
+    //         match apply {
+    //             Apply::NoOp(noop) => self.put_noop(noop),
+    //             Apply::Normal(normal) => self.put_normal(normal),
+    //             Apply::Membership(membership) => self.put_membership(membership),
+    //         }
+    //     }
+    // }
+
     #[derive(Clone)]
-    pub struct RockStateMachine<R: WriteResponse> {
+    pub struct KVStore<R: WriteResponse> {
         node_id: u64,
         db: Arc<DBWithThreadMode<MultiThreaded>>,
-        
         _m: PhantomData<R>,
     }
 
-    impl<R: WriteResponse> RockStateMachine<R> {
+    // impl<R: WriteResponse> MultiStateMachine<StoreData, R> for KVStore<R> {
+    //     type E = RockStateMachineError;
+    //     type S = KVStateMachine<R>;
+    //     fn create_state_machine(&self, group_id: u64) -> std::result::Result<Self::S, Self::E> {
+    //         let (noop_tx, noop_rx) = channel(1);
+    //         let (normal_tx, normal_rx) = channel(1);
+    //         let (member_tx, memebr_rx) = channel(1);
+
+    //         Ok(KVStateMachine {
+    //             group_id,
+    //             noop_tx: Some(noop_tx),
+    //             normal_tx: Some(normal_tx),
+    //             member_tx: Some(member_tx),
+    //             store: self.clone(),
+    //         })
+    //     }
+    // }
+
+    impl<R: WriteResponse> KVStore<R> {
         pub fn new<P>(node_id: u64, path: P) -> Self
         where
             P: AsRef<Path>,
@@ -1230,6 +1398,78 @@ mod state_machine {
                 db: Arc::new(db),
                 _m: PhantomData,
             }
+        }
+
+        pub fn apply(&self, group_id: u64, iter: &Vec<Apply<StoreData, R>>) {
+            let mut applied_index = 0;
+            let mut applied_term = 0;
+            let mut batch = WriteBatch::default();
+            let cf = self.get_data_cf().unwrap();
+            for apply in iter {
+                match apply {
+                    Apply::NoOp(noop) => {
+                        applied_index = noop.entry_index;
+                        applied_term = noop.entry_term;
+                    }
+                    Apply::Normal(normal) => {
+                        let key = format_data_key(group_id, &normal.data.key);
+                        batch.put_cf(&cf, key.as_bytes(), &normal.data.value);
+                        applied_index = normal.index;
+                        applied_term = normal.term;
+                    }
+                    Apply::Membership(membership) => {
+                        // changes.done().await.unwrap();
+                        // TODO: set change to rocksdb
+                        applied_index = membership.index;
+                        applied_term = membership.term;
+                    }
+                }
+            }
+
+            batch.put_cf(
+                &cf,
+                format_applied_index_key(group_id),
+                applied_index.to_be_bytes(),
+            );
+            batch.put_cf(
+                &cf,
+                format_applied_term_key(group_id),
+                applied_term.to_be_bytes(),
+            );
+
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db.write_opt(batch, &writeopts).unwrap();
+        }
+
+        #[allow(unused)]
+        pub fn set_apply_index(&self, group_id: u64, apply_index: u64) {
+            let cf = self.get_data_cf().unwrap();
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(
+                    &cf,
+                    format_applied_index_key(group_id),
+                    apply_index.to_be_bytes(),
+                    &writeopts,
+                )
+                .unwrap()
+        }
+
+        #[allow(unused)]
+        pub fn set_apply_term(&self, group_id: u64, apply_term: u64) {
+            let cf = self.get_data_cf().unwrap();
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(
+                    &cf,
+                    format_applied_term_key(group_id),
+                    apply_term.to_be_bytes(),
+                    &writeopts,
+                )
+                .unwrap()
         }
 
         /// Get snapshot cloumn famly.
@@ -1387,67 +1627,6 @@ mod state_machine {
         }
     }
 
-    impl<R> StateMachine<StoreData, R> for RockStateMachine<R>
-    where
-        R: WriteResponse,
-    {
-        type ApplyFuture<'life0> = impl Future<Output =  Option<IntoIter<Apply<StoreData, R>>>> + 'life0
-    where
-        Self: 'life0;
-
-        fn apply(
-            &self,
-            group_id: u64,
-            _: &crate::multiraft::GroupState,
-            iter: std::vec::IntoIter<crate::multiraft::Apply<StoreData, R>>,
-        ) -> Self::ApplyFuture<'_> {
-            async move {
-                let mut batch = WriteBatch::default();
-                let mut applied_index = 0;
-                let mut applied_term = 0;
-
-                for apply in iter {
-                    match apply {
-                        Apply::NoOp(noop) => {
-                            applied_index = noop.entry_index;
-                            applied_term = noop.entry_term;
-                        },
-                        Apply::Normal(normal) => {
-                            let cf = self.get_data_cf().unwrap();
-                            let key = format_data_key(group_id, &normal.data.key);
-                            batch.put_cf(&cf, key.as_bytes(), normal.data.value);
-                            applied_index = normal.index;
-                            applied_term = normal.term;
-                        }
-                        Apply::Membership(changes) => {
-
-                            changes.done().await.unwrap();
-                            applied_index = changes.index;
-                            applied_term = changes.term;
-                        },
-                    }
-                }
-
-                let cf = self.get_data_cf().unwrap();
-                batch.put_cf(
-                    &cf,
-                    format_applied_index_key(group_id),
-                    applied_index.to_be_bytes(),
-                );
-                batch.put_cf(
-                    &cf,
-                    format_applied_term_key(group_id),
-                    applied_term.to_be_bytes(),
-                );
-
-                let mut writeopts = WriteOptions::default();
-                writeopts.set_sync(true);
-                self.db.write_opt(batch, &writeopts).unwrap();
-                None
-            }
-        }
-    }
-
     /// Format applied index key with mode `applied_index_{group_id}`.
     #[inline]
     fn format_applied_index_key(group_id: u64) -> String {
@@ -1504,7 +1683,7 @@ mod state_machine {
         use crate::multiraft::ApplyNormal;
         use crate::multiraft::GroupState;
 
-        use super::RockStateMachine;
+        // use super::KVStateMachine;
         use super::*;
 
         #[test]
@@ -1522,99 +1701,11 @@ mod state_machine {
             assert_eq!(data1.key, data2.key);
             assert_eq!(data1.value, data2.value);
         }
-
-        #[test]
-        fn test_state_machine_split_key() {
-            let group_id = 1;
-            let raw_key = "raw_key".to_owned();
-            let splited = split_data_key(format_data_key(group_id, &raw_key).as_str()).unwrap();
-            assert_eq!(splited.0, group_id);
-            assert_eq!(splited.1, raw_key);
-        }
-
-        async fn apply_to(
-            group_id: u64,
-            n: usize,
-            term: u64,
-            state_machine: &RockStateMachine<()>,
-        ) {
-            let state = GroupState::default();
-            let mut applys = vec![];
-            for i in 0..n {
-                // let mut s = flexbuffers::FlexbufferSerializer::new();
-
-                // .serialize(&mut s)
-                // .unwrap();
-
-                applys.push(Apply::<StoreData, ()>::Normal(ApplyNormal {
-                    group_id,
-                    index: i as u64 + 1,
-                    term,
-                    data: StoreData {
-                        key: format!("raw_key_{}", i),
-                        value: (0..100).map(|_| 1_u8).collect::<Vec<u8>>(),
-                    },
-                    context: None,
-                    is_conf_change: false,
-                    tx: None,
-                }));
-            }
-            state_machine
-                .apply(group_id, &state, applys.into_iter())
-                .await;
-        }
-
-        // #[tokio::test(flavor = "multi_thread")]
-        // async fn test_snapshot_serialize_from_db() {
-        //     let node_id = 1;
-        //     let group_id = 1;
-        //     let replica_id = 1;
-        //     // create state machine
-        //     let state_machine_tmp_path = temp_dir().join("oceanraft_state_machine_db");
-        //     let state_machine =
-        //         RockStateMachine::<()>::new(node_id, state_machine_tmp_path.clone());
-        //     println!(
-        //         "🐿 create state machine store {}",
-        //         state_machine_tmp_path.display()
-        //     );
-
-        //     apply_to(group_id, 100, 1, &state_machine).await;
-        //     apply_to(2, 10, 1, &state_machine).await;
-        //     apply_to(3, 20, 1, &state_machine).await;
-
-        //     let ser = RockStateMachineSnapshotSerializer::try_from((
-        //         group_id,
-        //         replica_id,
-        //         &state_machine,
-        //     ))
-        //     .unwrap();
-
-        //     assert_eq!(ser.meta.applied_index, 100);
-        //     assert_eq!(ser.meta.applied_term, 1);
-        //     // TODO: snapshot should wrap to structure.
-
-        //     for i in 0..100 {
-        //         let key = format!("raw_key_{}", i);
-        //         let value = (0..100).map(|_| 1_u8).collect::<Vec<u8>>();
-        //         assert_eq!(*ser.data.bt_map.get(&key).unwrap(), value);
-        //     }
-
-        //     drop(state_machine);
-        //     DBWithThreadMode::<MultiThreaded>::destroy(
-        //         &rocksdb::Options::default(),
-        //         state_machine_tmp_path.clone(),
-        //     )
-        //     .unwrap();
-        //     println!(
-        //         "👋 destory state machine store {}",
-        //         state_machine_tmp_path.display()
-        //     );
-        // }
     }
 }
 pub use storage::{RockStore, RockStoreCore, RocksError};
 
-pub use state_machine::{RockDataError, RockStateMachine, RockStateMachineError};
+pub use state_machine::{KVStore, RockDataError, RockStateMachineError};
 
 #[cfg(test)]
 mod tests {
@@ -1641,7 +1732,8 @@ mod tests {
     use super::state_machine::SnapshotDataSerializer;
     use super::state_machine::SnapshotMetaSerializer;
     use super::state_machine::SnapshotSerializer;
-    use super::RockStateMachine;
+    use super::KVStore;
+    // use super::KVStateMachine;
     use super::RockStore;
     use crate::multiraft::storage::MultiRaftStorage;
     use crate::multiraft::storage::RaftSnapshotWriter;
@@ -1757,8 +1849,8 @@ mod tests {
         DBWithThreadMode::<MultiThreaded>::destroy(&rocksdb::Options::default(), path).unwrap();
     }
 
-    fn new_state_machine<R: WriteResponse>(path: &Path, node_id: u64) -> RockStateMachine<R> {
-        let state_machine = RockStateMachine::<R>::new(node_id, path);
+    fn new_state_machine<R: WriteResponse>(path: &Path, node_id: u64) -> KVStore<R> {
+        let state_machine = KVStore::<R>::new(node_id, path);
 
         println!("🐿 create state machine store {}", path.display());
 
@@ -1768,8 +1860,8 @@ mod tests {
     fn new_rockstore<R: WriteResponse>(
         path: &Path,
         node_id: u64,
-        state_machine: &RockStateMachine<R>,
-    ) -> RockStore<RockStateMachine<R>, RockStateMachine<R>> {
+        state_machine: &KVStore<R>,
+    ) -> RockStore<KVStore<R>, KVStore<R>> {
         let rock_store =
             RockStore::new(node_id, path, state_machine.clone(), state_machine.clone());
 
@@ -1779,7 +1871,7 @@ mod tests {
 
     fn db_test_env<F, R>(f: F)
     where
-        F: FnOnce(&RockStore<RockStateMachine<R>, RockStateMachine<R>>, &RockStateMachine<R>),
+        F: FnOnce(&RockStore<KVStore<R>, KVStore<R>>, &KVStore<R>),
         R: WriteResponse,
     {
         let state_machine_temp_dir = rand_temp_dir().join("oceanraft_state_machine");
@@ -1808,8 +1900,8 @@ mod tests {
     where
         F: for<'r> FnOnce(
             u64,
-            &'r RockStore<RockStateMachine<R>, RockStateMachine<R>>,
-            &'r RockStateMachine<R>,
+            &'r RockStore<KVStore<R>, KVStore<R>>,
+            &'r KVStore<R>,
         ) -> BoxFuture<'r, ()>,
         R: WriteResponse,
     {
@@ -2006,9 +2098,8 @@ mod tests {
                         .unwrap();
                     rock_store_core.set_confstate(conf_state.clone()).unwrap();
 
-                    state_machine
-                        .apply(group_id, &GroupState::default(), applys.into_iter())
-                        .await;
+                    state_machine.apply(group_id, &applys);
+                    // .await
                     state_machine
                         .build_snapshot(group_id, 1, apply_idx, apply_idx, conf_state.clone())
                         .unwrap();

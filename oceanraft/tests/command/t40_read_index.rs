@@ -1,20 +1,11 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use serde::Deserialize;
-use serde::Serialize;
+use oceanraft::prelude::StoreData;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_group;
-use crate::fixtures::FixtureCluster;
-use crate::fixtures::FixtureWriteData;
-
-#[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct KVCommand {
-    id: u64,
-    key: String,
-    value: String,
-}
+use crate::fixtures::RockStorageEnv;
 
 #[async_entry::test(
     flavor = "multi_thread",
@@ -22,43 +13,39 @@ struct KVCommand {
     tracing_span = "debug"
 )]
 async fn test_group_read_index() {
-    let node_nums = 3;
+    let nodes = 3;
     let command_nums = 10;
-    let (_, mut cluster) = quickstart_group(node_nums).await;
+
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let group_id = 1;
     for i in 0..command_nums {
         let command_id = (i + 1) as u64;
 
-        let kv_cmd = KVCommand {
-            id: command_id,
+        let kv_cmd = StoreData {
             key: format!("key_{}", command_id),
-            value: format!("value_{}", command_id),
+            value: format!("value_{}", command_id).as_bytes().to_vec(),
         };
 
-        let data = serde_json::to_vec(&kv_cmd).unwrap();
-        let rx = cluster.write_command(1, group_id, data.clone());
+        let rx = cluster.write_command(1, group_id, kv_cmd.clone());
         recvs.push(rx);
         cluster.tickers[0].non_blocking_tick();
     }
 
-    let mut applied_kvs = HashMap::<String, KVCommand>::new();
+    let mut applied_kvs = HashMap::<String, StoreData>::new();
 
-    let events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_apply_event_rx(1),
-        Duration::from_millis(1000),
-        command_nums as usize,
-    )
-    .await
-    .unwrap();
+    let events = cluster
+        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .await
+        .unwrap();
 
     for event in events {
         // FIXME: Fuck ugly, use trait in Apply.
         // let r = flexbuffers::Reader::get_root(event.data.as_ref()).unwrap();
         // let wd = FixtureWriteData::deserialize(r).unwrap();
-        let kv_cmd: KVCommand = serde_json::from_slice(&event.data.0).unwrap();
-        applied_kvs.insert(kv_cmd.key.clone(), kv_cmd);
+        applied_kvs.insert(event.data.key.clone(), event.data);
 
         // TODO: use done method
         event.tx.map(|tx| tx.send(Ok(())));
@@ -70,19 +57,17 @@ async fn test_group_read_index() {
         assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
-    println!("{}", serde_json::to_string(&applied_kvs).unwrap());
-
     let _ = cluster.nodes[0].read_index(group_id, None).await.unwrap();
 
     for i in 0..command_nums {
         let command_id = (i + 1) as u64;
-        let kv_cmd = KVCommand {
-            id: command_id,
+        let kv_cmd = StoreData {
             key: format!("key_{}", command_id),
-            value: format!("value_{}", command_id),
+            value: format!("value_{}", command_id).as_bytes().to_vec(),
         };
         assert_eq!(*applied_kvs.get(&kv_cmd.key).unwrap(), kv_cmd);
     }
+    rockstore_env.destory();
     // cluster.stop().await;
     // write -> 1 -> 2 -> 3
     // read  -> commit_index = 1

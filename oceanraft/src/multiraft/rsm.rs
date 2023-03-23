@@ -1,13 +1,10 @@
 extern crate raft_proto;
 
-use std::vec::IntoIter;
-
 use futures::Future;
 use prost::Message;
+use raft_proto::ConfChangeI;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
-
-use raft_proto::ConfChangeI;
 
 use crate::multiraft::error::ChannelError;
 use crate::multiraft::WriteResponse;
@@ -51,41 +48,52 @@ pub struct ApplyMembership<RES: WriteResponse> {
     pub group_id: u64,
     pub index: u64,
     pub term: u64,
-    pub entry: Entry,
+    pub conf_change: ConfChangeV2,
+    pub change_data: MembershipChangeData,
+    // pub entry: Entry,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
-    pub(crate) commit_tx: UnboundedSender<ApplyCommitMessage>,
+    pub commit_tx: UnboundedSender<ApplyCommitMessage>,
 }
 
 impl<RES: WriteResponse> ApplyMembership<RES> {
-    fn parse(&self) -> CommitMembership {
-        match self.entry.entry_type() {
+    /// Consumption entry is parse to `ApplyMembership`.
+    pub fn parse(
+        group_id: u64,
+        entry: Entry,
+        tx: Option<oneshot::Sender<Result<RES, Error>>>,
+        commit_tx: UnboundedSender<ApplyCommitMessage>,
+    ) -> Self {
+        let (index, term) = (entry.index, entry.term);
+        let (conf_change, change_data) = match entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
             EntryType::EntryConfChange => {
                 let mut conf_change = ConfChange::default();
-                conf_change.merge(self.entry.data.as_ref()).unwrap();
+                conf_change.merge(entry.data.as_ref()).unwrap();
 
-                let mut change_request = MembershipChangeData::default();
-                change_request.merge(self.entry.context.as_ref()).unwrap();
+                let mut change_data = MembershipChangeData::default();
+                change_data.merge(entry.context.as_ref()).unwrap();
 
-                CommitMembership {
-                    entry_index: self.entry.index,
-                    conf_change: conf_change.into_v2(),
-                    change_request,
-                }
+                (conf_change.into_v2(), change_data)
             }
             EntryType::EntryConfChangeV2 => {
                 let mut conf_change = ConfChangeV2::default();
-                conf_change.merge(self.entry.data.as_ref()).unwrap();
+                conf_change.merge(entry.data.as_ref()).unwrap();
 
-                let mut change_request = MembershipChangeData::default();
-                change_request.merge(self.entry.context.as_ref()).unwrap();
+                let mut change_data = MembershipChangeData::default();
+                change_data.merge(entry.context.as_ref()).unwrap();
 
-                CommitMembership {
-                    entry_index: self.entry.index,
-                    conf_change,
-                    change_request,
-                }
+                (conf_change, change_data)
             }
+        };
+
+        Self {
+            group_id,
+            index,
+            term,
+            conf_change,
+            change_data,
+            tx,
+            commit_tx,
         }
     }
 
@@ -94,7 +102,12 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
     /// Note: it's must be called because multiraft need apply membersip change to raft.
     pub async fn done(&self) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        let commit = self.parse();
+        let commit = CommitMembership {
+            entry_index: self.index,
+            conf_change: self.conf_change.clone(),
+            change_request: self.change_data.clone(),
+        };
+
         match self
             .commit_tx
             .send(ApplyCommitMessage::Membership((commit, tx)))
@@ -137,7 +150,7 @@ where
         match self {
             Self::NoOp(noop) => noop.entry_index,
             Self::Normal(normal) => normal.index,
-            Self::Membership(membership) => membership.entry.index,
+            Self::Membership(membership) => membership.index,
         }
     }
 
@@ -146,7 +159,7 @@ where
         match self {
             Self::NoOp(noop) => noop.entry_term,
             Self::Normal(normal) => normal.term,
-            Self::Membership(membership) => membership.entry.term,
+            Self::Membership(membership) => membership.term,
         }
     }
 
@@ -165,7 +178,7 @@ where
     W: WriteData,
     R: WriteResponse,
 {
-    type ApplyFuture<'life0>: Send + Future<Output = Option<IntoIter<Apply<W, R>>>>
+    type ApplyFuture<'life0>: Send + Future<Output = ()>
     where
         Self: 'life0;
 
@@ -173,6 +186,6 @@ where
         &self,
         group_id: u64,
         state: &GroupState,
-        iter: IntoIter<Apply<W, R>>,
+        applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'_>;
 }

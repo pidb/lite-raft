@@ -1,9 +1,14 @@
 use std::time::Duration;
 
+use oceanraft::prelude::StoreData;
+
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_group;
+use crate::fixtures::rand_string;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::WriteChecker;
+use crate::fixtures::RockStorageEnv;
+
 
 /// Testing pending proposals after removing the leader of
 /// a single consensus group should return an error。
@@ -13,8 +18,9 @@ use crate::fixtures::WriteChecker;
     tracing_span = "debug"
 )]
 async fn test_group_stale_write() {
-    let node_nums = 3;
-    let (_, mut cluster) = quickstart_group(node_nums).await;
+    let nodes = 3;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
 
     let group_id = 1;
 
@@ -25,14 +31,16 @@ async fn test_group_stale_write() {
     // propose command, but node network is disconnected, so command can't commit.
     let command_size = 10;
     let mut stale_recvs = vec![];
-    for command_id in 1..command_size + 1 {
-        let data = format!("{}: data on group_id = {}", command_id, group_id)
-            .as_bytes()
-            .to_vec();
+    for _ in 1..command_size + 1 {
+         let data = StoreData {
+            key: rand_string(4),
+            value: rand_string(8).as_bytes().to_vec(),
+        };
+
+
 
         let rx = cluster.write_command(1, group_id, data.clone());
         stale_recvs.push(rx);
-        // TODO: use tick method
         cluster.tickers[0].tick().await;
     }
 
@@ -50,18 +58,18 @@ async fn test_group_stale_write() {
     // check stale
     let mut write_checker = WriteChecker::default();
     let mut recvs = vec![];
-    for (i, stale_rx) in stale_recvs.into_iter().enumerate() {
+    for (_, stale_rx) in stale_recvs.into_iter().enumerate() {
         // because heartbeat can not set committed index, so whenever we
         // are ready to verify stale command, we need send append to active
         // commit of stale node.
-        let data = format!("{}: data on group_id = {}", i, group_id)
-            .as_bytes()
-            .to_vec();
+        let data = StoreData {
+            key: rand_string(4),
+            value: rand_string(8).as_bytes().to_vec(),
+        };
+
         write_checker.insert_write(group_id, data.clone());
         recvs.push(cluster.write_command(2, group_id, data));
 
-        // TODO: use tick method
-        // cluster.tickers[0].tick().await;
         cluster.tickers[1].tick().await;
         // cluster.tickers[2].tick().await;
         // TODO: assertion error type
@@ -72,10 +80,10 @@ async fn test_group_stale_write() {
     }
 
     // check normal
-    let apply_events = FixtureCluster::wait_for_command_apply(
-        cluster.mut_apply_event_rx(2),
-        Duration::from_millis(1000),
+    let apply_events = cluster.wait_for_commands_apply(
+        2,
         command_size,
+        Duration::from_millis(1000),
     )
     .await
     .unwrap();
@@ -89,5 +97,6 @@ async fn test_group_stale_write() {
         // TODO: assertiong response type
         assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
+    rockstore_env.destory();
     // cluster.stop().await;
 }
