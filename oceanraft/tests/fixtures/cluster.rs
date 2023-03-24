@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use oceanraft::multiraft::storage::KVStore;
 use oceanraft::multiraft::storage::RockStoreCore;
+use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::prelude::StoreData;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
@@ -21,6 +21,7 @@ use tokio::time::Instant;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorage;
 use oceanraft::multiraft::storage::RockStore;
+use oceanraft::multiraft::transport::LocalTransport;
 use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::ApplyMembership;
 use oceanraft::multiraft::ApplyNormal;
@@ -36,7 +37,6 @@ use oceanraft::prelude::MultiRaft;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
-use oceanraft::multiraft::transport::LocalTransport;
 
 use super::rsm::FixtureStateMachine;
 
@@ -62,7 +62,7 @@ where
     temp_dir().join(rand_str).join(postfix)
 }
 
-pub fn new_rock_kv_stores<P, R>(nodes: usize, paths: Vec<P>) -> Vec<KVStore<R>>
+pub fn new_rock_kv_stores<P, R>(nodes: usize, paths: Vec<P>) -> Vec<StateMachineStore<R>>
 where
     P: AsRef<Path>,
     R: WriteResponse,
@@ -73,7 +73,7 @@ where
         .map(|(i, p)| {
             println!("🏠 create statemachine storeage {}", p.as_ref().display());
             let node_id = (i + 1) as u64;
-            KVStore::<R>::new(node_id, p)
+            StateMachineStore::<R>::new(node_id, p)
         })
         .collect()
 }
@@ -81,8 +81,8 @@ where
 pub fn new_rocks_storeages<P, R>(
     nodes: usize,
     paths: Vec<P>,
-    kv_stores: Vec<KVStore<R>>,
-) -> Vec<RockStore<KVStore<R>, KVStore<R>>>
+    kv_stores: Vec<StateMachineStore<R>>,
+) -> Vec<RockStore<StateMachineStore<R>, StateMachineStore<R>>>
 where
     P: AsRef<Path>,
     R: WriteResponse,
@@ -101,8 +101,8 @@ where
 
 /// Provides a rocksdb storage and state machine environment for cluster.
 pub struct RockStorageEnv<R: WriteResponse> {
-    pub storages: Vec<RockStore<KVStore<R>, KVStore<R>>>,
-    pub rock_kv_stores: Vec<KVStore<R>>,
+    pub storages: Vec<RockStore<StateMachineStore<R>, StateMachineStore<R>>>,
+    pub rock_kv_stores: Vec<StateMachineStore<R>>,
     pub storage_paths: Vec<PathBuf>,
     pub state_machine_paths: Vec<PathBuf>,
 }
@@ -149,7 +149,7 @@ where
     election_ticks: usize,
     tg: Option<TaskGroup>,
     storages: Vec<MS>,
-    kv_stores: Vec<KVStore<R>>,
+    kv_stores: Vec<StateMachineStore<R>>,
     _m1: PhantomData<S>,
     _m2: PhantomData<R>,
 }
@@ -190,7 +190,7 @@ where
         self
     }
 
-    pub fn kv_stores(mut self, kv_stores: Vec<KVStore<R>>) -> Self {
+    pub fn kv_stores(mut self, kv_stores: Vec<StateMachineStore<R>>) -> Self {
         assert_eq!(
             kv_stores.len(),
             self.node_size,
@@ -325,8 +325,11 @@ impl std::fmt::Display for MakeGroupPlanStatus {
     }
 }
 
-pub type RockCluster<R> =
-    FixtureCluster<R, RockStoreCore<KVStore<()>, KVStore<()>>, RockStore<KVStore<()>, KVStore<()>>>;
+pub type RockCluster<R> = FixtureCluster<
+    R,
+    RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
+    RockStore<StateMachineStore<()>, StateMachineStore<()>>,
+>;
 
 impl<R, S, MS> FixtureCluster<R, S, MS>
 where
@@ -663,8 +666,8 @@ pub async fn quickstart_multi_groups(
     TaskGroup,
     FixtureCluster<
         (),
-        RockStoreCore<KVStore<()>, KVStore<()>>,
-        RockStore<KVStore<()>, KVStore<()>>,
+        RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
+        RockStore<StateMachineStore<()>, StateMachineStore<()>>,
     >,
 ) {
     // FIXME: each node has task group, if not that joinner can block.
@@ -716,8 +719,8 @@ pub async fn quickstart_group(
     TaskGroup,
     FixtureCluster<
         (),
-        RockStoreCore<KVStore<()>, KVStore<()>>,
-        RockStore<KVStore<()>, KVStore<()>>,
+        RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
+        RockStore<StateMachineStore<()>, StateMachineStore<()>>,
     >,
 ) {
     // FIXME: each node has task group, if not that joinner can block.
@@ -759,4 +762,3 @@ pub async fn quickstart_group(
 fn to_index(node_id: u64) -> usize {
     node_id as usize - 1
 }
-

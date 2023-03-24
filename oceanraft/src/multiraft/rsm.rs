@@ -120,6 +120,7 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
             }
         }
 
+        // TODO: got conf state from commit to raft and save to self.
         if let Err(_) = rx.await {
             return Err(Error::Channel(ChannelError::SenderClosed(
                 "node actor dropped".to_owned(),

@@ -1,33 +1,18 @@
-use std::collections::HashMap;
-use std::slice::IterMut;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::RwLock;
-use std::vec::IntoIter;
-
 use futures::Future;
-use oceanraft::multiraft::storage::KVStore;
+use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
-use oceanraft::multiraft::ApplyMembership;
-use oceanraft::multiraft::ApplyNoOp;
-use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::GroupState;
-// use oceanraft::multiraft::MultiStateMachine;
 use oceanraft::multiraft::StateMachine;
 use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
-use rocksdb::WriteBatch;
-use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::Receiver;
 use tokio::sync::mpsc::Sender;
-
 
 #[derive(Clone)]
 pub struct FixtureStateMachine<R>
 where
     R: WriteResponse,
 {
-    kv_store: KVStore<R>,
+    kv_store: StateMachineStore<R>,
     tx: Sender<Vec<Apply<StoreData, R>>>,
 }
 
@@ -35,7 +20,7 @@ impl<R> FixtureStateMachine<R>
 where
     R: WriteResponse,
 {
-    pub fn new(kv_store: KVStore<R>, tx: Sender<Vec<Apply<StoreData, R>>>) -> Self {
+    pub fn new(kv_store: StateMachineStore<R>, tx: Sender<Vec<Apply<StoreData, R>>>) -> Self {
         Self { kv_store, tx }
     }
 }
@@ -54,7 +39,7 @@ where
         applys: Vec<Apply<StoreData, R>>,
     ) -> Self::ApplyFuture<'_> {
         let tx = self.tx.clone();
-        self.kv_store.apply(group_id, &applys);
+        self.kv_store.apply(group_id, &applys).unwrap();
         async move {
             tx.send(applys).await;
         }

@@ -63,17 +63,18 @@ mod storage {
     /// Constant prerfix for log last index and store in log column family.
     const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
 
+    /// The error type define for rocksdb.
     #[derive(thiserror::Error, Debug)]
     pub enum RocksError {
-        #[error("log column family not found")]
-        LogColumnFamilyNotExists,
+        /// A Cloumn missing error occurred and if the
+        /// error occur that the error message contains specific
+        /// cloumn family.
+        #[error("{0} column family missing")]
+        ColumnFamilyMissing(String),
 
-        #[error("log column family not found")]
-        MetaColumnFamilyNotExists,
-
-        /// Some other error occurred.
-        #[error("error {0}")]
-        Other(#[from] Box<dyn std::error::Error + Sync + Send>),
+        /// A error occurred form rocksdb.
+        #[error("{0}")]
+        Rockdb(#[from] Box<dyn std::error::Error + Sync + Send>),
     }
 
     /// A lightweight helper method for mdb
@@ -83,9 +84,9 @@ mod storage {
         #[inline]
         fn get_metadata_cf(db: &Arc<MDB>) -> Result<Arc<BoundColumnFamily>> {
             db.cf_handle(METADATA_CF_NAME).map_or(
-                Err(Error::Other(Box::new(
-                    RocksError::MetaColumnFamilyNotExists,
-                ))),
+                Err(Error::Other(Box::new(RocksError::ColumnFamilyMissing(
+                    METADATA_CF_NAME.to_owned(),
+                )))),
                 |cf| Ok(cf),
             )
         }
@@ -93,7 +94,9 @@ mod storage {
         #[inline]
         fn get_log_cf(db: &Arc<MDB>) -> Result<Arc<BoundColumnFamily>> {
             db.cf_handle(LOG_CF_NAME).map_or(
-                Err(Error::Other(Box::new(RocksError::LogColumnFamilyNotExists))),
+                Err(Error::Other(Box::new(RocksError::ColumnFamilyMissing(
+                    LOG_CF_NAME.to_owned(),
+                )))),
                 |cf| Ok(cf),
             )
         }
@@ -181,7 +184,8 @@ mod storage {
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RockStoreCore<SR, SW> {
         /// New and initialze RockStoreCore from db.
         ///
-        /// ### Panic: if RockStoreCore has been initialized
+        /// # Panics
+        /// if RockStoreCore has been initialized
         fn new(
             group_id: u64,
             replica_id: u64,
@@ -293,7 +297,7 @@ mod storage {
             let value = self
                 .db
                 .get_cf_opt(log_cf, key, &readopts)
-                .map_err(|err| Error::Other(Box::new(RocksError::Other(Box::new(err)))))?
+                .map_err(|err| Error::Other(Box::new(RocksError::Rockdb(Box::new(err)))))?
                 .unwrap();
 
             match String::from_utf8(value).unwrap().as_str() {
@@ -557,13 +561,13 @@ mod storage {
                                                        // TODO: handle if temporaily unavailable
             let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
 
+            // iterator enteris from [low, high)
             let mut next = low;
             for ent in iter {
                 if next == high {
                     break;
                 }
 
-                // TODO: maybe need check
                 let next_key = DBEnv::format_entry_key(self.group_id, next);
                 let (key_data, value_data) = ent.unwrap();
                 if next_key.as_bytes() != key_data.as_ref() {
@@ -582,7 +586,7 @@ mod storage {
         }
 
         fn term(&self, idx: u64) -> RaftResult<u64> {
-            let snap_meta = self.get_snapshot_metadata().unwrap();
+            let snap_meta = self.get_snapshot_metadata().unwrap(); // already initialized
             if idx == snap_meta.index {
                 return Ok(snap_meta.term);
             }
@@ -693,7 +697,8 @@ mod storage {
             let metacf = DBEnv::get_metadata_cf(&self.db)?;
             let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
             let value = hs.encode_to_vec(); // TODO: add feature for difference serializers.
-            let writeopts = WriteOptions::default();
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
             self.db
                 .put_cf_opt(&metacf, &key, &value, &writeopts)
                 .map_err(|err| Error::Other(Box::new(err)))
@@ -703,7 +708,8 @@ mod storage {
             let metacf = DBEnv::get_metadata_cf(&self.db)?;
             let key = DBEnv::format_confstate_key(self.group_id, self.replica_id);
             let value = cs.encode_to_vec(); // TODO: add feature for difference serializers.
-            let writeopts = WriteOptions::default();
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
             self.db
                 .put_cf_opt(&metacf, &key, &value, &writeopts)
                 .map_err(|err| Error::Other(Box::new(err)))
@@ -737,13 +743,6 @@ mod storage {
             if ents[0].index <= ent_meta.last_index {
                 let start_key = DBEnv::format_entry_key(self.group_id, ents[0].index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
-                println!(
-                    "remove {} -> {}, {} {}",
-                    start_key,
-                    last_key,
-                    start_key > last_key,
-                    u64::MAX.to_string()
-                );
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db
@@ -751,6 +750,8 @@ mod storage {
                     .map_err(|err| Error::Other(Box::new(err)))?;
             }
 
+            // batch writes empty_flag (if need), first_index(if need), last_index and
+            // entries to log column family.
             let mut batch = WriteBatch::default();
             if ent_meta.empty {
                 // set first index
@@ -845,6 +846,7 @@ mod storage {
         SR: RaftSnapshotReader,
         SW: RaftSnapshotWriter,
     {
+        #[allow(unused)]
         node_id: u64,
         db: Arc<MDB>,
         rsnap: SR,
@@ -1033,15 +1035,12 @@ mod storage {
 }
 
 mod state_machine {
+
     use std::collections::BTreeMap;
     use std::marker::PhantomData;
     use std::path::Path;
-    use std::slice::IterMut;
     use std::sync::Arc;
-    use std::sync::Weak;
-    use std::vec::IntoIter;
 
-    use futures::Future;
     use rocksdb::BoundColumnFamily;
     use rocksdb::ColumnFamilyDescriptor;
     use rocksdb::DBWithThreadMode;
@@ -1052,29 +1051,28 @@ mod state_machine {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
-    use tokio::sync::mpsc::channel;
-    use tokio::sync::mpsc::Receiver;
-    use tokio::sync::mpsc::Sender;
-    use tokio::sync::Mutex;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result as StorageResult;
     use crate::multiraft::Apply;
-    use crate::multiraft::ApplyMembership;
-    use crate::multiraft::ApplyNoOp;
-    use crate::multiraft::ApplyNormal;
-    use crate::multiraft::StateMachine;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
-    use crate::prelude::MembershipChangeData;
     use crate::prelude::StoreData;
 
-    type Result<T> = std::result::Result<T, RockStateMachineError>;
+    type Result<T> = std::result::Result<T, StateMachineStoreError>;
+
+    #[derive(thiserror::Error, Debug)]
+    pub enum StateMachineStoreError {
+        #[error("{0} cloumn family is missing")]
+        ColumnFamilyMissing(String),
+
+        #[error("{0}")]
+        Other(Box<dyn std::error::Error + Sync + Send>),
+    }
 
     const DATA_CF_NAME: &'static str = "data";
-    const META_CF_NAME: &'static str = "meta";
     const SNAP_CF_NAME: &'static str = "snapshot";
 
     const SNAP_POSTIFX: &'static str = "snapshot";
@@ -1083,21 +1081,51 @@ mod state_machine {
     const APPLIED_TERM_PREFIX: &'static str = "applied_term";
     const MEMBERSHIP_PREFIX: &'static str = "membership";
 
-    /*****************************************************************************
-     * DATA
-     *****************************************************************************/
-    #[derive(thiserror::Error, Debug)]
-    pub enum RockDataError {
-        #[error("{0}")]
-        Encode(String),
-        #[error("{0}")]
-        Decode(String),
+    /// Format applied index key with mode `applied_index_{group_id}`.
+    #[inline]
+    fn format_applied_index_key(group_id: u64) -> String {
+        format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
     }
 
-    #[derive(abomonation_derive::Abomonation)]
-    struct GroupKey {
-        group_id: u64,
-        raw_key: Vec<u8>,
+    /// Format applied term key with mode `applied_term_{group_id}`.
+    #[inline]
+    fn format_applied_term_key(group_id: u64) -> String {
+        format!("{}_{}", APPLIED_TERM_PREFIX, group_id)
+    }
+
+    /// Format applied term key with mode `membership_{group_id}`.
+    #[inline]
+    fn format_membership_key(group_id: u64) -> String {
+        format!("{}_{}", MEMBERSHIP_PREFIX, group_id)
+    }
+
+    #[inline]
+    fn format_snapshot_key(group_id: u64) -> String {
+        format!("{}_{}", group_id, SNAP_POSTIFX)
+    }
+
+    /// Format data key with mode `{group_id}_{raw_key}`.
+    #[inline]
+    fn format_data_key(group_id: u64, raw_key: &str) -> String {
+        format!("{}_{}", group_id, raw_key)
+    }
+
+    /// Split mode `{group_id}/{raw_key}` and return `(group_id, raw_key)`.
+    /// Returned None if it doesn't fit the pattern.
+    #[inline]
+    fn split_data_key(key: &str) -> Option<(u64, String)> {
+        let splied = key.split('/').collect::<Vec<_>>();
+
+        if splied.is_empty() || splied.len() != 2 {
+            return None;
+        }
+
+        let group_id = match splied[0].parse::<u64>() {
+            Err(_) => return None,
+            Ok(val) => val,
+        };
+
+        Some((group_id, splied[1].to_string()))
     }
 
     /*****************************************************************************
@@ -1136,13 +1164,13 @@ mod state_machine {
         pub(crate) bt_map: BTreeMap<String, Vec<u8>>,
     }
 
-    impl<R> TryFrom<(u64, &KVStore<R>)> for SnapshotDataSerializer
+    impl<R> TryFrom<(u64, &StateMachineStore<R>)> for SnapshotDataSerializer
     where
         R: WriteResponse,
     {
-        type Error = RockStateMachineError;
+        type Error = StateMachineStoreError;
 
-        fn try_from(val: (u64, &KVStore<R>)) -> std::result::Result<Self, Self::Error> {
+        fn try_from(val: (u64, &StateMachineStore<R>)) -> std::result::Result<Self, Self::Error> {
             let group_id = val.0;
             let state_machine = val.1;
 
@@ -1175,33 +1203,33 @@ mod state_machine {
 
     impl SnapshotSerializer {
         pub(crate) fn serialize(&self) -> Result<Vec<u8>> {
-            serde_json::to_vec(self).map_err(|err| RockStateMachineError::Other(Box::new(err)))
+            serde_json::to_vec(self).map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
         pub(crate) fn deserialize(data: &[u8]) -> Result<Self> {
             serde_json::from_slice::<SnapshotSerializer>(data)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
     }
 
-    impl<R> RaftSnapshotReader for KVStore<R>
+    impl<R> RaftSnapshotReader for StateMachineStore<R>
     where
         R: WriteResponse,
     {
-        fn load_snapshot(&self, group_id: u64, replica_id: u64) -> StorageResult<Vec<u8>> {
+        fn load_snapshot(&self, group_id: u64, _replica_id: u64) -> StorageResult<Vec<u8>> {
             self.get_snapshot(group_id)
                 .map_err(|err| Error::Other(Box::new(err)))
         }
     }
 
-    impl<R> RaftSnapshotWriter for KVStore<R>
+    impl<R> RaftSnapshotWriter for StateMachineStore<R>
     where
         R: WriteResponse,
     {
         fn build_snapshot(
             &self,
             group_id: u64,
-            replica_id: u64,
+            _replica_id: u64,
             applied_index: u64,
             applied_term: u64,
             conf_state: ConfState,
@@ -1242,14 +1270,6 @@ mod state_machine {
     /*****************************************************************************
      * STATE MACHINE
      *****************************************************************************/
-    #[derive(thiserror::Error, Debug)]
-    pub enum RockStateMachineError {
-        #[error("{0} cloumn family is missing")]
-        ColumnFamilyMissing(String),
-
-        #[error("{0}")]
-        Other(Box<dyn std::error::Error + Sync + Send>),
-    }
 
     /*****************************************************************************
      * ROCK KEY VALUE STATE MACHINE
@@ -1373,9 +1393,15 @@ mod state_machine {
     //     }
     // }
 
+    /// The `StateMachineStore` implements snapshot, which provides a generic
+    /// storage implementation for state machines to store multiple consensus
+    /// group data using rocksdb. It uses a key-value model where the key is
+    /// a string in UTF-8 valid format and the value is bytes of arbitraray
+    /// length. It uses `StoreData` struct to represent this key-value model
+    /// and uses flexbuffer serialization.
     #[derive(Clone)]
-    pub struct KVStore<R: WriteResponse> {
-        node_id: u64,
+    pub struct StateMachineStore<R: WriteResponse> {
+        _node_id: u64,
         db: Arc<DBWithThreadMode<MultiThreaded>>,
         _m: PhantomData<R>,
     }
@@ -1398,7 +1424,11 @@ mod state_machine {
     //     }
     // }
 
-    impl<R: WriteResponse> KVStore<R> {
+    impl<R: WriteResponse> StateMachineStore<R> {
+        /// Open a rocksdb using the path provided and open the rocksdb with
+        /// the following opts:
+        /// - CreateIfMissing
+        /// - CreateIfMissingColumnFamilies
         pub fn new<P>(node_id: u64, path: P) -> Self
         where
             P: AsRef<Path>,
@@ -1410,25 +1440,25 @@ mod state_machine {
             let mut cfs = vec![];
             cfs.push(ColumnFamilyDescriptor::new(DATA_CF_NAME, db_opts.clone()));
 
-            cfs.push(ColumnFamilyDescriptor::new(META_CF_NAME, db_opts.clone()));
-
             cfs.push(ColumnFamilyDescriptor::new(SNAP_CF_NAME, db_opts.clone()));
 
             let db = DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&db_opts, &path, cfs)
                 .unwrap();
             Self {
-                node_id,
+                _node_id: node_id,
                 db: Arc::new(db),
                 _m: PhantomData,
             }
         }
 
-        pub fn apply(&self, group_id: u64, iter: &Vec<Apply<StoreData, R>>) {
+        /// Batch apply to `StateMachineStore`, which provides a convenient
+        /// method for state machine apply.
+        pub fn apply(&self, group_id: u64, applys: &Vec<Apply<StoreData, R>>) -> Result<()> {
             let mut applied_index = 0;
             let mut applied_term = 0;
             let mut batch = WriteBatch::default();
-            let cf = self.get_data_cf().unwrap();
-            for apply in iter {
+            let cf = self.get_data_cf()?;
+            for apply in applys {
                 match apply {
                     Apply::NoOp(noop) => {
                         applied_index = noop.entry_index;
@@ -1443,6 +1473,8 @@ mod state_machine {
                     Apply::Membership(membership) => {
                         // changes.done().await.unwrap();
                         // TODO: set change to rocksdb
+                        // let key = format_membership_key(grop_id);
+
                         applied_index = membership.index;
                         applied_term = membership.term;
                     }
@@ -1462,103 +1494,17 @@ mod state_machine {
 
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            self.db.write_opt(batch, &writeopts).unwrap();
-        }
-
-        #[allow(unused)]
-        pub fn set_apply_index(&self, group_id: u64, apply_index: u64) {
-            let cf = self.get_data_cf().unwrap();
-            let mut writeopts = WriteOptions::default();
-            writeopts.set_sync(true);
             self.db
-                .put_cf_opt(
-                    &cf,
-                    format_applied_index_key(group_id),
-                    apply_index.to_be_bytes(),
-                    &writeopts,
-                )
-                .unwrap()
+                .write_opt(batch, &writeopts)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
-        #[allow(unused)]
-        pub fn set_apply_term(&self, group_id: u64, apply_term: u64) {
-            let cf = self.get_data_cf().unwrap();
-            let mut writeopts = WriteOptions::default();
-            writeopts.set_sync(true);
-            self.db
-                .put_cf_opt(
-                    &cf,
-                    format_applied_term_key(group_id),
-                    apply_term.to_be_bytes(),
-                    &writeopts,
-                )
-                .unwrap()
-        }
-
-        /// Get snapshot cloumn famly.
-        #[inline]
-        fn get_snapshot_cf(&self) -> Result<Arc<BoundColumnFamily>> {
-            self.db.cf_handle(SNAP_CF_NAME).map_or(
-                Err(RockStateMachineError::ColumnFamilyMissing(
-                    "snapshot".to_owned(),
-                )),
-                |cf| Ok(cf),
-            )
-        }
-
-        /// Get data cloumn famly.
-        #[inline]
-        fn get_data_cf(&self) -> Result<Arc<BoundColumnFamily>> {
-            self.db.cf_handle(DATA_CF_NAME).map_or(
-                Err(RockStateMachineError::ColumnFamilyMissing(
-                    "data".to_owned(),
-                )),
-                |cf| Ok(cf),
-            )
-        }
-
-        /// Get meta cloumn famly.
-        #[inline]
-        fn get_meta_cf(&self) -> Result<Arc<BoundColumnFamily>> {
-            self.db.cf_handle(META_CF_NAME).map_or(
-                Err(RockStateMachineError::ColumnFamilyMissing(
-                    "meta".to_owned(),
-                )),
-                |cf| Ok(cf),
-            )
-        }
-
-        fn set_snapshot(&self, group_id: u64, data: &[u8]) -> Result<()> {
-            let snapcf = self.db.cf_handle(SNAP_CF_NAME).map_or(
-                Err(RockStateMachineError::ColumnFamilyMissing(
-                    "snapshot".to_owned(),
-                )),
-                |cf| Ok(cf),
-            )?;
-
-            let key = format_snapshot_key(group_id);
-
-            let mut writeopts = WriteOptions::default();
-            writeopts.set_sync(true);
-
-            self.db
-                .put_cf_opt(&snapcf, key, data, &writeopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
-        }
-
-        // TODO: using serializer trait for data
-        fn get_snapshot(&self, group_id: u64) -> Result<Vec<u8>> {
-            let cf = self.get_snapshot_cf()?;
-            let readopts = ReadOptions::default();
-            let key = format_snapshot_key(group_id);
-            self.db
-                .get_pinned_cf_opt(&cf, &key, &readopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
-                .map_or(Ok(vec![]), |data| Ok(data.to_vec()))
-        }
-
-        /// Set current applied index and term.
-        fn set_applied(&self, group_id: u64, val: (u64, u64) /* index, term */) -> Result<()> {
+        /// Save current tuple (applied_index, applied_term) to data column of rocksdb.
+        pub fn set_applied(
+            &self,
+            group_id: u64,
+            val: (u64, u64), /* index, term */
+        ) -> Result<()> {
             let cf = self.get_data_cf()?;
             let mut batch = WriteBatch::default();
             let key = format_applied_index_key(group_id);
@@ -1573,11 +1519,42 @@ mod state_machine {
             writeopts.set_sync(true);
             self.db
                 .write_opt(batch, &writeopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
+        }
+
+        #[allow(unused)]
+        pub fn set_applied_index(&self, group_id: u64, apply_index: u64) -> Result<()> {
+            let cf = self.get_data_cf()?;
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(
+                    &cf,
+                    format_applied_index_key(group_id),
+                    apply_index.to_be_bytes(),
+                    &writeopts,
+                )
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
+        }
+
+        #[allow(unused)]
+        pub fn set_applied_term(&self, group_id: u64, apply_term: u64) -> Result<()> {
+            let cf = self.get_data_cf()?;
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(
+                    &cf,
+                    format_applied_term_key(group_id),
+                    apply_term.to_be_bytes(),
+                    &writeopts,
+                )
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
         /// Get saved applied index and term
-        fn get_applied(&self, group_id: u64) -> Result<(u64, u64)> {
+        #[allow(unused)]
+        pub fn get_applied(&self, group_id: u64) -> Result<(u64, u64)> {
             let cf = self.get_data_cf()?;
 
             let keys = vec![
@@ -1593,7 +1570,7 @@ mod state_machine {
             let index = iter
                 .next()
                 .unwrap()
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?
                 .map_or(0, |data| {
                     u64::from_be_bytes(data.as_ref().try_into().unwrap())
                 });
@@ -1601,7 +1578,7 @@ mod state_machine {
             let term = iter
                 .next()
                 .unwrap()
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?
                 .map_or(0, |data| {
                     u64::from_be_bytes(data.as_ref().try_into().unwrap())
                 });
@@ -1609,34 +1586,79 @@ mod state_machine {
             Ok((index, term))
         }
 
-        /// Set current last membership to db.
+        /// Get snapshot cloumn famly.
+        #[inline]
+        fn get_snapshot_cf(&self) -> Result<Arc<BoundColumnFamily>> {
+            self.db.cf_handle(SNAP_CF_NAME).map_or(
+                Err(StateMachineStoreError::ColumnFamilyMissing(
+                    SNAP_CF_NAME.to_owned(),
+                )),
+                |cf| Ok(cf),
+            )
+        }
+
+        /// Get data cloumn famly.
+        #[inline]
+        fn get_data_cf(&self) -> Result<Arc<BoundColumnFamily>> {
+            self.db.cf_handle(DATA_CF_NAME).map_or(
+                Err(StateMachineStoreError::ColumnFamilyMissing(
+                    DATA_CF_NAME.to_owned(),
+                )),
+                |cf| Ok(cf),
+            )
+        }
+
+        /// Save current snapshot raw datas to snapshot column of rocksdb.
+        fn set_snapshot(&self, group_id: u64, data: &[u8]) -> Result<()> {
+            let cf = self.get_snapshot_cf()?;
+            let key = format_snapshot_key(group_id);
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(&cf, key, data, &writeopts)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
+        }
+
+        // Get current snapshot raw datas from snapshot column of rocksdb.
+        fn get_snapshot(&self, group_id: u64) -> Result<Vec<u8>> {
+            let cf = self.get_snapshot_cf()?;
+            let readopts = ReadOptions::default();
+            let key = format_snapshot_key(group_id);
+            self.db
+                .get_pinned_cf_opt(&cf, &key, &readopts)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?
+                .map_or(Ok(vec![]), |data| Ok(data.to_vec()))
+        }
+
+        /// Save current last membership to data column of rocksdb.
         fn set_membership(
             &self,
             group_id: u64,
             last_memebrship: &SnapshotMembership,
         ) -> Result<()> {
-            let cf = self.get_meta_cf()?;
+            let cf = self.get_data_cf()?;
             let key = format_membership_key(group_id);
             let value = serde_json::to_vec(last_memebrship)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))?;
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?;
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
             self.db
                 .put_cf_opt(&cf, key, value, &writeopts)
-                .map_err(|err| RockStateMachineError::Other(Box::new(err)))
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
         fn restore(&self, group_id: u64, data: Vec<u8>) -> Result<()> {
             let mut batch = WriteBatch::default();
-            let cf = self.get_data_cf().unwrap();
             let serializer = SnapshotSerializer::deserialize(&data)?;
-
+            // restore meta
             self.set_applied(
                 group_id,
                 (serializer.meta.applied_index, serializer.meta.applied_term),
             )?;
             self.set_membership(group_id, &serializer.meta.last_membership)?;
 
+            // restore data
+            let cf = self.get_data_cf().unwrap();
             for (raw_key, val) in serializer.data.bt_map.into_iter() {
                 let key = format_data_key(group_id, &raw_key);
                 // TODO: consider using groupings batch for large snapshot data.
@@ -1650,63 +1672,11 @@ mod state_machine {
         }
     }
 
-    /// Format applied index key with mode `applied_index_{group_id}`.
-    #[inline]
-    fn format_applied_index_key(group_id: u64) -> String {
-        format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
-    }
-
-    /// Format applied term key with mode `applied_term_{group_id}`.
-    #[inline]
-    fn format_applied_term_key(group_id: u64) -> String {
-        format!("{}_{}", APPLIED_TERM_PREFIX, group_id)
-    }
-
-    /// Format applied term key with mode `membership_{group_id}`.
-    #[inline]
-    fn format_membership_key(group_id: u64) -> String {
-        format!("{}_{}", MEMBERSHIP_PREFIX, group_id)
-    }
-
-    #[inline]
-    fn format_snapshot_key(group_id: u64) -> String {
-        format!("{}/{}", group_id, SNAP_POSTIFX)
-    }
-
-    /// Format data key with mode `{group_id}/{raw_key}`.
-    #[inline]
-    fn format_data_key(group_id: u64, raw_key: &str) -> String {
-        format!("{}/{}", group_id, raw_key)
-    }
-
-    /// Split mode `{group_id}/{raw_key}` and return `(group_id, raw_key)`.
-    /// Returned None if it doesn't fit the pattern.
-    #[inline]
-    fn split_data_key(key: &str) -> Option<(u64, String)> {
-        let splied = key.split('/').collect::<Vec<_>>();
-
-        if splied.is_empty() || splied.len() != 2 {
-            return None;
-        }
-
-        let group_id = match splied[0].parse::<u64>() {
-            Err(_) => return None,
-            Ok(val) => val,
-        };
-
-        Some((group_id, splied[1].to_string()))
-    }
-
     #[cfg(test)]
     mod tests {
-
         use serde::Deserialize;
         use serde::Serialize;
 
-        use crate::multiraft::ApplyNormal;
-        use crate::multiraft::GroupState;
-
-        // use super::KVStateMachine;
         use super::*;
 
         #[test]
@@ -1726,9 +1696,6 @@ mod state_machine {
         }
     }
 }
-pub use storage::{RockStore, RockStoreCore, RocksError};
-
-pub use state_machine::{KVStore, RockDataError, RockStateMachineError};
 
 #[cfg(test)]
 mod tests {
@@ -1755,7 +1722,7 @@ mod tests {
     use super::state_machine::SnapshotDataSerializer;
     use super::state_machine::SnapshotMetaSerializer;
     use super::state_machine::SnapshotSerializer;
-    use super::KVStore;
+    use super::StateMachineStore;
     // use super::KVStateMachine;
     use super::RockStore;
     use crate::multiraft::storage::MultiRaftStorage;
@@ -1763,8 +1730,6 @@ mod tests {
     use crate::multiraft::storage::RaftStorageWriter;
     use crate::multiraft::Apply;
     use crate::multiraft::ApplyNormal;
-    use crate::multiraft::GroupState;
-    use crate::multiraft::StateMachine;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
@@ -1872,8 +1837,8 @@ mod tests {
         DBWithThreadMode::<MultiThreaded>::destroy(&rocksdb::Options::default(), path).unwrap();
     }
 
-    fn new_state_machine<R: WriteResponse>(path: &Path, node_id: u64) -> KVStore<R> {
-        let state_machine = KVStore::<R>::new(node_id, path);
+    fn new_state_machine<R: WriteResponse>(path: &Path, node_id: u64) -> StateMachineStore<R> {
+        let state_machine = StateMachineStore::<R>::new(node_id, path);
 
         println!("🐿 create state machine store {}", path.display());
 
@@ -1883,8 +1848,8 @@ mod tests {
     fn new_rockstore<R: WriteResponse>(
         path: &Path,
         node_id: u64,
-        state_machine: &KVStore<R>,
-    ) -> RockStore<KVStore<R>, KVStore<R>> {
+        state_machine: &StateMachineStore<R>,
+    ) -> RockStore<StateMachineStore<R>, StateMachineStore<R>> {
         let rock_store =
             RockStore::new(node_id, path, state_machine.clone(), state_machine.clone());
 
@@ -1894,7 +1859,7 @@ mod tests {
 
     fn db_test_env<F, R>(f: F)
     where
-        F: FnOnce(&RockStore<KVStore<R>, KVStore<R>>, &KVStore<R>),
+        F: FnOnce(&RockStore<StateMachineStore<R>, StateMachineStore<R>>, &StateMachineStore<R>),
         R: WriteResponse,
     {
         let state_machine_temp_dir = rand_temp_dir().join("oceanraft_state_machine");
@@ -1923,8 +1888,8 @@ mod tests {
     where
         F: for<'r> FnOnce(
             u64,
-            &'r RockStore<KVStore<R>, KVStore<R>>,
-            &'r KVStore<R>,
+            &'r RockStore<StateMachineStore<R>, StateMachineStore<R>>,
+            &'r StateMachineStore<R>,
         ) -> BoxFuture<'r, ()>,
         R: WriteResponse,
     {
@@ -2048,7 +2013,7 @@ mod tests {
             .iter()
             .map(|apply| {
                 let mut s = flexbuffers::FlexbufferSerializer::new();
-                let w = apply.get_data().serialize(&mut s).unwrap();
+                let _ = apply.get_data().serialize(&mut s).unwrap();
                 new_rockdata_entry(apply.get_index(), apply.get_term(), &s.take_buffer())
             })
             .collect::<Vec<_>>();
@@ -2106,7 +2071,7 @@ mod tests {
         for (i, (applys, apply_idx, wresult, windex)) in tests.drain(..).enumerate() {
             let conf_state = conf_state.clone();
             let ents = ents.clone();
-            db_test_async_env::<_, ()>(|node_id, rock_store, state_machine| {
+            db_test_async_env::<_, ()>(|_node_id, rock_store, state_machine| {
                 let fut = async move {
                     let rock_store_core = rock_store
                         .create_group_store_if_missing(group_id, 1)
@@ -2121,7 +2086,7 @@ mod tests {
                         .unwrap();
                     rock_store_core.set_confstate(conf_state.clone()).unwrap();
 
-                    state_machine.apply(group_id, &applys);
+                    state_machine.apply(group_id, &applys).unwrap();
                     // .await
                     state_machine
                         .build_snapshot(group_id, 1, apply_idx, apply_idx, conf_state.clone())
@@ -2428,3 +2393,7 @@ mod tests {
         .await;
     }
 }
+
+pub use storage::{RockStore, RockStoreCore, RocksError};
+
+pub use state_machine::{StateMachineStore, StateMachineStoreError};
