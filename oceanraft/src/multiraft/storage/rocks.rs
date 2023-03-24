@@ -30,21 +30,38 @@ mod storage {
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
 
+    /// Type define for rocksdb with multi-thread.
+    type MDB = DBWithThreadMode<MultiThreaded>;
+
+    /// Constant for meta column family name.
     const METADATA_CF_NAME: &'static str = "metadta_cf";
+
+    /// Constant for log column family name.
     const LOG_CF_NAME: &'static str = "raft_log_cf";
 
-    const HARD_STATE_PREFIX: &'static str = "hs";
-    const CONF_STATE_PREFIX: &'static str = "cs";
-
-    const LOG_SNAP_META_PREFIX: &'static str = "snap_meta";
-    const LOG_EMPTY_PREFIX: &'static str = "log_empty";
-    const LOG_FIRST_INDEX_PREFIX: &'static str = "fidx";
-    const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
-
+    /// Constant prerfix for rocks core store and store in meta column family.
     const GROUP_STORE_PREFIX: &'static str = "gs";
+
+    /// Constant prerfix for replica desc and store in meta column family.
     const REPLICA_DESC_PREFIX: &'static str = "rd";
 
-    type MDB = DBWithThreadMode<MultiThreaded>;
+    /// Constant prerfix for hardstate and store in meta column family.
+    const HARD_STATE_PREFIX: &'static str = "hs";
+
+    /// Constant prerfix for confstate and store in meta column family.
+    const CONF_STATE_PREFIX: &'static str = "cs";
+
+    /// Constant prerfix for snapshot metadata and store in meta column family.
+    const LOG_SNAP_META_PREFIX: &'static str = "snap_meta";
+
+    /// Constant prerfix for log empty flag and store in log column family.
+    const LOG_EMPTY_PREFIX: &'static str = "log_empty";
+
+    /// Constant prerfix for log first index and store in log column family.
+    const LOG_FIRST_INDEX_PREFIX: &'static str = "fidx";
+
+    /// Constant prerfix for log last index and store in log column family.
+    const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
 
     #[derive(thiserror::Error, Debug)]
     pub enum RocksError {
@@ -112,12 +129,12 @@ mod storage {
         }
 
         /// Format log entry index key with mode `ent_{group_id}_{index}`.
-        /// 
+        ///
         /// # Notes
-        /// On rocksdb, the default lexicographical sorting is `ent_1_3 > ent_1_11`, 
-        /// which causes an error. although rocksdb can define additional comparactors, 
-        /// this incurs additional costs, so we align u64 to represent the maximum string 
-        /// length. For example, `ent_1_0000000000000003 < ent_1_00000000000000000011`, 
+        /// On rocksdb, the default lexicographical sorting is `ent_1_3 > ent_1_11`,
+        /// which causes an error. although rocksdb can define additional comparactors,
+        /// this incurs additional costs, so we align u64 to represent the maximum string
+        /// length. For example, `ent_1_0000000000000003 < ent_1_00000000000000000011`,
         /// since we have prefix compression enabled (TODO), space consumption is not an issue.
         #[inline]
         fn format_entry_key(group_id: u64, index: u64) -> String {
@@ -150,15 +167,15 @@ mod storage {
     }
 
     /*****************************************************************************
-     * RockStore Core
+     * ROCKSTORE CORE
      *****************************************************************************/
     #[derive(Clone)]
     pub struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
         group_id: u64,
         replica_id: u64,
         db: Arc<MDB>,
-        rsnap: Arc<SR>,
-        wsnap: Arc<SW>,
+        rsnap: SR,
+        wsnap: SW,
     }
 
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RockStoreCore<SR, SW> {
@@ -169,8 +186,8 @@ mod storage {
             group_id: u64,
             replica_id: u64,
             db: &Arc<MDB>,
-            rsnap: &Arc<SR>,
-            wsnap: &Arc<SW>,
+            rsnap: &SR,
+            wsnap: &SW,
         ) -> Result<Self> {
             let core = RockStoreCore {
                 group_id,
@@ -184,6 +201,8 @@ mod storage {
 
             let meta_cf = DBEnv::get_metadata_cf(db)?;
             let mut batch = WriteBatch::default();
+
+            // set default for hard_state, conf_state, snapshot_metadata.
             core.set_hardstate_with_batch(HardState::default(), &meta_cf, &mut batch);
             core.set_confstate_with_batch(ConfState::default(), &meta_cf, &mut batch);
             core.set_snapshot_metadata_with_batch(
@@ -200,7 +219,7 @@ mod storage {
             Ok(core)
         }
 
-        /// Get `EntryMetadata` from givn rocksdb.
+        /// Get `EntryMetadata` from given rocksdb.
         fn get_entry_meta(&self) -> Result<EntryMetadata> {
             let cf = DBEnv::get_log_cf(&self.db)?;
 
@@ -237,7 +256,6 @@ mod storage {
                 );
 
             if empty {
-                // let snap_meta = rsnap.snapshot_metadata(group_id, replica_id).unwrap();
                 let snap_meta = self.get_snapshot_metadata()?;
                 return Ok(EntryMetadata {
                     first_index: snap_meta.index + 1,
@@ -528,7 +546,7 @@ mod storage {
                 )
             }
 
-            let high = std::cmp::min(high, log_meta.last_index+1);
+            let high = std::cmp::min(high, log_meta.last_index + 1);
 
             let mut ents = Vec::with_capacity((high - low) as usize);
             let log_cf = DBEnv::get_log_cf(&self.db)?; // TODO handle error
@@ -538,7 +556,7 @@ mod storage {
             readopts.set_ignore_range_deletions(true); // skip delete_range to improve read performance
                                                        // TODO: handle if temporaily unavailable
             let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
-            
+
             let mut next = low;
             for ent in iter {
                 if next == high {
@@ -549,7 +567,7 @@ mod storage {
                 let next_key = DBEnv::format_entry_key(self.group_id, next);
                 let (key_data, value_data) = ent.unwrap();
                 if next_key.as_bytes() != key_data.as_ref() {
-                    break
+                    break;
                 }
 
                 let ent = Entry::decode(value_data.as_ref())
@@ -719,14 +737,19 @@ mod storage {
             if ents[0].index <= ent_meta.last_index {
                 let start_key = DBEnv::format_entry_key(self.group_id, ents[0].index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
-                println!("remove {} -> {}, {} {}", start_key, last_key, start_key > last_key, u64::MAX.to_string());
+                println!(
+                    "remove {} -> {}, {} {}",
+                    start_key,
+                    last_key,
+                    start_key > last_key,
+                    u64::MAX.to_string()
+                );
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db
                     .delete_range_cf_opt(&log_cf, start_key, last_key, &writeopts)
                     .map_err(|err| Error::Other(Box::new(err)))?;
             }
-
 
             let mut batch = WriteBatch::default();
             if ent_meta.empty {
@@ -824,8 +847,8 @@ mod storage {
     {
         node_id: u64,
         db: Arc<MDB>,
-        rsnap: Arc<SR>,
-        wsnap: Arc<SW>,
+        rsnap: SR,
+        wsnap: SW,
     }
 
     impl<SR, SW> RockStore<SR, SW>
@@ -856,8 +879,8 @@ mod storage {
             Self {
                 node_id,
                 db: Arc::new(db),
-                rsnap: Arc::new(snapshot_reader),
-                wsnap: Arc::new(snapshot_writer),
+                rsnap: snapshot_reader,
+                wsnap: snapshot_writer,
             }
         }
 
