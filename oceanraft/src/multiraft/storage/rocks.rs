@@ -1038,7 +1038,6 @@ mod storage {
 }
 
 mod state_machine {
-
     use std::collections::BTreeMap;
     use std::marker::PhantomData;
     use std::path::Path;
@@ -1059,9 +1058,6 @@ mod state_machine {
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result as StorageResult;
-    use crate::multiraft::Apply;
-    use crate::multiraft::ApplyNoOp;
-    use crate::multiraft::ApplyNormal;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
     use crate::prelude::StoreData;
@@ -1077,14 +1073,26 @@ mod state_machine {
         Other(Box<dyn std::error::Error + Sync + Send>),
     }
 
+    /// Constant for data column family name.
     const DATA_CF_NAME: &'static str = "data";
+
+    /// Constant for snapshot column family name.
     const SNAP_CF_NAME: &'static str = "snapshot";
 
-    const SNAP_POSTIFX: &'static str = "snapshot";
+    /// Constant prerfix for snapshot and store in `SNAP_CF_NAME` column family.
+    const SNAP_PREFIX: &'static str = "snapshot";
 
+    /// Constant prerfix for applied index and store in `DATA_CF_NAME` column family.
     const APPLIED_INDEX_PREFIX: &'static str = "applied_index";
+
+    /// Constant prerfix for applied term and store in `DATA_CF_NAME` column family.
     const APPLIED_TERM_PREFIX: &'static str = "applied_term";
+
+    /// Constant prerfix for membership index and store in `DATA_CF_NAME` column family.
     const MEMBERSHIP_PREFIX: &'static str = "membership";
+
+    /// Constant for split data key  
+    const DATA_KEY_SPLIT_PAT: char = '_';
 
     /// Format applied index key with mode `applied_index_{group_id}`.
     #[inline]
@@ -1098,15 +1106,16 @@ mod state_machine {
         format!("{}_{}", APPLIED_TERM_PREFIX, group_id)
     }
 
-    /// Format applied term key with mode `membership_{group_id}`.
+    /// Format membership key with mode `membership_{group_id}`.
     #[inline]
     fn format_membership_key(group_id: u64) -> String {
         format!("{}_{}", MEMBERSHIP_PREFIX, group_id)
     }
 
+    /// Format snapshot key with mode `snapshot_{group_id}`.
     #[inline]
     fn format_snapshot_key(group_id: u64) -> String {
-        format!("{}_{}", group_id, SNAP_POSTIFX)
+        format!("{}_{}", SNAP_PREFIX, group_id)
     }
 
     /// Format data key with mode `{group_id}_{raw_key}`.
@@ -1115,11 +1124,17 @@ mod state_machine {
         format!("{}_{}", group_id, raw_key)
     }
 
+    /// Format data key prefix with mode `{group_id}_`.
+    #[inline]
+    fn format_data_key_prefix(group_id: u64) -> String {
+        format!("{}_", group_id)
+    }
+
     /// Split mode `{group_id}/{raw_key}` and return `(group_id, raw_key)`.
     /// Returned None if it doesn't fit the pattern.
     #[inline]
     fn split_data_key(key: &str) -> Option<(u64, String)> {
-        let splied = key.split('/').collect::<Vec<_>>();
+        let splied = key.split(DATA_KEY_SPLIT_PAT).collect::<Vec<_>>();
 
         if splied.is_empty() || splied.len() != 2 {
             return None;
@@ -1180,7 +1195,7 @@ mod state_machine {
             let state_machine = val.1;
 
             let cf = state_machine.get_data_cf()?;
-            let prefix = format!("{}/", group_id);
+            let prefix = format_data_key_prefix(group_id);
             let iter_mode = IteratorMode::From(prefix.as_bytes(), Direction::Forward);
             let readopts = ReadOptions::default();
             let iter = state_machine.db.iterator_cf_opt(&cf, readopts, iter_mode);
@@ -1345,7 +1360,10 @@ mod state_machine {
     //     }
     // }
 
-    /// The `ApplyWriteBatch<R>` provides batch write `StoreData` and 
+    /*****************************************************************************
+     * APPLY WRITE BATCH
+     *****************************************************************************/
+    /// The `ApplyWriteBatch<R>` provides batch write `StoreData` and
     /// applied index and term to rocksdb.
     pub struct ApplyWriteBatch<R>
     where
@@ -1367,7 +1385,7 @@ mod state_machine {
         ///
         /// # Notes
         /// It's must be called when the apply goes to the state machine.
-        /// 
+        ///
         /// # Panics
         /// If index is smaller than already applied index.
         #[inline]
@@ -1380,7 +1398,7 @@ mod state_machine {
         ///
         /// # Notes
         /// It's must be called when the apply goes to the state machine.
-        /// 
+        ///
         /// # Panics
         /// If term is smaller than already applied term.
         #[inline]
@@ -1407,6 +1425,9 @@ mod state_machine {
         //}
     }
 
+    /*****************************************************************************
+     * STATE MACHINE STORE
+     *****************************************************************************/
     /// The `StateMachineStore` implements snapshot, which provides a generic
     /// storage implementation for state machines to store multiple consensus
     /// group data using rocksdb. It uses a key-value model where the key is
@@ -2065,7 +2086,7 @@ mod tests {
             // applys, apply index, snapshot
             (
                 vec![
-                    new_rockdata_apply(group_id, 3, 3, datas[0].clone()),
+                    new_rockdata_apply::<()>(group_id, 3, 3, datas[0].clone()),
                     new_rockdata_apply(group_id, 4, 4, datas[1].clone()),
                 ],
                 4,
@@ -2129,6 +2150,25 @@ mod tests {
                         .unwrap();
                     rock_store_core.set_confstate(conf_state.clone()).unwrap();
 
+                    let mut batch = state_machine.write_batch_for_apply(group_id);
+                    for apply in applys.iter_mut() {
+                        match apply {
+                            Apply::NoOp(noop) => {
+                                batch.set_applied_index(noop.index);
+                                batch.set_applied_term(noop.term);
+                            }
+                            Apply::Normal(normal) => {
+                                batch.put_data(&normal.data);
+                                batch.set_applied_index(normal.index);
+                                batch.set_applied_term(normal.term);
+                            }
+                            Apply::Membership(membership) => {
+                                batch.set_applied_index(membership.index);
+                                batch.set_applied_term(membership.term);
+                            }
+                        }
+                    }
+                    state_machine.write_apply_bath(group_id, batch).unwrap();
                     // state_machine.apply(group_id, &mut applys).unwrap();
                     // .await
                     state_machine
