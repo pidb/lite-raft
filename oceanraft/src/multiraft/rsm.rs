@@ -23,8 +23,8 @@ use super::WriteData;
 #[derive(Debug)]
 pub struct ApplyNoOp {
     pub group_id: u64,
-    pub entry_index: u64,
-    pub entry_term: u64,
+    pub index: u64,
+    pub term: u64,
 }
 
 #[derive(Debug)]
@@ -100,7 +100,7 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
     /// Commit membership change to multiraft.
     ///
     /// Note: it's must be called because multiraft need apply membersip change to raft.
-    pub async fn done(&self) -> Result<(), Error> {
+    pub async fn done(&mut self) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
         let commit = CommitMembership {
             entry_index: self.index,
@@ -121,11 +121,9 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
         }
 
         // TODO: got conf state from commit to raft and save to self.
-        if let Err(_) = rx.await {
-            return Err(Error::Channel(ChannelError::SenderClosed(
-                "node actor dropped".to_owned(),
-            )));
-        }
+        let _ = rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed("node actor dropped".to_owned()))
+        })??;
 
         Ok(())
     }
@@ -149,7 +147,7 @@ where
 {
     pub(crate) fn get_index(&self) -> u64 {
         match self {
-            Self::NoOp(noop) => noop.entry_index,
+            Self::NoOp(noop) => noop.index,
             Self::Normal(normal) => normal.index,
             Self::Membership(membership) => membership.index,
         }
@@ -158,7 +156,7 @@ where
     #[allow(unused)]
     pub(crate) fn get_term(&self) -> u64 {
         match self {
-            Self::NoOp(noop) => noop.entry_term,
+            Self::NoOp(noop) => noop.term,
             Self::Normal(normal) => normal.term,
             Self::Membership(membership) => membership.term,
         }
@@ -179,14 +177,14 @@ where
     W: WriteData,
     R: WriteResponse,
 {
-    type ApplyFuture<'life0>: Send + Future<Output = ()>
+    type ApplyFuture<'life0>: Send + Future<Output = ()> + 'life0
     where
         Self: 'life0;
 
-    fn apply(
-        &self,
+    fn apply<'life0>(
+        &'life0 self,
         group_id: u64,
         state: &GroupState,
         applys: Vec<Apply<W, R>>,
-    ) -> Self::ApplyFuture<'_>;
+    ) -> Self::ApplyFuture<'life0>;
 }

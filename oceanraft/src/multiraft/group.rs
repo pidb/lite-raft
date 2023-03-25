@@ -472,6 +472,8 @@ where
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
             // FIXME: handle error
+            // FIXME: call add voters to track node, node mgr etc.
+            debug!("node {}: install snapshot {:?}", node_id, snapshot);
             gs.install_snapshot(snapshot).unwrap();
         }
 

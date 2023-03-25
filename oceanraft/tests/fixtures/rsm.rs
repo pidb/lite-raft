@@ -1,4 +1,5 @@
 use futures::Future;
+use oceanraft::multiraft::storage::ApplyWriteBatch;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::GroupState;
@@ -29,18 +30,38 @@ impl<R> StateMachine<StoreData, R> for FixtureStateMachine<R>
 where
     R: WriteResponse,
 {
-    type ApplyFuture<'life0> = impl Future<Output = ()>
+    type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
     where
         Self: 'life0;
-    fn apply(
-        &self,
+    fn apply<'life0>(
+        &'life0 self,
         group_id: u64,
         _state: &GroupState,
-        applys: Vec<Apply<StoreData, R>>,
-    ) -> Self::ApplyFuture<'_> {
+        mut applys: Vec<Apply<StoreData, R>>,
+    ) -> Self::ApplyFuture<'life0> {
         let tx = self.tx.clone();
-        self.kv_store.apply(group_id, &applys).unwrap();
         async move {
+            let mut batch = self.kv_store.write_batch_for_apply(group_id);
+            for apply in applys.iter_mut() {
+                match apply {
+                    Apply::NoOp(noop) => {
+                        batch.set_applied_index(noop.index);
+                        batch.set_applied_term(noop.term);
+                    }
+                    Apply::Normal(normal) => {
+                        batch.put_data(&normal.data);
+                        batch.set_applied_index(normal.index);
+                        batch.set_applied_term(normal.term);
+                    }
+                    Apply::Membership(membership) => {
+                        membership.done().await.unwrap();
+                        batch.set_applied_index(membership.index);
+                        batch.set_applied_term(membership.term);
+                    }
+                }
+            }
+            self.kv_store.write_apply_bath(group_id, batch).unwrap();
+
             tx.send(applys).await;
         }
     }

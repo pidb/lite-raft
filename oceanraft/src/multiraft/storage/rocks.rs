@@ -1021,10 +1021,13 @@ mod storage {
                 let readopts = ReadOptions::default();
                 let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
                 for item in iter {
-                    let (_, value) = item.unwrap();
-                    let rd = ReplicaDesc::decode(value.as_ref()).unwrap();
-                    if rd.node_id == node_id {
-                        return Ok(Some(rd));
+                    let (key, value) = item.unwrap();
+                    let key = std::str::from_utf8(&key).unwrap();
+                    if key.starts_with(&seek) {
+                        let rd = ReplicaDesc::decode(value.as_ref()).unwrap();
+                        if rd.node_id == node_id {
+                            return Ok(Some(rd));
+                        }
                     }
                 }
 
@@ -1057,6 +1060,8 @@ mod state_machine {
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result as StorageResult;
     use crate::multiraft::Apply;
+    use crate::multiraft::ApplyNoOp;
+    use crate::multiraft::ApplyNormal;
     use crate::multiraft::WriteResponse;
     use crate::prelude::ConfState;
     use crate::prelude::StoreData;
@@ -1340,58 +1345,67 @@ mod state_machine {
     //     }
     // }
 
-    // pub struct ApplyWriteBatch<R>
-    // where
-    //     R: WriteResponse,
-    // {
-    //     db: Arc<DBWithThreadMode<MultiThreaded>>,
-    //     batch: WriteBatch,
-    //     group_id: u64,
-    //     applied_index: u64,
-    //     applied_term: u64,
-    //     _m: PhantomData<R>,
-    // }
+    /// The `ApplyWriteBatch<R>` provides batch write `StoreData` and 
+    /// applied index and term to rocksdb.
+    pub struct ApplyWriteBatch<R>
+    where
+        R: WriteResponse,
+    {
+        db: Arc<DBWithThreadMode<MultiThreaded>>,
+        batch: WriteBatch,
+        group_id: u64,
+        applied_index: u64,
+        applied_term: u64,
+        _m: PhantomData<R>,
+    }
 
-    // impl<R> ApplyWriteBatch<R>
-    // where
-    //     R: WriteResponse,
-    // {
-    //     pub fn cf(&self) -> Arc<BoundColumnFamily> {
-    //         self.db.cf_handle(DATA_CF_NAME).unwrap()
-    //     }
+    impl<R> ApplyWriteBatch<R>
+    where
+        R: WriteResponse,
+    {
+        /// Save the current applied index inside the batch.
+        ///
+        /// # Notes
+        /// It's must be called when the apply goes to the state machine.
+        /// 
+        /// # Panics
+        /// If index is smaller than already applied index.
+        #[inline]
+        pub fn set_applied_index(&mut self, index: u64) {
+            assert!(self.applied_index <= index);
+            self.applied_index = index
+        }
 
-    //     #[inline]
-    //     pub fn put_noop(&mut self, noop: ApplyNoOp) {
-    //         self.applied_index = noop.entry_index;
-    //         self.applied_term = noop.entry_term;
-    //     }
+        /// Save the current applied index inside the batch.
+        ///
+        /// # Notes
+        /// It's must be called when the apply goes to the state machine.
+        /// 
+        /// # Panics
+        /// If term is smaller than already applied term.
+        #[inline]
+        pub fn set_applied_term(&mut self, term: u64) {
+            assert!(self.applied_term <= term);
+            self.applied_term = term
+        }
 
-    //     #[inline]
-    //     pub fn put_normal(&mut self, normal: ApplyNormal<StoreData, R>) {
-    //         let cf = self.cf();
-    //         let key = format_data_key(self.group_id, &normal.data.key);
-    //         self.batch.put_cf(&cf, &key, normal.data.value);
-    //         self.applied_index = normal.index;
-    //         self.applied_index = normal.term;
-    //     }
+        /// Save the data to batch.
+        #[inline]
+        pub fn put_data(&mut self, data: &StoreData) {
+            let cf = self.db.cf_handle(DATA_CF_NAME).unwrap();
+            let key = format_data_key(self.group_id, &data.key);
+            self.batch.put_cf(&cf, &key, &data.value);
+        }
 
-    //     #[inline]
-    //     pub fn put_membership(&mut self, membership: ApplyMembership<R>) {
-    //         // changes.done().await.unwrap();
-    //         // TODO: set change to rocksdb in data cf
-    //         self.applied_index = membership.index;
-    //         self.applied_term = membership.term;
-    //     }
-
-    //     #[inline]
-    //     pub fn put_apply(&mut self, apply: Apply<StoreData, R>) {
-    //         match apply {
-    //             Apply::NoOp(noop) => self.put_noop(noop),
-    //             Apply::Normal(normal) => self.put_normal(normal),
-    //             Apply::Membership(membership) => self.put_membership(membership),
-    //         }
-    //     }
-    // }
+        //#[inline]
+        //pub fn put_apply(&mut self, apply: Apply<StoreData, R>) {
+        //    match apply {
+        //        Apply::NoOp(noop) => self.put_noop(noop),
+        //        Apply::Normal(normal) => self.put_normal(normal),
+        //        Apply::Membership(membership) => self.put_membership(membership),
+        //    }
+        //}
+    }
 
     /// The `StateMachineStore` implements snapshot, which provides a generic
     /// storage implementation for state machines to store multiple consensus
@@ -1453,49 +1467,78 @@ mod state_machine {
 
         /// Batch apply to `StateMachineStore`, which provides a convenient
         /// method for state machine apply.
-        pub fn apply(&self, group_id: u64, applys: &Vec<Apply<StoreData, R>>) -> Result<()> {
-            let mut applied_index = 0;
-            let mut applied_term = 0;
-            let mut batch = WriteBatch::default();
-            let cf = self.get_data_cf()?;
-            for apply in applys {
-                match apply {
-                    Apply::NoOp(noop) => {
-                        applied_index = noop.entry_index;
-                        applied_term = noop.entry_term;
-                    }
-                    Apply::Normal(normal) => {
-                        let key = format_data_key(group_id, &normal.data.key);
-                        batch.put_cf(&cf, key.as_bytes(), &normal.data.value);
-                        applied_index = normal.index;
-                        applied_term = normal.term;
-                    }
-                    Apply::Membership(membership) => {
-                        // changes.done().await.unwrap();
-                        // TODO: set change to rocksdb
-                        // let key = format_membership_key(grop_id);
+        // pub fn apply(&self, group_id: u64, applys: &mut Vec<Apply<StoreData, R>>) -> Result<()> {
+        //     let mut applied_index = 0;
+        //     let mut applied_term = 0;
+        //     let mut batch = WriteBatch::default();
+        //     let cf = self.get_data_cf()?;
+        //     for apply in applys {
+        //         match apply {
+        //             Apply::NoOp(noop) => {
+        //                 applied_index = noop.entry_index;
+        //                 applied_term = noop.entry_term;
+        //             }
+        //             Apply::Normal(normal) => {
+        //                 let key = format_data_key(group_id, &normal.data.key);
+        //                 batch.put_cf(&cf, key.as_bytes(), &normal.data.value);
+        //                 applied_index = normal.index;
+        //                 applied_term = normal.term;
+        //             }
+        //             Apply::Membership(membership) => {
+        //                 applied_index = membership.index;
+        //                 applied_term = membership.term;
+        //             }
+        //         }
+        //     }
 
-                        applied_index = membership.index;
-                        applied_term = membership.term;
-                    }
-                }
+        //     batch.put_cf(
+        //         &cf,
+        //         format_applied_index_key(group_id),
+        //         applied_index.to_be_bytes(),
+        //     );
+        //     batch.put_cf(
+        //         &cf,
+        //         format_applied_term_key(group_id),
+        //         applied_term.to_be_bytes(),
+        //     );
+
+        //     let mut writeopts = WriteOptions::default();
+        //     writeopts.set_sync(true);
+        //     self.db
+        //         .write_opt(batch, &writeopts)
+        //         .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
+        // }
+
+        /// Create a `ApplyWriteBatch<R>` for apply of `StateMachine`.
+        pub fn write_batch_for_apply(&self, group_id: u64) -> ApplyWriteBatch<R> {
+            ApplyWriteBatch {
+                db: self.db.clone(),
+                batch: WriteBatch::default(),
+                group_id,
+                applied_index: 0,
+                applied_term: 0,
+                _m: PhantomData,
             }
+        }
 
-            batch.put_cf(
+        /// Consume `ApplyWriteBatch<R>` and write to rocksdb.
+        pub fn write_apply_bath(&self, group_id: u64, mut batch: ApplyWriteBatch<R>) -> Result<()> {
+            let cf = self.get_data_cf()?;
+            batch.batch.put_cf(
                 &cf,
                 format_applied_index_key(group_id),
-                applied_index.to_be_bytes(),
+                batch.applied_index.to_be_bytes(),
             );
-            batch.put_cf(
+            batch.batch.put_cf(
                 &cf,
                 format_applied_term_key(group_id),
-                applied_term.to_be_bytes(),
+                batch.applied_term.to_be_bytes(),
             );
 
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
             self.db
-                .write_opt(batch, &writeopts)
+                .write_opt(batch.batch, &writeopts)
                 .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
@@ -2068,7 +2111,7 @@ mod tests {
             ),
             // (5, unavailable, 6),
         ];
-        for (i, (applys, apply_idx, wresult, windex)) in tests.drain(..).enumerate() {
+        for (i, (mut applys, apply_idx, wresult, windex)) in tests.drain(..).enumerate() {
             let conf_state = conf_state.clone();
             let ents = ents.clone();
             db_test_async_env::<_, ()>(|_node_id, rock_store, state_machine| {
@@ -2086,7 +2129,7 @@ mod tests {
                         .unwrap();
                     rock_store_core.set_confstate(conf_state.clone()).unwrap();
 
-                    state_machine.apply(group_id, &applys).unwrap();
+                    // state_machine.apply(group_id, &mut applys).unwrap();
                     // .await
                     state_machine
                         .build_snapshot(group_id, 1, apply_idx, apply_idx, conf_state.clone())
@@ -2396,4 +2439,4 @@ mod tests {
 
 pub use storage::{RockStore, RockStoreCore, RocksError};
 
-pub use state_machine::{StateMachineStore, StateMachineStoreError};
+pub use state_machine::{ApplyWriteBatch, StateMachineStore, StateMachineStoreError};

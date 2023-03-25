@@ -544,8 +544,8 @@ where
                         self.pending_senders.remove_stales(entry_index, entry_term);
                         Apply::NoOp(ApplyNoOp {
                             group_id,
-                            entry_index,
-                            entry_term,
+                            index: entry_index,
+                            term: entry_term,
                         })
                     } else {
                         trace!(

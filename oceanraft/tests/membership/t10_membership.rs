@@ -38,7 +38,7 @@ async fn check_cc<F>(
             .as_str(),
         );
     check(&event);
-    event.done().await.unwrap();
+    //    event.done().await.unwrap();
     // TODO: as method called
     event.tx.map(|tx| tx.send(Ok(())));
 }

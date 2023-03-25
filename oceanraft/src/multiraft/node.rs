@@ -1224,6 +1224,12 @@ where
             }
         }
 
+        // will only move forward if the consensus group role is the leader
+        // and not the joint consensus.
+        if !group.is_leader() && view.conf_change.changes.len() > 1 {
+            return Ok(());
+        }
+
         // apply to raft
         let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
             Err(err) => {
