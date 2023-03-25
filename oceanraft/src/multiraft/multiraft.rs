@@ -14,6 +14,7 @@ use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
 use crate::util::TaskGroup;
 
+use super::StateMachine;
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
@@ -34,7 +35,6 @@ use super::transport::Transport;
 use super::types::WriteData;
 use super::util::Ticker;
 use super::RaftGroupError;
-use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
@@ -100,10 +100,10 @@ where
     event_bcast: EventChannel,
 }
 
-impl<WD, RES> MultiRaft<WD, RES>
+impl<W, R> MultiRaft<W, R>
 where
-    WD: WriteData,
-    RES: WriteResponse,
+    W: WriteData,
+    R: WriteResponse,
 {
     pub fn new<TR, RS, MRS, RSM, TK>(
         cfg: Config,
@@ -117,8 +117,7 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<RES>,
-        RES: WriteResponse,
+        RSM: StateMachine<W, R>,
         TK: Ticker,
     {
         cfg.validate()?;
@@ -148,10 +147,10 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: WD,
+        data: W,
         context: Option<Vec<u8>>,
         duration: Duration,
-    ) -> Result<RES, Error> {
+    ) -> Result<R, Error> {
         let rx = self.write_non_block(group_id, term, data, context)?;
         match timeout(duration, rx).await {
             Err(_) => Err(Error::Timeout(
@@ -169,9 +168,9 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: WD,
+        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<RES, Error> {
+    ) -> Result<R, Error> {
         let rx = self.write_non_block(group_id, term, data, context)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -184,9 +183,9 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: WD,
+        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<RES, Error> {
+    ) -> Result<R, Error> {
         let rx = self.write_non_block(group_id, term, data, context)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -216,9 +215,9 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: WD,
+        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
+    ) -> Result<oneshot::Receiver<Result<R, Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
@@ -246,7 +245,7 @@ where
         &self,
         request: MembershipChangeData,
         duration: Duration,
-    ) -> Result<RES, Error> {
+    ) -> Result<R, Error> {
         let rx = self.membership_change_non_block(request)?;
         match timeout(duration, rx).await {
             Err(_) => Err(Error::Timeout(
@@ -260,7 +259,7 @@ where
         }
     }
 
-    pub async fn membership_change(&self, request: MembershipChangeData) -> Result<RES, Error> {
+    pub async fn membership_change(&self, request: MembershipChangeData) -> Result<R, Error> {
         let rx = self.membership_change_non_block(request)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -269,7 +268,7 @@ where
         })?
     }
 
-    pub fn membership_change_block(&self, request: MembershipChangeData) -> Result<RES, Error> {
+    pub fn membership_change_block(&self, request: MembershipChangeData) -> Result<R, Error> {
         let rx = self.membership_change_non_block(request)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -281,7 +280,7 @@ where
     pub fn membership_change_non_block(
         &self,
         request: MembershipChangeData,
-    ) -> Result<oneshot::Receiver<Result<RES, Error>>, Error> {
+    ) -> Result<oneshot::Receiver<Result<R, Error>>, Error> {
         let _ = self.pre_propose_check(request.group_id)?;
 
         let (tx, rx) = oneshot::channel();

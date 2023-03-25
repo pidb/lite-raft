@@ -8,7 +8,6 @@ use crate::prelude::Entry;
 use crate::prelude::HardState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
-use crate::prelude::SnapshotMetadata;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -138,21 +137,22 @@ pub trait RaftStorageWriter {
 }
 
 pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
-    fn snapshot_metadata(&self, group_id: u64, replica_id: u64) -> Result<SnapshotMetadata>;
-
-    fn load_snapshot(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        request_index: u64,
-        to: u64,
-    ) -> Result<Snapshot>;
+    // TODO: using serializer trait for adta
+    fn load_snapshot(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>>;
 }
 
 pub trait RaftSnapshotWriter: Clone + Send + Sync + 'static {
-    fn save_snapshot(&self, group_id: u64, replica_id: u64, snapshot: Snapshot) -> Result<()>;
+    // TODO: using serializer trait for adta
+    fn install_snapshot(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()>;
 
-    fn build_snapshot(&self, group_id: u64, replica_id: u64, applied: u64) -> Result<()>;
+    fn build_snapshot(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+        applied_index: u64,
+        applied_term: u64,
+        last_conf_state: ConfState,
+    ) -> Result<()>;
 }
 
 /// RaftStorage provides read and writes all the information about the current Raft implementation,
@@ -218,6 +218,8 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
 }
 
 mod mem;
+
 #[cfg(feature = "store-rocksdb")]
 mod rocks;
 pub use mem::{MultiRaftMemoryStorage, RaftMemStorage};
+pub use rocks::{ApplyWriteBatch, RockStore, RockStoreCore, StateMachineStore};

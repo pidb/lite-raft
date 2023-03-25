@@ -2,13 +2,16 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use oceanraft::multiraft::ApplyNormal;
+use oceanraft::prelude::StoreData;
+
+// use super::cluster::FixtureWriteData;
 
 
 #[derive(Default)]
-struct Commands(HashMap<u64, Vec<Vec<u8>>>);
+struct Commands(HashMap<u64, Vec<StoreData>>);
 
 impl Commands {
-    fn insert(&mut self, group_id: u64, data: Vec<u8>) {
+    fn insert(&mut self, group_id: u64, data: StoreData) {
         match self.0.get_mut(&group_id) {
             Some(cmds) => cmds.push(data),
             None => {
@@ -25,18 +28,19 @@ pub struct WriteChecker {
 }
 
 impl WriteChecker {
-    pub fn insert_write(&mut self, group_id: u64, data: Vec<u8>) {
+    pub fn insert_write(&mut self, group_id: u64, data: StoreData) {
        self.writes.insert(group_id, data);
     }
 
-    pub fn check(&mut self, applys: &Vec<ApplyNormal<()>>) {
+    pub fn check(&mut self, applys: &Vec<ApplyNormal<StoreData, ()>>) {
         self.fill_applys(applys);
         assert_eq!(self.writes, self.applys)
     }
 
-    fn fill_applys(&mut self, applys: &Vec<ApplyNormal<()>>) {
+    fn fill_applys(&mut self, applys: &Vec<ApplyNormal<StoreData, ()>>) {
         for apply in applys.iter() {
-            self.applys.insert(apply.group_id, apply.entry.data.clone());
+            // Fuck ugly, we need attach WriteData to Apply
+            self.applys.insert(apply.group_id, apply.data.clone());
         }
     }
 }

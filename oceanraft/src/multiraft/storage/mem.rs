@@ -96,37 +96,25 @@ impl RaftStorageWriter for RaftMemStorage {
 }
 
 impl RaftSnapshotWriter for RaftMemStorage {
-    fn build_snapshot(&self, _group_id: u64, _replica_id: u64, _applied: u64) -> Result<()> {
+    fn build_snapshot(&self, group_id: u64, replica_id: u64, applied_index: u64, applied_term: u64, last_conf_state: ConfState) -> Result<()> {
+        unimplemented!()
+    } 
+
+    fn install_snapshot(&self, group_id: u64, replica_id: u64, data: Vec<u8>) -> Result<()> {
         unimplemented!()
     }
 
-    fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
-        self.core
-            .wl()
-            .apply_snapshot(snapshot)
-            .map_err(|err| err.into())
-    }
+    // fn save_snapshot(&self, _group_id: u64, _replica_id: u64, snapshot: Snapshot) -> Result<()> {
+    //     self.core
+    //         .wl()
+    //         .apply_snapshot(snapshot)
+    //         .map_err(|err| err.into())
+    // }
 }
 
 impl RaftSnapshotReader for RaftMemStorage {
-    fn load_snapshot(
-        &self,
-        _group_id: u64,
-        _replica_id: u64,
-        request_index: u64,
-        to: u64,
-    ) -> Result<Snapshot> {
-        self.core
-            .snapshot(request_index, to)
-            .map_err(|err| err.into())
-    }
-
-    fn snapshot_metadata(
-        &self,
-        _group_id: u64,
-        _replica_id: u64,
-    ) -> Result<raft::prelude::SnapshotMetadata> {
-        Ok(self.core.snapshot(0, 0).unwrap().metadata.unwrap())
+    fn load_snapshot(&self, group_id: u64, replica_id: u64) -> Result<Vec<u8>> {
+        unimplemented!()
     }
 }
 

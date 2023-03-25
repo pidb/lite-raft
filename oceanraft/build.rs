@@ -10,6 +10,7 @@ fn main() {
     let protos = [
         &Path::new(&proto_dir).join(Path::new("eraftpb.proto")),
         &Path::new(&proto_dir).join(Path::new("multiraftpb.proto")),
+        &Path::new(&proto_dir).join(Path::new("storepb.proto")),
     ];
 
     for proto in protos.iter() {
@@ -22,6 +23,18 @@ fn main() {
     build_config
         .extern_path(".eraftpb", "::raft::eraftpb")
         .file_descriptor_set_path(out_dir.join("oceanraft_descriptor.bin"))
+        .message_attribute(
+            "multiraft.StoreData",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .message_attribute(
+            "multiraft.MembershipChangData",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .message_attribute(
+            "multiraft.SingleMembershipChange",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
         .compile_protos(&protos, &[proto_dir])
         .unwrap();
 }

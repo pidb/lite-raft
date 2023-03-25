@@ -72,9 +72,9 @@ pub enum ManageMessage {
 pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
-pub struct ApplyData<RES>
+pub struct ApplyData<R>
 where
-    RES: WriteResponse,
+    R: WriteResponse,
 {
     pub replica_id: u64,
     pub group_id: u64,
@@ -83,14 +83,14 @@ where
     pub commit_term: u64,
     pub entries: Vec<Entry>,
     pub entries_size: usize,
-    pub proposals: Vec<Proposal<RES>>,
+    pub proposals: Vec<Proposal<R>>,
 }
 
-impl<RES> ApplyData<RES>
+impl<R> ApplyData<R>
 where
-    RES: WriteResponse,
+    R: WriteResponse,
 {
-    pub fn try_batch(&mut self, that: &mut ApplyData<RES>, max_batch_size: usize) -> bool {
+    pub fn try_batch(&mut self, that: &mut ApplyData<R>, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
         assert_eq!(self.group_id, that.group_id);
         assert!(that.term >= self.term);
@@ -131,15 +131,15 @@ pub struct ApplyResultMessage {
 /// from ConfChange. If ConfChangeV2 is used, changes contains multiple
 /// requests, otherwise changes contains only one request.
 #[derive(Debug)]
-pub(crate) struct CommitMembership {
+pub struct CommitMembership {
     #[allow(unused)]
-    pub(crate) entry_index: u64,
-    pub(crate) conf_change: ConfChangeV2,
-    pub(crate) change_request: MembershipChangeData,
+    pub entry_index: u64,
+    pub conf_change: ConfChangeV2,
+    pub change_request: MembershipChangeData,
 }
 
 #[derive(Debug)]
-pub(crate) enum ApplyCommitMessage {
+pub enum ApplyCommitMessage {
     None,
     Membership((CommitMembership, oneshot::Sender<Result<(), Error>>)),
 }

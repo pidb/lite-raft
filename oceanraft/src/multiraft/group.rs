@@ -17,6 +17,7 @@ use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
+
 use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -181,6 +182,7 @@ where
                     // we know that one of the replicas must be ready, so we can repair the
                     // storage to store this replica.
                     let repaired_replica_desc = ReplicaDesc {
+                        group_id,
                         node_id,
                         replica_id: self.raft_group.raft.id,
                     };
@@ -423,6 +425,7 @@ where
                 );
 
                 ReplicaDesc {
+                    group_id,
                     node_id: NO_NODE,
                     replica_id: ss.leader_id,
                 }
@@ -469,6 +472,8 @@ where
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
             // FIXME: handle error
+            // FIXME: call add voters to track node, node mgr etc.
+            debug!("node {}: install snapshot {:?}", node_id, snapshot);
             gs.install_snapshot(snapshot).unwrap();
         }
 
@@ -621,11 +626,14 @@ where
         }
 
         let term = self.term();
+        let mut s = flexbuffers::FlexbufferSerializer::new();
+        write_request.data.serialize(&mut s).unwrap();
+        let write_data = s.take_buffer();
 
-        let write_data = match write_request.data.encode() {
-            Err(err) => todo!(),
-            Ok(data) => data,
-        };
+        // let write_data = match write_request.data.encode() {
+        //     Err(err) => todo!(),
+        //     Ok(data) => data,
+        // };
 
         // propose to raft group
         let next_index = self.last_index() + 1;

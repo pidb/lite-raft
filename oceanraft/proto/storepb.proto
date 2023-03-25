@@ -1,0 +1,8 @@
+syntax = "proto3";
+package multiraft;
+
+message StoreData {
+    string key = 1;
+    bytes value = 2;
+}
+  

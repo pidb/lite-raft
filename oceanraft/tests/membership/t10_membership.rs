@@ -13,11 +13,14 @@ use tokio::time::timeout_at;
 use tokio::time::Instant;
 
 use crate::fixtures::init_default_ut_tracing;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::RockCluster;
+use crate::fixtures::RockStorageEnv;
 
 async fn check_cc<F>(
-    cluster: &mut FixtureCluster,
+    cluster: &mut RockCluster<()>,
     node_id: u64,
     wait_node_id: u64,
     timeout: Duration,
@@ -35,9 +38,8 @@ async fn check_cc<F>(
             .as_str(),
         );
     check(&event);
-    event.done().await.unwrap();
+    //    event.done().await.unwrap();
     // TODO: as method called
-    println!("event tx is none? = {}", event.tx.is_none());
     event.tx.map(|tx| tx.send(Ok(())));
 }
 
@@ -53,9 +55,18 @@ async fn test_single_step() {
     //     // FIXME: use sync wait
     //     // task_group.joinner().awa`it;
     // }
-
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
     // cluster.start();
+
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;
@@ -88,6 +99,7 @@ async fn test_single_step() {
             };
             node.membership_change(req.clone()).await.unwrap();
         }
+
         done_tx.send(()).unwrap();
     });
 
@@ -104,10 +116,10 @@ async fn test_single_step() {
 
     // check leader should recv all apply events.
     for i in 1..5 {
-        let check_fn = |event: &ApplyMembership<()>| {
-            let mut cc = ConfChange::default();
-            cc.merge_from_bytes(event.entry.get_data()).unwrap();
-
+        let check_fn = |apply: &ApplyMembership<()>| {
+            // let mut cc = ConfChange::default();
+            // cc.merge_from_bytes(event.entry.get_data()).unwrap();
+            let cc = &apply.conf_change.changes[0];
             assert_eq!(
                 cc.node_id,
                 i + 1,
@@ -137,6 +149,8 @@ async fn test_single_step() {
         Err(_) => panic!("timeouted for wait all membership change complte"),
         Ok(_) => {}
     }
+
+    rockstore_env.destory();
 }
 
 #[async_entry::test(
@@ -152,8 +166,18 @@ async fn test_joint_consensus() {
     //     // task_group.joinner().awa`it;
     // }
 
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+
     // cluster.start();
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;
@@ -188,10 +212,9 @@ async fn test_joint_consensus() {
         })
         .unwrap();
 
-    let check_fn = |event: &ApplyMembership<()>| {
-        let mut cc = ConfChangeV2::default();
-        cc.merge_from_bytes(&event.entry.data).unwrap();
-        let changes = cc
+    let check_fn = |apply: &ApplyMembership<()>| {
+        let changes = apply
+            .conf_change
             .changes
             .iter()
             .map(|change| (change.node_id, change.get_change_type()))
@@ -233,8 +256,18 @@ async fn test_joint_consensus() {
 )]
 async fn test_remove() {
     let task_group = TaskGroup::new();
-    let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
+    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
     // cluster.start();
+
+    let nodes = 5;
+    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .storages(rockstore_env.storages.clone())
+        .task_group(task_group.clone())
+        .build()
+        .await;
 
     let group_id = 1;
     let node_id = 1;
@@ -284,10 +317,9 @@ async fn test_remove() {
         done_tx.send(()).unwrap();
     });
 
-    let check_fn = |event: &ApplyMembership<()>| {
-        let mut cc = ConfChangeV2::default();
-        cc.merge_from_bytes(&event.entry.data).unwrap();
-        let changes = cc
+    let check_fn = |apply: &ApplyMembership<()>| {
+        let changes = apply
+            .conf_change
             .changes
             .iter()
             .map(|change| (change.node_id, change.get_change_type()))

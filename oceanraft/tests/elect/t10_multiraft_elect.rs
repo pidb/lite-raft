@@ -1,24 +1,24 @@
 use std::time::Duration;
 
+use oceanraft::util::TaskGroup;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
-use oceanraft::util::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::FixtureCluster;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
+use crate::fixtures::RockCluster;
+use crate::fixtures::RockStorageEnv;
 
 async fn check_replica_should_elected(
-    cluster: &mut FixtureCluster,
+    cluster: &mut RockCluster<()>,
     node_id: u64,
     group_id: u64,
-    // replica_desc: ReplicaDesc,
     expected_leaeder_id: u64,
 ) {
     // trigger an election for the replica in the group of the node where leader nodes.
-    // self.trigger_elect(node_index, group_id).await;
     cluster.campaign_group(node_id, group_id).await;
-    let election = FixtureCluster::wait_leader_elect_event(cluster, node_id)
+    let election = cluster.wait_leader_elect_event(node_id)
         .await
         .unwrap();
 
@@ -28,12 +28,24 @@ async fn check_replica_should_elected(
     assert_eq!(election.replica_id, replica_desc.replica_id);
 }
 
-#[async_entry::test(flavor = "multi_thread", init = "init_default_ut_tracing()", tracing_span = "debug")]
+#[async_entry::test(
+    flavor = "multi_thread",
+    init = "init_default_ut_tracing()",
+    tracing_span = "debug"
+)]
 async fn test_initial_leader_elect() {
     for i in 0..3 {
+        let nodes = 3;
+        let rockstore_env = RockStorageEnv::new(nodes);
         let task_group = TaskGroup::new();
-        let mut cluster = FixtureCluster::make(3, task_group.clone()).await;
-        // cluster.start();
+        let mut cluster = ClusterBuilder::new(nodes)
+            .election_ticks(2)
+            .task_group(task_group.clone())
+            .kv_stores(rockstore_env.rock_kv_stores.clone())
+            .storages(rockstore_env.storages.clone())
+            .build()
+            .await;
+
         let mut plan = MakeGroupPlan {
             group_id: 1,
             first_node_id: 1,
@@ -61,5 +73,6 @@ async fn test_initial_leader_elect() {
         {
             panic!("wait cluster taks stop error")
         }
+        rockstore_env.destory();
     }
 }
