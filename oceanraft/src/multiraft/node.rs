@@ -181,16 +181,10 @@ impl NodeManager {
 
     pub(crate) fn add_group(&mut self, node_id: u64, group_id: u64) {
         let node = match self.nodes.get_mut(&node_id) {
-            None => {
-                self.nodes.insert(
-                    node_id,
-                    Node {
-                        node_id,
-                        group_map: HashMap::new(),
-                    },
-                );
-                self.nodes.get_mut(&node_id).unwrap()
-            }
+            None => self.nodes.entry(group_id).or_insert(Node {
+                node_id,
+                group_map: HashMap::new(),
+            }),
             Some(node) => node,
         };
 
@@ -515,7 +509,10 @@ where
         &mut self,
         mut msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
-        let raft_msg = msg.msg.take().unwrap();
+        let raft_msg = msg
+            .msg
+            .take()
+            .expect("invalid message, raft Message should not be none.");
         let group_id = msg.group_id;
 
         // processing messages between replicas from other nodes to self node.
@@ -585,7 +582,7 @@ where
                         err
                     })?;
 
-                self.groups.get_mut(&group_id).unwrap()
+                self.groups.get_mut(&group_id).expect("unreachable")
             }
         };
 
@@ -1342,15 +1339,19 @@ where
 
             match self.groups.get_mut(&group_id) {
                 None => {
-                    warn!(
-                        "node {}: make group {} activity but dropped",
+                    // TODO: remove pending proposals related to this group
+                    error!(
+                        "node {}: handle group-{} ready, but dropped",
                         self.node_id, group_id
                     )
                 }
                 Some(group) => {
+                    // TODO: move to group inside as method.
                     if !group.raft_group.has_ready() {
                         continue;
                     }
+
+                    // TODO: if an error occurs, we should decide to retry depending on the kind of error.
                     group
                         .handle_ready(
                             self.node_id,
@@ -1366,19 +1367,16 @@ where
                 }
             }
         }
+
         if !applys.is_empty() {
             self.send_applys(applys);
         }
 
+        // TODO: if an error occurs, we should decide to retry depending on the kind of error.
         let gwrs = self.do_multi_groups_write(multi_groups_write).await;
         self.do_multi_groups_write_finish(gwrs).await;
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "MultiRaftActorInner::do_multi_groups_write",
-    //     skip_all
-    // )]
     async fn do_multi_groups_write(
         &mut self,
         mut ready_write_groups: HashMap<u64, RaftGroupWriteRequest>,
@@ -1390,7 +1388,7 @@ where
                 Ok(gs) => gs,
                 Err(err) => {
                     error!(
-                        "node({}) group({}) ready but got group storage error {}",
+                        "node {}: handle group-{} write ready, but got group storage error {}",
                         self.node_id, group_id, err
                     );
                     continue;
@@ -1399,6 +1397,7 @@ where
 
             if let Some(group) = self.groups.get_mut(&group_id) {
                 // TODO: return LightRaftGroupWrite
+                // TODO: if an error occurs, we should decide to retry depending on the kind of error.
                 group
                     .handle_ready_write(
                         self.node_id,
@@ -1410,9 +1409,17 @@ where
                     )
                     .await;
             } else {
-                // TODO: should process this case
+                // TODO: remove pending proposals related to this group
+                // If the group does not exist at this point
+                // 1. we may have finished sending messages to the group, role changed notifications,
+                //    committable entires commits
+                // 2. we may not have completed the new proposal append, there may be multiple scenarios
+                //     - The current group is the leader, sent AE, but was deleted before it received a
+                //       response from the follower, so it did not complete the append drop
+                //     - The current group is the follower, which does not affect the completion of the
+                //       AE
                 error!(
-                    "node({}) group({}) readyed, but group is dropped",
+                    "node {}: handle group-{} write ready, but dropped",
                     self.node_id, group_id
                 );
             }
@@ -1421,11 +1428,6 @@ where
         ready_write_groups
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "MultiRaftActorInner::on_multi_groups_write_finish",
-    //     skip_all
-    // )]
     async fn do_multi_groups_write_finish(
         &mut self,
         ready_groups: HashMap<u64, RaftGroupWriteRequest>,
@@ -1434,8 +1436,9 @@ where
         for (group_id, mut gwr) in ready_groups.into_iter() {
             let mut_group = match self.groups.get_mut(&group_id) {
                 None => {
+                    // TODO: remove pending proposals related to this group
                     error!(
-                        "node({}) group({}) ready finish, but group is dropped",
+                        "node {}: handle group-{} write finish, but dropped",
                         self.node_id, group_id
                     );
                     continue;
@@ -1460,11 +1463,6 @@ where
             self.send_applys(multi_groups_apply);
         }
     }
-    // #[tracing::instrument(
-    //     name = "MultiRaftActorInner::handle_response_callbacks"
-    //     level = Level::TRACE,
-    //     skip_all
-    // )]
 
     fn send_applys(&self, applys: HashMap<u64, ApplyData<RES>>) {
         let span = tracing::span::Span::current();
@@ -1472,7 +1470,7 @@ where
             .apply_tx
             .send((span.clone(), ApplyMessage::Apply { applys }))
         {
-            // FIXME
+            // FIXME: this should unreachable, because the lifetime of apply actor is bound to us.
             warn!("apply actor stopped");
         }
     }

@@ -17,7 +17,6 @@ use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
-
 use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -167,7 +166,7 @@ where
         let replica_desc = match replica_cache.replica_for_node(group_id, node_id).await {
             Err(err) => {
                 error!(
-                    "node {}: write is error, got {} group replica  of storage error {}",
+                    "node {}: can't handle ready, got {} group replica of storage error {}",
                     node_id, group_id, err
                 );
                 return;
@@ -209,13 +208,12 @@ where
             Ok(gs) => gs,
             Err(err) => {
                 error!(
-                    "node({}) group({}) ready but got group storage error {}",
+                    "node {}: group {} ready but got group storage error {}",
                     node_id, group_id, err
                 );
                 return;
             }
         };
-
         // send out messages
         if !rd.messages().is_empty() {
             transport::send_messages(
@@ -308,6 +306,7 @@ where
             self.raft_group.raft.raft_log.committed,
             self.raft_group.raft.raft_log.persisted,
         );
+        // TODO: handle error: if storage error we need retry instead of panic
         let commit_term = gs.term(commit_index).unwrap();
 
         let current_term = self.raft_group.raft.term;
@@ -404,32 +403,30 @@ where
             .await
         {
             Err(err) => {
-                error!("group({}) replica({}) become leader, but got it replica description for node id error {}",
-            group_id, ss.leader_id, err);
-                // FIXME: it maybe temporary error, retry or use NO_NODE.
+                // TODO: handle storage error kind, such as try again
+                error!("node {}: group {} replica{} become leader, but got it replica description for node id error {}",
+                    node_id, group_id, ss.leader_id, err);
                 return;
             }
-            Ok(op) => op,
-        };
+            Ok(op) => match op {
+                Some(desc) => desc,
+                None => {
+                    // this means that we do not know which node the leader is on,
+                    // but this does not affect us to send LeaderElectionEvent, as
+                    // this will be fixed by subsequent message communication.
+                    // TODO: and asynchronous broadcasting
+                    warn!(
+                        "replica {} of raft group {} becomes leader, but  node id is not known",
+                        ss.leader_id, group_id
+                    );
 
-        let replica_desc = match replica_desc {
-            Some(desc) => desc,
-            None => {
-                // this means that we do not know which node the leader is on,
-                // but this does not affect us to send LeaderElectionEvent, as
-                // this will be fixed by subsequent message communication.
-                // TODO: and asynchronous broadcasting
-                warn!(
-                    "replica {} of raft group {} becomes leader, but  node id is not known",
-                    ss.leader_id, group_id
-                );
-
-                ReplicaDesc {
-                    group_id,
-                    node_id: NO_NODE,
-                    replica_id: ss.leader_id,
+                    ReplicaDesc {
+                        group_id,
+                        node_id: NO_NODE,
+                        replica_id: ss.leader_id,
+                    }
                 }
-            }
+            },
         };
 
         // update shared states
@@ -460,14 +457,12 @@ where
         &mut self,
         node_id: u64,
         gwr: &mut RaftGroupWriteRequest,
-        gs: &RS,
+        gs: &RS, // TODO: cache storage in RaftGroup
         transport: &TR,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
     ) {
         let group_id = self.group_id;
-        // TODO: cache storage in RaftGroup
-
         let mut ready = gwr.ready.take().unwrap();
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
@@ -626,6 +621,7 @@ where
         }
 
         let term = self.term();
+        // TODO: move flexbuffer serialize to utils
         let mut s = flexbuffers::FlexbufferSerializer::new();
         write_request.data.serialize(&mut s).unwrap();
         let write_data = s.take_buffer();
@@ -646,7 +642,7 @@ where
                 Error::Raft(err),
             ));
         }
-
+ 
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
@@ -669,6 +665,7 @@ where
     pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
         // let uuid = Uuid::new_v4();
         let mut ctx = Vec::new();
+        // TODO: give up abomonatin.
         // Safety: This method is unsafe because it is unsafe to
         // transmute typed allocations to binary. Furthermore, Rust currently
         // indicates that it is undefined behavior to observe padding bytes,

@@ -149,6 +149,7 @@ where
                             // batch_apply 继续尝试 batch.
                             match batch_applys.get_mut(&group_id) {
                                 Some(batch_apply) => {
+                                    // FIXME: use take instead of as_mut
                                     if let Some(batch) = batch_apply.as_mut() {
                                         if batch.try_batch(&mut apply, self.cfg.batch_size) {
                                             continue;
@@ -180,6 +181,7 @@ where
 
     async fn delegate_handle_applys(&mut self) {
         for (group_id, applys) in self.pending_applys.drain() {
+            // FIXME: don't unwrap.
             let shared_state = self.shared_states.get(group_id).unwrap();
             let apply_state = self
                 .local_apply_states
@@ -240,7 +242,7 @@ where
                     self.do_stop();
                     break
                 },
-                // TODO: handle error
+                // TODO: handle if the node actor stopped
                 Some((_span, incoming_request)) = self.rx.recv() =>  {
                     let mut requests = vec![];
                     requests.push(incoming_request);
@@ -387,7 +389,7 @@ where
     RSM: StateMachine<W, R>,
 {
     node_id: u64,
-    pending_senders: PendingSenderQueue<R>, // TODO: add generic
+    pending_senders: PendingSenderQueue<R>,
     _m1: PhantomData<RSM>,
     _m2: PhantomData<W>,
     _m3: PhantomData<R>,
@@ -416,7 +418,6 @@ where
             // a stale pending conf change before next conf change is applied. If it
             // becomes leader again with the stale pending conf change, will enter
             // this block, so we notify leadership may have been changed.
-            // TODO: notify stale command
             sender.tx.map(|tx| {
                 tx.send(Err(Error::Write(WriteError::Stale(
                     sender.term,
@@ -439,8 +440,7 @@ where
         }
     }
 
-    fn find_pending_conf_change(&mut self, term: u64, index: u64) -> Option<PendingSender<R>> /* FIXME: add generic type */
-    {
+    fn find_pending_conf_change(&mut self, term: u64, index: u64) -> Option<PendingSender<R>> {
         if let Some(p) = self.pending_senders.take_conf_change() {
             if p.term == term && p.index == index {
                 return Some(p);
@@ -557,6 +557,7 @@ where
                             .find_pending(entry.term, entry.index, false)
                             .map_or(None, |p| p.tx);
 
+                        // TODO: move flexbuffer deserialize to utils.
                         let reader = flexbuffers::Reader::get_root(entry.get_data()).unwrap();
                         let wd = W::deserialize(reader).unwrap();
                         Apply::Normal(ApplyNormal {
@@ -599,6 +600,7 @@ where
         //
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
+        // TODO: handle apply error: setting applied to error before
         ctx.rsm.apply(group_id, shared_state, events).await;
         apply_state.applied_index = apply.commit_index;
         apply_state.applied_term = apply.commit_term;
