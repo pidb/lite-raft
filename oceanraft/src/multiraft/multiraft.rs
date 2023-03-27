@@ -1,3 +1,4 @@
+use std::marker::PhantomData;
 use std::time::Duration;
 
 use futures::Future;
@@ -88,7 +89,7 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<WD, RES>
+pub struct MultiRaft<WD, RES, RSM>
 where
     WD: WriteData,
     RES: WriteResponse,
@@ -98,14 +99,16 @@ where
     actor: NodeActor<WD, RES>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
+    _m1: PhantomData<RSM>,
 }
 
-impl<W, R> MultiRaft<W, R>
+impl<W, R, RSM> MultiRaft<W, R, RSM>
 where
     W: WriteData,
     R: WriteResponse,
+    RSM: StateMachine<W, R>
 {
-    pub fn new<TR, RS, MRS, RSM, TK>(
+    pub fn new<TR, RS, MRS, TK>(
         cfg: Config,
         transport: TR,
         storage: MRS,
@@ -140,6 +143,7 @@ where
             actor,
             task_group,
             shared_states: states,
+            _m1: PhantomData,
         })
     }
 

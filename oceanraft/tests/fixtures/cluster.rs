@@ -2,13 +2,18 @@ use std::collections::HashMap;
 use std::env::temp_dir;
 use std::fs::remove_dir_all;
 use std::marker::PhantomData;
+use std::mem::take;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
+use oceanraft::multiraft::storage::RaftMemStorage;
 use oceanraft::multiraft::storage::RockStoreCore;
 use oceanraft::multiraft::storage::StateMachineStore;
+use oceanraft::multiraft::StateMachine;
+use oceanraft::multiraft::WriteData;
 use oceanraft::prelude::StoreData;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
@@ -38,9 +43,10 @@ use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::util::TaskGroup;
 
-use super::rsm::FixtureStateMachine;
+use super::rsm::MemStoreStateMachine;
+use super::rsm::RockStoreStateMachine;
 
-#[allow(unused)]
+/// Generates a random string of n size
 pub fn rand_string(n: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -49,7 +55,7 @@ pub fn rand_string(n: usize) -> String {
         .collect()
 }
 
-#[allow(unused)]
+/// Create a temporary `PathBuf` with a prefix identifier
 pub fn rand_temp_dir<P>(postfix: P) -> PathBuf
 where
     P: AsRef<Path>,
@@ -60,6 +66,18 @@ where
         .map(char::from)
         .collect();
     temp_dir().join(rand_str).join(postfix)
+}
+
+pub fn new_rock_kv_store<P, R>(node_id: u64, path: P) -> StateMachineStore<R>
+where
+    P: AsRef<Path>,
+    R: WriteResponse,
+{
+    println!(
+        "🏠 create statemachine storeage {}",
+        path.as_ref().display()
+    );
+    StateMachineStore::<R>::new(node_id, path)
 }
 
 pub fn new_rock_kv_stores<P, R>(nodes: usize, paths: Vec<P>) -> Vec<StateMachineStore<R>>
@@ -76,6 +94,19 @@ where
             StateMachineStore::<R>::new(node_id, p)
         })
         .collect()
+}
+
+pub fn new_rocks_storeage<P, R>(
+    node_id: u64,
+    path: P,
+    kv_store: StateMachineStore<R>,
+) -> RockStore<StateMachineStore<R>, StateMachineStore<R>>
+where
+    P: AsRef<Path>,
+    R: WriteResponse,
+{
+    println!("🚪 create rock storeage {}", path.as_ref().display());
+    RockStore::new(node_id, path, kv_store.clone(), kv_store.clone())
 }
 
 pub fn new_rocks_storeages<P, R>(
@@ -99,29 +130,98 @@ where
         .collect()
 }
 
+/// Provides a mem storage and state machine environment for cluster.
+pub struct MemStoreEnv<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    pub rxs: Vec<Option<Receiver<Vec<Apply<W, R>>>>>,
+    pub storages: Vec<MultiRaftMemoryStorage>,
+    pub state_machines: Vec<MemStoreStateMachine<W, R>>,
+}
+
+impl<W, R> MemStoreEnv<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    /// Create environments of nodes size, including
+    /// - rxs (apply receivers),
+    /// - storages (multi-raft memory storage),
+    /// - and state_machines (memory state machine implementation).
+    pub fn new(nodes: usize) -> Self {
+        let mut rxs = vec![];
+        let mut storages = vec![];
+        let mut state_machines = vec![];
+        for i in 0..nodes {
+            let (tx, rx) = channel(100);
+            rxs.push(Some(rx));
+            state_machines.push(MemStoreStateMachine::new(tx));
+            storages.push(MultiRaftMemoryStorage::new((i + 1) as u64));
+        }
+
+        Self {
+            rxs: rxs,
+            storages,
+            state_machines,
+        }
+    }
+}
+
 /// Provides a rocksdb storage and state machine environment for cluster.
-pub struct RockStorageEnv<R: WriteResponse> {
+pub struct RockStoreEnv<R>
+where
+    R: WriteResponse,
+{
+    pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, R>>>>>,
     pub storages: Vec<RockStore<StateMachineStore<R>, StateMachineStore<R>>>,
     pub rock_kv_stores: Vec<StateMachineStore<R>>,
+    pub state_machines: Vec<RockStoreStateMachine<R>>,
     pub storage_paths: Vec<PathBuf>,
     pub state_machine_paths: Vec<PathBuf>,
 }
 
-impl<R: WriteResponse> RockStorageEnv<R> {
+impl<R> RockStoreEnv<R>
+where
+    R: WriteResponse,
+{
+    /// Create environments of nodes size, including
+    /// - rxs (apply receivers),
+    /// - storages (multi-raft storage with rocksdb),
+    /// - rock_kv_stores (provides state machine storage with rocksdb)
+    /// - state_machines (base of rock_kv_stores of state machine implementation).
+    /// - storage_paths (rocksdbs of storages storage path, destory when test end)
+    /// - state_machine_paths (rocksdbs of rock_kv_stores storage path, destory when test end)
     pub fn new(nodes: usize) -> Self {
-        let state_machine_paths = (0..nodes)
-            .map(|i| rand_temp_dir(format!("state_machine_node_{}", i)))
-            .collect::<Vec<_>>();
+        let mut rxs = vec![];
+        let mut storage_paths = vec![];
+        let mut state_machine_paths = vec![];
+        let mut rock_kv_stores = vec![];
+        let mut storages = vec![];
+        let mut state_machines = vec![];
+        for i in 0..nodes {
+            let node_id = (i + 1) as u64;
+            let storage_path = rand_temp_dir(format!("store_db_node_{}", node_id));
+            let state_machine_path = rand_temp_dir(format!("state_machine_node_{}", node_id));
+            storage_paths.push(storage_path.clone());
+            state_machine_paths.push(state_machine_path.clone());
 
-        let storage_paths = (0..nodes)
-            .map(|i| rand_temp_dir(format!("store_db_node_{}", i)))
-            .collect::<Vec<_>>();
-
-        let rock_kv_stores = new_rock_kv_stores::<_, R>(nodes, state_machine_paths.clone());
-        let storages =
-            new_rocks_storeages::<_, R>(nodes, storage_paths.clone(), rock_kv_stores.clone());
+            let kv_store = new_rock_kv_store::<_, R>(node_id, state_machine_path.clone());
+            rock_kv_stores.push(kv_store.clone());
+            storages.push(new_rocks_storeage::<_, R>(
+                node_id,
+                storage_path.clone(),
+                kv_store.clone(),
+            ));
+            let (tx, rx) = channel(100);
+            state_machines.push(RockStoreStateMachine::new(kv_store, tx));
+            rxs.push(Some(rx));
+        }
 
         Self {
+            rxs,
+            state_machines,
             storages,
             storage_paths,
             rock_kv_stores,
@@ -129,6 +229,7 @@ impl<R: WriteResponse> RockStorageEnv<R> {
         }
     }
 
+    /// Destory storages and rock_kv_stores used paths.
     pub fn destory(mut self) {
         self.state_machine_paths.extend(self.storage_paths);
         for p in self.state_machine_paths.iter() {
@@ -138,27 +239,33 @@ impl<R: WriteResponse> RockStorageEnv<R> {
     }
 }
 
-pub struct ClusterBuilder<S, MS, R>
+pub struct ClusterBuilder<S, MS, W, R, RSM>
 where
     S: RaftStorage,
     MS: MultiRaftStorage<S>,
+    W: WriteData,
     R: WriteResponse,
-    // RSM: StateMachine<W, R>,
+    RSM: StateMachine<W, R>,
 {
     node_size: usize,
     election_ticks: usize,
     tg: Option<TaskGroup>,
     storages: Vec<MS>,
-    kv_stores: Vec<StateMachineStore<R>>,
+    apply_rxs: Vec<Option<Receiver<Vec<Apply<W, R>>>>>,
+    // kv_stores: Vec<StateMachineStore<R>>,
+    state_machines: Vec<Option<RSM>>,
     _m1: PhantomData<S>,
-    _m2: PhantomData<R>,
+    _m2: PhantomData<W>,
+    _m3: PhantomData<R>,
 }
 
-impl<S, MS, R> ClusterBuilder<S, MS, R>
+impl<S, MS, W, R, RSM> ClusterBuilder<S, MS, W, R, RSM>
 where
     S: RaftStorage,
     MS: MultiRaftStorage<S>,
+    W: WriteData,
     R: WriteResponse,
+    RSM: StateMachine<W, R>,
 {
     pub fn new(nodes: usize) -> Self {
         Self {
@@ -166,9 +273,11 @@ where
             election_ticks: 0,
             tg: None,
             storages: Vec::new(),
-            kv_stores: Vec::new(),
+            state_machines: Vec::new(),
+            apply_rxs: Vec::new(),
             _m1: PhantomData,
             _m2: PhantomData,
+            _m3: PhantomData,
         }
     }
 
@@ -190,16 +299,29 @@ where
         self
     }
 
-    pub fn kv_stores(mut self, kv_stores: Vec<StateMachineStore<R>>) -> Self {
+    pub fn apply_rxs(mut self, rxs: Vec<Option<Receiver<Vec<Apply<W, R>>>>>) -> Self {
         assert_eq!(
-            kv_stores.len(),
+            rxs.len(),
+            self.node_size,
+            "expect node {}, got nums {} of state machines",
+            self.node_size,
+            rxs.len(),
+        );
+
+        self.apply_rxs = rxs;
+        self
+    }
+
+    pub fn state_machines(mut self, state_machines: Vec<RSM>) -> Self {
+        assert_eq!(
+            state_machines.len(),
             self.node_size,
             "expect node {}, got nums {} of kv stores",
             self.node_size,
-            kv_stores.len(),
+            state_machines.len(),
         );
 
-        self.kv_stores = kv_stores;
+        self.state_machines = state_machines.into_iter().map(|sm| Some(sm)).collect();
         self
     }
 
@@ -208,10 +330,34 @@ where
         self
     }
 
-    pub async fn build(self) -> FixtureCluster<R, S, MS> {
+    pub async fn build(mut self) -> FixtureCluster<S, MS, W, R, RSM> {
+        assert_eq!(
+            self.storages.len(),
+            self.node_size,
+            "expect node {}, got nums {} of state machines",
+            self.node_size,
+            self.storages.len(),
+        );
+
+        assert_eq!(
+            self.apply_rxs.len(),
+            self.node_size,
+            "expect node {}, got nums {} of state machines",
+            self.node_size,
+            self.apply_rxs.len(),
+        );
+
+        assert_eq!(
+            self.state_machines.len(),
+            self.node_size,
+            "expect node {}, got nums {} of kv stores",
+            self.node_size,
+            self.state_machines.len(),
+        );
+
         let mut nodes = vec![];
         let mut tickers = vec![];
-        let mut apply_events = vec![];
+        // let mut apply_events = vec![];
 
         let transport = LocalTransport::new();
         for i in 0..self.node_size {
@@ -233,15 +379,18 @@ where
             let ticker = ManualTick::new();
             // let (event_tx, event_rx) = channel(1);
 
-            let (apply_event_tx, apply_event_rx) = channel(100);
-            let state_machine = FixtureStateMachine::new(self.kv_stores[i].clone(), apply_event_tx);
+            // let (apply_event_tx, apply_event_rx) = channel(100);
+            // let state_machine =
+            // RockStoreStateMachine::new(self.kv_stores[i].clone(), apply_event_tx);
             // let rsm = FixtureStateMachine::new(apply_event_tx);
             // let storage = MultiRaftMemoryStorage::new(config.node_id);
             let node = MultiRaft::new(
                 config,
                 transport.clone(),
                 self.storages[i].clone(),
-                state_machine,
+                self.state_machines[i]
+                    .take()
+                    .expect("state machines can't initialize"),
                 self.tg.as_ref().unwrap().clone(),
                 // &event_tx,
                 Some(ticker.clone()),
@@ -258,14 +407,13 @@ where
                 .unwrap();
 
             nodes.push(Arc::new(node));
-            apply_events.push(Some(apply_event_rx));
+            // apply_events.push(Some(apply_event_rx));
 
             tickers.push(ticker.clone());
         }
         FixtureCluster {
             storages: self.storages,
-            // state_machines,
-            apply_events,
+            apply_events: take(&mut self.apply_rxs),
             nodes,
             transport,
             tickers,
@@ -276,15 +424,17 @@ where
     }
 }
 
-pub struct FixtureCluster<R, S, MS>
+pub struct FixtureCluster<S, MS, W, R, RSM>
 where
-    R: WriteResponse,
     S: RaftStorage,
     MS: MultiRaftStorage<S>,
+    W: WriteData,
+    R: WriteResponse,
+    RSM: StateMachine<W, R>,
 {
     pub election_ticks: usize,
-    pub nodes: Vec<Arc<MultiRaft<StoreData, R>>>,
-    pub apply_events: Vec<Option<Receiver<Vec<Apply<StoreData, R>>>>>,
+    pub nodes: Vec<Arc<MultiRaft<W, R, RSM>>>,
+    pub apply_events: Vec<Option<Receiver<Vec<Apply<W, R>>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -325,17 +475,29 @@ impl std::fmt::Display for MakeGroupPlanStatus {
     }
 }
 
-pub type RockCluster<R> = FixtureCluster<
-    R,
-    RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
-    RockStore<StateMachineStore<()>, StateMachineStore<()>>,
+pub type MemStoreCluster = FixtureCluster<
+    RaftMemStorage,
+    MultiRaftMemoryStorage,
+    StoreData,
+    (),
+    MemStoreStateMachine<StoreData, ()>,
 >;
 
-impl<R, S, MS> FixtureCluster<R, S, MS>
+pub type RockCluster = FixtureCluster<
+    RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
+    RockStore<StateMachineStore<()>, StateMachineStore<()>>,
+    StoreData,
+    (),
+    RockStoreStateMachine<()>,
+>;
+
+impl<S, MS, W, R, RSM> FixtureCluster<S, MS, W, R, RSM>
 where
-    R: WriteResponse,
     S: RaftStorage,
     MS: MultiRaftStorage<S>,
+    W: WriteData,
+    R: WriteResponse,
+    RSM: StateMachine<W, R>,
 {
     /// Make a `FixtureCluster` with `n` nodes and nodes ids starting at 1.
     // pub async fn make(n: u64, task_group: TaskGroup) -> Self {
@@ -503,7 +665,7 @@ where
     //     self.events[to_index(node_id)].as_mut().unwrap()
     // }
 
-    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<StoreData, R>>> {
+    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<W, R>>> {
         self.apply_events[to_index(node_id)].as_mut().unwrap()
     }
 
@@ -568,7 +730,7 @@ where
         node_id: u64,
         wait_size: usize,
         timeout: Duration,
-    ) -> Result<Vec<ApplyNormal<StoreData, R>>, String> {
+    ) -> Result<Vec<ApplyNormal<W, R>>, String> {
         let rx = self.apply_events[to_index(node_id)].as_mut().unwrap();
         let mut results_len = 0;
         let wait_loop_fut = async {
@@ -603,7 +765,7 @@ where
 
     /// Wait elected.
     pub async fn wait_membership_change_apply_event(
-        cluster: &mut FixtureCluster<R, S, MS>,
+        cluster: &mut FixtureCluster<S, MS, W, R, RSM>,
         node_id: u64,
         timeout: Duration,
     ) -> Result<ApplyMembership<R>, String> {
@@ -634,7 +796,7 @@ where
         &self,
         node_id: u64,
         group_id: u64,
-        write_data: StoreData,
+        write_data: W,
     ) -> Result<oneshot::Receiver<Result<R, Error>>, Error> {
         self.nodes[to_index(node_id)].write_non_block(group_id, 0, write_data, None)
     }
@@ -658,16 +820,18 @@ where
 
 /// Multiple consensus groups are quickly started. Node and consensus group ids start from 1.
 /// All consensus group replicas equal to 1 are elected as the leader.
-pub async fn quickstart_multi_groups(
-    rockstore_env: &RockStorageEnv<()>,
+pub async fn quickstart_rockstore_multi_groups(
+    rockstore_env: &mut RockStoreEnv<()>,
     nodes: usize,
     groups: usize,
 ) -> (
     TaskGroup,
     FixtureCluster<
-        (),
         RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
         RockStore<StateMachineStore<()>, StateMachineStore<()>>,
+        StoreData,
+        (),
+        RockStoreStateMachine<()>,
     >,
 ) {
     // FIXME: each node has task group, if not that joinner can block.
@@ -677,9 +841,10 @@ pub async fn quickstart_multi_groups(
 
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
+        .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;
     // create multi groups
@@ -712,15 +877,17 @@ pub async fn quickstart_multi_groups(
 }
 
 /// Quickly start a consensus group with 3 nodes and 3 replicas, with leader being replica 1.
-pub async fn quickstart_group(
-    rockstore_env: &RockStorageEnv<()>,
+pub async fn quickstart_rockstore_group(
+    rockstore_env: &mut RockStoreEnv<()>,
     nodes: usize,
 ) -> (
     TaskGroup,
     FixtureCluster<
-        (),
         RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
         RockStore<StateMachineStore<()>, StateMachineStore<()>>,
+        StoreData,
+        (),
+        RockStoreStateMachine<()>,
     >,
 ) {
     // FIXME: each node has task group, if not that joinner can block.
@@ -728,9 +895,10 @@ pub async fn quickstart_group(
     //  let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
+        .apply_rxs(std::mem::take(&mut rockstore_env.rxs))
         .build()
         .await;
 

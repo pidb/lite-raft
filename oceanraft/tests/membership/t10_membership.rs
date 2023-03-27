@@ -1,3 +1,4 @@
+use std::mem::take;
 use std::time::Duration;
 
 use oceanraft::multiraft::ApplyMembership;
@@ -17,10 +18,10 @@ use crate::fixtures::ClusterBuilder;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::RockCluster;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::RockStoreEnv;
 
 async fn check_cc<F>(
-    cluster: &mut RockCluster<()>,
+    cluster: &mut RockCluster,
     node_id: u64,
     wait_node_id: u64,
     timeout: Duration,
@@ -59,12 +60,13 @@ async fn test_single_step() {
     // cluster.start();
 
     let nodes = 5;
-    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
+        .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;
 
@@ -170,11 +172,12 @@ async fn test_joint_consensus() {
 
     // cluster.start();
     let nodes = 5;
-    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
+        .apply_rxs(take(&mut rockstore_env.rxs))
         .task_group(task_group.clone())
         .build()
         .await;
@@ -260,12 +263,13 @@ async fn test_remove() {
     // cluster.start();
 
     let nodes = 5;
-    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
+        .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
+        .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;
 

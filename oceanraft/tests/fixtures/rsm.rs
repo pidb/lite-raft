@@ -1,15 +1,54 @@
 use futures::Future;
-use oceanraft::multiraft::storage::ApplyWriteBatch;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::GroupState;
 use oceanraft::multiraft::StateMachine;
+use oceanraft::multiraft::WriteData;
 use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
-pub struct FixtureStateMachine<R>
+pub struct MemStoreStateMachine<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    tx: Sender<Vec<Apply<W, R>>>,
+}
+
+impl<W, R> StateMachine<W, R> for MemStoreStateMachine<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+    fn apply<'life0>(
+        &'life0 self,
+        group_id: u64,
+        state: &GroupState,
+        applys: Vec<Apply<W, R>>,
+    ) -> Self::ApplyFuture<'life0> {
+        async move { 
+            self.tx.send(applys).await;
+         }
+    }
+}
+
+impl<W, R> MemStoreStateMachine<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    pub fn new(tx: Sender<Vec<Apply<W, R>>>) -> Self {
+        Self { tx }
+    }
+}
+
+#[derive(Clone)]
+pub struct RockStoreStateMachine<R>
 where
     R: WriteResponse,
 {
@@ -17,7 +56,7 @@ where
     tx: Sender<Vec<Apply<StoreData, R>>>,
 }
 
-impl<R> FixtureStateMachine<R>
+impl<R> RockStoreStateMachine<R>
 where
     R: WriteResponse,
 {
@@ -26,7 +65,7 @@ where
     }
 }
 
-impl<R> StateMachine<StoreData, R> for FixtureStateMachine<R>
+impl<R> StateMachine<StoreData, R> for RockStoreStateMachine<R>
 where
     R: WriteResponse,
 {

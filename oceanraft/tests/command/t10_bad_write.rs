@@ -1,3 +1,5 @@
+use std::mem::take;
+
 use oceanraft::multiraft::Error;
 use oceanraft::multiraft::WriteError;
 use oceanraft::prelude::StoreData;
@@ -6,7 +8,8 @@ use oceanraft::util::TaskGroup;
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::MemStoreEnv;
+use crate::fixtures::RockStoreEnv;
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
@@ -18,12 +21,14 @@ use crate::fixtures::RockStorageEnv;
 async fn test_no_leader() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let mut env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
-        .storages(rockstore_env.storages.clone())
+        .state_machines(env.state_machines.clone())
+        .apply_rxs(take(&mut env.rxs))
+        .storages(env.storages.clone())
         .build()
         .await;
 
@@ -60,7 +65,7 @@ async fn test_no_leader() {
         }
     }
 
-    rockstore_env.destory();
+    // rockstore_env.destory();
     // cluster.stop().await;
 }
 
@@ -76,14 +81,16 @@ async fn test_no_leader() {
 async fn test_bad_group() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
-        .storages(rockstore_env.storages.clone())
+        .state_machines(env.state_machines.clone())
+        .storages(env.storages.clone())
         .build()
         .await;
+
     let mut plan = MakeGroupPlan {
         group_id: 1,
         first_node_id: 1,

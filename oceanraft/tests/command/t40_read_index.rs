@@ -4,8 +4,8 @@ use std::time::Duration;
 use oceanraft::prelude::StoreData;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::quickstart_group;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::quickstart_rockstore_group;
+use crate::fixtures::RockStoreEnv;
 
 #[async_entry::test(
     flavor = "multi_thread",
@@ -16,8 +16,8 @@ async fn test_group_read_index() {
     let nodes = 3;
     let command_nums = 10;
 
-    let rockstore_env = RockStorageEnv::new(nodes);
-    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
+    let mut rockstore_env = RockStoreEnv::new(nodes);
+    let (_, mut cluster) = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let group_id = 1;
