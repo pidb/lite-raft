@@ -56,7 +56,7 @@ async fn test_no_leader() {
 
         match cluster.write_command(node_id, plan.group_id, data) {
             Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
-            Err(err) => assert_eq!(expected_err, err),
+            Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
         }
     }
 
@@ -93,9 +93,7 @@ async fn test_bad_group() {
     // now, trigger leader elect and it's should became leader.
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(1, plan.group_id).await;
-    let _ = cluster.wait_leader_elect_event(1)
-        .await
-        .unwrap();
+    let _ = cluster.wait_leader_elect_event(1).await.unwrap();
 
     for i in 1..3 {
         let node_id = i + 1;
@@ -110,10 +108,10 @@ async fn test_bad_group() {
             replica_id: i + 1,
         });
         match cluster.write_command(node_id, plan.group_id, data) {
-            Err(err) => assert_eq!(expected_err, err),
+            Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
             Ok(rx) => match rx.await.unwrap() {
                 Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
-                Err(err) => assert_eq!(expected_err, err),
+                Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
             },
         }
     }

@@ -80,7 +80,7 @@ pub enum NodeActorError {
     Stopped,
 }
 
-#[derive(thiserror::Error, Debug, PartialEq)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// The configuration is invalid.
     #[error("{0}")]
@@ -104,10 +104,19 @@ pub enum Error {
     #[error("{0}")]
     Storage(#[from] super::storage::Error),
 
+    /// An error occurred when serializing with flexbuffer.
+    #[error("{0}")]
+    FlexBuffersSerialization(#[from] flexbuffers::SerializationError),
+
+    /// An error occurred when deserializing with flexbuffer.
+    #[error("{0}")]
+    FlexBuffersDeserialization(#[from] flexbuffers::DeserializationError),
+
     /// A raft error occurred.
     #[error("{0}")]
     Raft(#[from] RaftCoreError),
 
     #[error("{0}")]
     RaftGroup(#[from] RaftGroupError),
+
 }

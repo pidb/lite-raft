@@ -13,6 +13,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
+use crate::multiraft::util::flexbuffer_deserialize;
 use crate::multiraft::WriteResponse;
 use crate::prelude::EntryType;
 use crate::util::Stopper;
@@ -557,16 +558,18 @@ where
                             .find_pending(entry.term, entry.index, false)
                             .map_or(None, |p| p.tx);
 
-                        // TODO: move flexbuffer deserialize to utils.
-                        let reader = flexbuffers::Reader::get_root(entry.get_data()).unwrap();
-                        let wd = W::deserialize(reader).unwrap();
+                        // TODO: handle this error
+                        let write_data = flexbuffer_deserialize(&entry.data)
+                            .map_err(|err| Error::FlexBuffersDeserialization(err))
+                            .unwrap();
+
                         Apply::Normal(ApplyNormal {
                             group_id,
                             is_conf_change: false,
                             // entry,
                             index: entry.index,
                             term: entry.term,
-                            data: wd,
+                            data: write_data,
                             context: if entry.context.is_empty() {
                                 None
                             } else {

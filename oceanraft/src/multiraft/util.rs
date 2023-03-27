@@ -2,8 +2,14 @@ use std::sync::Arc;
 #[allow(unused)]
 use std::time::Duration;
 
+use flexbuffers::DeserializationError;
+use flexbuffers::FlexbufferSerializer;
+use flexbuffers::Reader;
+use flexbuffers::SerializationError;
 use futures::future::BoxFuture;
 use prost::Message;
+use serde::de::DeserializeOwned;
+use serde::ser::Serialize;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -21,17 +27,40 @@ pub fn compute_entry_size(ent: &Entry) -> usize {
     Message::encoded_len(ent)
 }
 
+/// Zero copy serialization using flexbuffer, data needs to implement `Serialize` trait.
+/// If Ok, `FlexbufferSerializer` is returned and the user can call `take_buffer` to get
+/// the data.
+#[inline]
+pub fn flexbuffer_serialize<S>(data: &S) -> Result<FlexbufferSerializer, SerializationError>
+where
+    S: Serialize,
+{
+    let mut ser = FlexbufferSerializer::new();
+    data.serialize(&mut ser)?;
+    Ok(ser)
+}
 
-/// Ticker periodically sends tick and provides recv future. 
+/// Zero copy deserialization using flexbuffer. if Ok, `D` of implementation `DeserializeOwned`
+/// is returned.
+#[inline]
+pub fn flexbuffer_deserialize<D>(data: &[u8]) -> Result<D, DeserializationError>
+where
+    D: DeserializeOwned,
+{
+    let reader = Reader::get_root(data)?;
+    D::deserialize(reader)
+}
+
+/// Ticker periodically sends tick and provides recv future.
 /// Ticker doesn't care how the tick is sent.
-/// 
-/// Note: Abstract this trait because need to manually send the 
+///
+/// Note: Abstract this trait because need to manually send the
 /// tick for testing, and in most cases you should use `tokio::time::Interval`.
 /// the lib providers its implementation.
 pub trait Ticker: Send + 'static {
     /// New an implementer of a new `Ticker` trait with a defined sized requirement.
-    /// 
-    /// `start` specifies the time after which the periodic tick is allowed to start. 
+    ///
+    /// `start` specifies the time after which the periodic tick is allowed to start.
     /// `pediod` presentation periodic tick.
     fn new(start: std::time::Instant, period: Duration) -> Self
     where

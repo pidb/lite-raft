@@ -49,6 +49,7 @@ use super::storage::RaftStorage;
 use super::transport;
 use super::types::WriteData;
 use super::util;
+use super::util::flexbuffer_serialize;
 use super::Event;
 
 pub enum Status {
@@ -611,7 +612,7 @@ where
 
     pub fn propose_write<WD: WriteData>(
         &mut self,
-        mut write_request: WriteRequest<WD, RES>,
+        write_request: WriteRequest<WD, RES>,
     ) -> Option<ResponseCallback> {
         if let Err(err) = self.pre_propose_write(&write_request) {
             return Some(ResponseCallbackQueue::new_error_callback(
@@ -621,28 +622,30 @@ where
         }
 
         let term = self.term();
-        // TODO: move flexbuffer serialize to utils
-        let mut s = flexbuffers::FlexbufferSerializer::new();
-        write_request.data.serialize(&mut s).unwrap();
-        let write_data = s.take_buffer();
-
-        // let write_data = match write_request.data.encode() {
-        //     Err(err) => todo!(),
-        //     Ok(data) => data,
-        // };
+        let data = match flexbuffer_serialize(&write_request.data)
+            .map_err(|err| Error::FlexBuffersSerialization(err))
+        {
+            Err(err) => {
+                return Some(ResponseCallbackQueue::new_error_callback(
+                    write_request.tx,
+                    err,
+                ));
+            }
+            Ok(mut ser) => ser.take_buffer(),
+        };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(
             write_request.context.map_or(vec![], |ctx_data| ctx_data),
-            write_data,
+            data,
         ) {
             return Some(ResponseCallbackQueue::new_error_callback(
                 write_request.tx,
                 Error::Raft(err),
             ));
         }
- 
+
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
