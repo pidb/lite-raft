@@ -531,24 +531,25 @@ where
         for entry in apply.entries.into_iter() {
             let entry_index = entry.index;
             let entry_term = entry.term;
-            // TODO: add result
-            let event = match entry.entry_type() {
-                EntryType::EntryNormal => {
-                    if entry.data.is_empty() {
-                        // When the new leader online, a no-op log will be send and commit.
-                        // we will skip this log for the application and set index and term after
-                        // apply.
-                        info!(
-                            "node {}: group = {} skip no-op entry index = {}, term = {}",
-                            self.node_id, group_id, entry_index, entry_term
-                        );
-                        self.pending_senders.remove_stales(entry_index, entry_term);
-                        Apply::NoOp(ApplyNoOp {
-                            group_id,
-                            index: entry_index,
-                            term: entry_term,
-                        })
-                    } else {
+            if entry.data.is_empty() {
+                // When the new leader online, a no-op log will be send and commit.
+                // we will skip this log for the application and set index and term after
+                // apply.
+                info!(
+                    "node {}: group = {} skip no-op entry index = {}, term = {}",
+                    self.node_id, group_id, entry_index, entry_term
+                );
+                self.pending_senders.remove_stales(entry_index, entry_term);
+                events.push(Apply::NoOp(ApplyNoOp {
+                    group_id,
+                    index: entry_index,
+                    term: entry_term,
+                }));
+
+            } else {
+                // TODO: add result
+                let event = match entry.entry_type() {
+                    EntryType::EntryNormal => {
                         trace!(
                             "staging pending apply entry log ({}, {})",
                             entry_index,
@@ -578,20 +579,20 @@ where
                             tx,
                         })
                     }
-                }
 
-                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    let tx = self
-                        .find_pending(entry.term, entry.index, true)
-                        .map_or(None, |p| p.tx);
+                    EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
+                        let tx = self
+                            .find_pending(entry.term, entry.index, true)
+                            .map_or(None, |p| p.tx);
 
-                    let apply_membership =
-                        ApplyMembership::parse(group_id, entry, tx, ctx.commit_tx.clone());
-                    Apply::Membership(apply_membership)
-                }
-            };
+                        let apply_membership =
+                            ApplyMembership::parse(group_id, entry, tx, ctx.commit_tx.clone());
+                        Apply::Membership(apply_membership)
+                    }
+                };
 
-            events.push(event)
+                events.push(event)
+            }
         }
 
         // Since we feed the state machine probably a batch of entry logs, represented by IntoIter,

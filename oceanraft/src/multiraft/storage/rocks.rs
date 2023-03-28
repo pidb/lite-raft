@@ -14,6 +14,8 @@ mod storage {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
+    use tracing::info;
+    use tracing::error;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::MultiRaftStorage;
@@ -258,6 +260,7 @@ mod storage {
                         ),
                     },
                 );
+            info!("replica {}: get entry meta, the empty is {}", self.replica_id, empty);
 
             if empty {
                 let snap_meta = self.get_snapshot_metadata()?;
@@ -268,21 +271,20 @@ mod storage {
                 });
             }
 
-            let first_index = batchs
+            let data = batchs
                 .next()
                 .unwrap()
                 .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or(0, |data| {
-                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
-                });
+                .unwrap();
 
-            let last_index = batchs
+            let first_index = u64::from_be_bytes(data.to_vec().try_into().unwrap());
+
+            let data = batchs
                 .next()
                 .unwrap()
                 .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or(0, |data| {
-                    u64::from_be_bytes(data.to_vec().try_into().unwrap())
-                });
+                .unwrap();
+            let last_index = u64::from_be_bytes(data.to_vec().try_into().unwrap());
 
             Ok(EntryMetadata {
                 first_index,
@@ -539,6 +541,7 @@ mod storage {
                 .map_err(|err| raft::Error::Store(raft::StorageError::Other(Box::new(err))))?;
 
             if low < log_meta.first_index {
+                error!("replica {}: entries compacted, low = {}, first_index = {}", self.replica_id, low, log_meta.first_index);
                 return Err(raft::Error::Store(raft::StorageError::Compacted));
             }
 
@@ -785,11 +788,6 @@ mod storage {
         fn install_snapshot(&self, mut snapshot: Snapshot) -> Result<()> {
             let mut snap_meta = snapshot.metadata.as_ref().expect("unreachable").clone();
             if self.first_index()? > snap_meta.index {
-                println!(
-                    "first index = {}, snap_meta.index = {}",
-                    self.first_index()?,
-                    snap_meta.index
-                );
                 return Err(Error::SnapshotOutOfDate);
             }
 

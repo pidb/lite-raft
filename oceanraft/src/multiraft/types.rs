@@ -23,6 +23,6 @@ pub(crate) enum EmptyWriteDataError {
     Encode,
 }
 
-pub trait WriteResponse: Debug + Clone + Send + Sync + 'static {}
+pub trait WriteResponse: Debug + Clone + Default + Send + Sync + 'static {}
 
-impl<R> WriteResponse for R where R: Debug + Clone + Send + Sync + 'static {}
+impl<R> WriteResponse for R where R: Debug  + Clone + Default + Send + Sync + 'static {}

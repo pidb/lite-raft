@@ -481,6 +481,8 @@ where
                 entries[0].index,
                 entries[entries.len() - 1].index
             );
+
+            info!("node {}: append entries = {:?}", node_id, entries);
             if let Err(_error) = gs.append(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
@@ -688,6 +690,12 @@ where
     }
 
     fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error> {
+        if self.raft_group.raft.has_pending_conf() {
+            return Err(Error::Membership(
+                super::error::MembershipError::Pending(self.node_id, self.group_id)
+            )); 
+        }
+
         if data.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
@@ -735,9 +743,11 @@ where
 
         let res = if data.changes.len() == 1 {
             let (ctx, cc) = to_cc(&data);
+            assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
             let (ctx, cc) = to_ccv2(&data);
+            assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         };
 

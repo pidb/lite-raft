@@ -75,6 +75,26 @@ pub enum WriteError {
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
+pub enum MembershipError {
+    // TODO: more error info
+    #[error("node {node_id:?} not leader: group = {group_id:?}, replica = {replica_id:?}")]
+    NotLeader {
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+    },
+
+    #[error("stale write: expected is term {0}, current term is {1}")]
+    Stale(u64, u64),
+
+    #[error("propose got unexpected index, expected index is {0}, got {1}")]
+    UnexpectedIndex(u64, u64),
+
+    #[error("node {0}: has pending membership change is being processed on group {1}")]
+    Pending(u64 /* node_id */, u64 /* group_id */),
+}
+
+#[derive(thiserror::Error, Debug, PartialEq)]
 pub enum NodeActorError {
     #[error("the multiraft actor stopped")]
     Stopped,
@@ -98,6 +118,10 @@ pub enum Error {
     #[error("{0}")]
     Write(#[from] WriteError),
 
+    /// An error occurred when propose membership.
+    #[error("{0}")]
+    Membership(#[from] MembershipError),
+
     #[error("{0}")]
     NodeActor(#[from] NodeActorError),
 
@@ -118,5 +142,4 @@ pub enum Error {
 
     #[error("{0}")]
     RaftGroup(#[from] RaftGroupError),
-
 }

@@ -370,7 +370,7 @@ where
                 heartbeat_tick: 1,
                 max_size_per_msg: 0,
                 max_inflight_msgs: 256,
-                tick_interval: 3_600_000, // hour ms
+                tick_interval: 10, // hour ms
                 batch_apply: false,
                 batch_size: 0,
                 proposal_queue_size: 1000,

@@ -29,12 +29,26 @@ where
         &'life0 self,
         group_id: u64,
         state: &GroupState,
-        applys: Vec<Apply<W, R>>,
+        mut applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'life0> {
-        async move { 
-            self.tx.send(applys).await;
-         }
-    }
+            let tx = self.tx.clone();
+            async move {
+                for apply in applys.iter_mut() {
+                    match apply {
+                        Apply::NoOp(noop) => {
+                        }
+                        Apply::Normal(normal) => {
+                        }
+                        Apply::Membership(membership) => {
+                            // TODO: if group is leader, we need save conf state to kv store.
+                            membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        }
+                    }
+                }
+    
+                tx.send(applys).await;
+            }
+        }
 }
 
 impl<W, R> MemStoreStateMachine<W, R>
@@ -102,7 +116,22 @@ where
             }
             self.kv_store.write_apply_bath(group_id, batch).unwrap();
 
-            tx.send(applys).await;
+            for apply in applys.iter_mut() {
+                match apply {
+                    Apply::NoOp(noop) => {
+                    }
+                    Apply::Normal(normal) => {
+                         normal.tx.take().map(|tx| tx.send(Ok(R::default())));
+                    }
+                    Apply::Membership(membership) => {
+                         membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                    }
+                }
+            }
+
+
+
+            // tx.send(applys).await;
         }
     }
 }

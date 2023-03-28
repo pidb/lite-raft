@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
+use raft::Changer;
 use raft::StateRole;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
@@ -388,6 +389,7 @@ where
             |t| t,
         );
 
+        // let mut ticker = TK::new(std::time::Instant::now() + tick_interval, tick_interval);
         let mut ticks = 0;
         loop {
             self.event_chan.flush();
@@ -1221,12 +1223,35 @@ where
             }
         }
 
-        // will only move forward if the consensus group role is the leader
-        // and not the joint consensus.
-        if !group.is_leader() && view.conf_change.changes.len() > 1 {
-            return Ok(());
+        // The leader communicates with the new member after the membership change,
+        // sends the snapshot contains the member configuration, and then follower
+        // install snapshot.
+        // The Append Entries are then received by followers and committed, but the
+        // new member configuration is already applied to the followers when the
+        // snapshot is installed. In raft-rs, duplicate joint consensus is not allowed,
+        // so we catch the error and skip.
+        if !view.conf_change.leave_joint() && view.conf_change.enter_joint().is_some() {
+            debug!(
+                "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
+                self.node_id, group_id, group.replica_id, view.conf_change
+            );
+            if !group
+                .raft_group
+                .raft
+                .prs()
+                .conf()
+                .to_conf_state()
+                .voters_outgoing
+                .is_empty()
+            {
+                return Ok(());
+            }
         }
 
+        info!(
+            "node {}: commit memberhsip {:?}",
+            self.node_id, view.conf_change
+        );
         // apply to raft
         let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
             Err(err) => {
