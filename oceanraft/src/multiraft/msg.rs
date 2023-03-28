@@ -149,3 +149,12 @@ impl Default for ApplyCommitMessage {
         ApplyCommitMessage::None
     }
 }
+
+/// An internal structure to query raft internal status in
+/// a memory communicative way.
+#[derive(Debug)]
+pub enum QueryGroup {
+    /// Queries if there has a pending configuration,
+    /// returns true or false
+    HasPendingConf(u64, oneshot::Sender<Result<bool, Error>>),
+}
