@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::multiraft::WriteResponse;
 
 use super::error::Error;
-use super::error::WriteError;
+use super::error::ProposeError;
 use super::msg::ReadIndexContext;
 
 /// Shrink queue if queue capacity more than and len less than
@@ -214,7 +214,7 @@ impl<RES: WriteResponse> ProposalQueue<RES> {
                 }
             } else {
                 proposal.tx.map(|tx| {
-                    tx.send(Err(Error::Write(WriteError::Stale(
+                    tx.send(Err(Error::Propose(ProposeError::Stale(
                         proposal.term,
                         current_term,
                     ))))

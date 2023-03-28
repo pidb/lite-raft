@@ -205,7 +205,7 @@ where
         )?;
 
         if !state.is_leader() {
-            return Err(Error::Write(super::WriteError::NotLeader {
+            return Err(Error::Propose(super::ProposeError::NotLeader {
                 node_id: self.node_id,
                 group_id,
                 replica_id: state.get_replica_id(),

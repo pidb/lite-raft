@@ -21,7 +21,7 @@ use crate::util::TaskGroup;
 
 use super::config::Config;
 use super::error::Error;
-use super::error::WriteError;
+use super::error::ProposeError;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
@@ -363,7 +363,7 @@ where
     pub fn remove_stales(&mut self, index: u64, term: u64) {
         while let Some(p) = self.pop_normal(index, term) {
             p.tx.map(|tx| {
-                tx.send(Err(Error::Write(WriteError::Stale(
+                tx.send(Err(Error::Propose(ProposeError::Stale(
                     p.term, 0, /*FIXME: with term */
                 ))))
             });
@@ -420,7 +420,7 @@ where
             // becomes leader again with the stale pending conf change, will enter
             // this block, so we notify leadership may have been changed.
             sender.tx.map(|tx| {
-                tx.send(Err(Error::Write(WriteError::Stale(
+                tx.send(Err(Error::Propose(ProposeError::Stale(
                     sender.term,
                     0, /*FIXME: with term */
                 ))))
@@ -476,7 +476,7 @@ where
             } else {
                 // notify_stale_command(region_id, peer_id, self.term, head);
                 p.tx.map(|tx| {
-                    tx.send(Err(Error::Write(WriteError::Stale(
+                    tx.send(Err(Error::Propose(ProposeError::Stale(
                         p.term, 0, /*FIXME: with term */
                     ))))
                 });

@@ -1248,10 +1248,6 @@ where
             }
         }
 
-        info!(
-            "node {}: commit memberhsip {:?}",
-            self.node_id, view.conf_change
-        );
         // apply to raft
         let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
             Err(err) => {

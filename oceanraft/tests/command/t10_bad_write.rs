@@ -1,7 +1,7 @@
 use std::mem::take;
 
 use oceanraft::multiraft::Error;
-use oceanraft::multiraft::WriteError;
+use oceanraft::multiraft::ProposeError;
 use oceanraft::prelude::StoreData;
 use oceanraft::util::TaskGroup;
 
@@ -53,7 +53,7 @@ async fn test_no_leader() {
             key: "key".to_string(),
             value: "data".as_bytes().to_vec(),
         };
-        let expected_err = Error::Write(WriteError::NotLeader {
+        let expected_err = Error::Propose(ProposeError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
@@ -109,7 +109,7 @@ async fn test_bad_group() {
             key: "key".to_string(),
             value: "data".as_bytes().to_vec(),
         };
-        let expected_err = Error::Write(WriteError::NotLeader {
+        let expected_err = Error::Propose(ProposeError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,

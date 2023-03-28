@@ -26,8 +26,8 @@ use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
 use super::error::Error;
+use super::error::ProposeError;
 use super::error::RaftGroupError;
-use super::error::WriteError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
@@ -482,7 +482,6 @@ where
                 entries[entries.len() - 1].index
             );
 
-            info!("node {}: append entries = {:?}", node_id, entries);
             if let Err(_error) = gs.append(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
@@ -595,7 +594,7 @@ where
         // }
 
         if !self.is_leader() {
-            return Err(Error::Write(WriteError::NotLeader {
+            return Err(Error::Propose(ProposeError::NotLeader {
                 node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
@@ -603,7 +602,7 @@ where
         }
 
         if write_data.term != 0 && self.term() > write_data.term {
-            return Err(Error::Write(WriteError::Stale(
+            return Err(Error::Propose(ProposeError::Stale(
                 write_data.term,
                 self.term(),
             )));
@@ -652,7 +651,13 @@ where
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
                 write_request.tx,
-                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
+                Error::Propose(ProposeError::UnexpectedIndex {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    expected: next_index,
+                    unexpected: index - 1,
+                }),
             ));
         }
 
@@ -691,9 +696,9 @@ where
 
     fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error> {
         if self.raft_group.raft.has_pending_conf() {
-            return Err(Error::Membership(
-                super::error::MembershipError::Pending(self.node_id, self.group_id)
-            )); 
+            return Err(Error::Propose(
+                super::error::ProposeError::MembershipPending(self.node_id, self.group_id),
+            ));
         }
 
         if data.group_id == 0 {
@@ -707,7 +712,7 @@ where
         }
 
         if !self.is_leader() {
-            return Err(Error::Write(WriteError::NotLeader {
+            return Err(Error::Propose(ProposeError::NotLeader {
                 node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
@@ -715,7 +720,7 @@ where
         }
 
         if data.term != 0 && self.term() > data.term {
-            return Err(Error::Write(WriteError::Stale(data.term, self.term())));
+            return Err(Error::Propose(ProposeError::Stale(data.term, self.term())));
         }
 
         Ok(())
@@ -773,7 +778,13 @@ where
 
             return Some(ResponseCallbackQueue::new_error_callback(
                 tx,
-                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
+                Error::Propose(ProposeError::UnexpectedIndex {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    expected: next_index,
+                    unexpected: index - 1,
+                }),
             ));
         }
 

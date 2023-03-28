@@ -16,7 +16,7 @@ mod types;
 mod util;
 
 pub use config::Config;
-pub use error::{Error, MultiRaftStorageError, RaftCoreError, RaftGroupError, WriteError};
+pub use error::{Error, MultiRaftStorageError, RaftCoreError, RaftGroupError, ProposeError};
 pub use event::{Event, LeaderElectionEvent};
 pub use multiraft::{MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl};
 pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
