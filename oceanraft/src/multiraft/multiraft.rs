@@ -15,7 +15,6 @@ use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
 use crate::util::TaskGroup;
 
-use super::StateMachine;
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
@@ -25,6 +24,7 @@ use super::msg::GroupData;
 use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
+use super::msg::QueryGroup;
 use super::msg::ReadIndexContext;
 use super::msg::ReadIndexData;
 use super::msg::WriteRequest;
@@ -36,6 +36,7 @@ use super::transport::Transport;
 use super::types::WriteData;
 use super::util::Ticker;
 use super::RaftGroupError;
+use super::StateMachine;
 
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
@@ -106,7 +107,7 @@ impl<W, R, RSM> MultiRaft<W, R, RSM>
 where
     W: WriteData,
     R: WriteResponse,
-    RSM: StateMachine<W, R>
+    RSM: StateMachine<W, R>,
 {
     pub fn new<TR, RS, MRS, TK>(
         cfg: Config,
@@ -498,6 +499,17 @@ where
             ))),
             Ok(_) => Ok(rx),
         }
+    }
+
+    /// Return true if it is can to submit membership change to givend group_id.
+    pub async fn can_submmit_membership_change(&self, group_id: u64) -> Result<bool, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.actor
+            .query_group_tx
+            .send(QueryGroup::HasPendingConf(group_id, tx))
+            .unwrap();
+        let res = rx.await.unwrap()?;
+        Ok(!res)
     }
 
     #[inline]

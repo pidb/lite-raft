@@ -137,21 +137,6 @@ async fn test_single_step() {
     // )
     // .await;
 
-    // execute single step membership change for node 3 and replica 3 in group 1.
-    let mut change = SingleMembershipChange::default();
-    change.set_change_type(ConfChangeType::AddNode);
-    change.node_id = 3;
-    change.replica_id = 3;
-    leader
-        .membership_change(MembershipChangeData {
-            group_id,
-            term: 0, // not check
-            changes: vec![change],
-            replicas: vec![],
-        })
-        .await
-        .unwrap();
-
     // let check_fn = |apply: &ApplyMembership<()>| {
     //     // let mut cc = ConfChange::default();
     //     // cc.merge_from_bytes(event.entry.get_data()).unwrap();
@@ -184,19 +169,45 @@ async fn test_single_step() {
     // be approved before adding replica 4, so we need ticks other follower to campaign.
 
     loop {
-        let mut change = SingleMembershipChange::default();
-        change.set_change_type(ConfChangeType::AddNode);
-        change.node_id = 4;
-        change.replica_id = 4;
-        if let Ok(_) = leader
-            .membership_change(MembershipChangeData {
-                group_id,
-                term: 0, // not check
-                changes: vec![change],
-                replicas: vec![],
-            })
+        if leader
+            .can_submmit_membership_change(group_id)
             .await
+            .unwrap()
         {
+            // execute single step membership change for node 3 and replica 3 in group 1.
+            let mut change = SingleMembershipChange::default();
+            change.set_change_type(ConfChangeType::AddNode);
+            change.node_id = 3;
+            change.replica_id = 3;
+            leader
+                .membership_change(MembershipChangeData {
+                    group_id,
+                    term: 0, // not check
+                    changes: vec![change],
+                    replicas: vec![],
+                })
+                .await
+                .unwrap();
+        }
+
+        if leader
+            .can_submmit_membership_change(group_id)
+            .await
+            .unwrap()
+        {
+            let mut change = SingleMembershipChange::default();
+            change.set_change_type(ConfChangeType::AddNode);
+            change.node_id = 4;
+            change.replica_id = 4;
+            leader
+                .membership_change(MembershipChangeData {
+                    group_id,
+                    term: 0, // not check
+                    changes: vec![change],
+                    replicas: vec![],
+                })
+                .await
+                .unwrap();
             break;
         }
 

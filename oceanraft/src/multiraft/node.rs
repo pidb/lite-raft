@@ -53,6 +53,7 @@ use super::msg::GroupData;
 use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
+use super::msg::QueryGroup;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
 use super::proposal::ProposalQueue;
@@ -66,7 +67,6 @@ use super::storage::RaftStorage;
 use super::transport::Transport;
 use super::types::WriteData;
 use super::util::Ticker;
-
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -216,6 +216,7 @@ where
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
     pub manage_tx: Sender<ManageMessage>,
+    pub query_group_tx: UnboundedSender<QueryGroup>,
     #[allow(unused)]
     apply: ApplyActor,
 }
@@ -251,7 +252,7 @@ where
 
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
-
+        let (group_query_tx, group_query_rx) = unbounded_channel();
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
@@ -274,6 +275,7 @@ where
             manage_rx,
             event_bcast,
             commit_rx,
+            group_query_rx,
             states,
         );
 
@@ -283,6 +285,7 @@ where
         });
 
         Self {
+            query_group_tx: group_query_tx,
             raft_message_tx,
             propose_tx,
             campaign_tx,
@@ -320,6 +323,7 @@ where
     commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
     apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
+    query_group_rx: UnboundedReceiver<QueryGroup>,
     shared_states: GroupStates,
 }
 
@@ -346,6 +350,7 @@ where
         manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
+        group_query_rx: UnboundedReceiver<QueryGroup>,
         shared_states: GroupStates,
     ) -> Self {
         NodeWorker::<TR, RS, MRS, WD, RES> {
@@ -367,6 +372,7 @@ where
             event_chan: event_chan.clone(),
             pending_responses: ResponseCallbackQueue::new(),
             shared_states,
+            query_group_rx: group_query_rx,
         }
     }
 
@@ -436,6 +442,8 @@ where
                 }
 
                 Some(msg) = self.commit_rx.recv() => self.handle_apply_commit(msg).await,
+
+                Some(msg) = self.query_group_rx.recv() => self.handle_query_group(msg),
 
                 else => {},
             }
@@ -1169,6 +1177,51 @@ where
         }
     }
 
+    fn handle_query_group(&self, msg: QueryGroup) {
+        match msg {
+            QueryGroup::HasPendingConf(group_id, tx) => match self.get_group(group_id) {
+                Err(err) => {
+                    // TODO: move response callback queue
+                    // TODO: We should consider adding a priority to the response callback queue,
+                    // to which the response should have a higher priority
+                    if let Err(_) = tx.send(Err(err)) {
+                        error!("send query HasPendingConf result error, receiver dropped");
+                    }
+                }
+                Ok(group) => {
+                    // TODO: move response callback queue
+                    // TODO: We should consider adding a priority to the response callback queue,
+                    // to which the response should have a higher priority
+                    let res = group.raft_group.raft.has_pending_conf();
+                    if let Err(_) = tx.send(Ok(res)) {
+                        error!("send query HasPendingConf result error, receiver dropped");
+                    }
+                }
+            },
+        }
+    }
+
+    #[inline]
+    fn get_group(&self, group_id: u64) -> Result<&RaftGroup<RS, RES>, Error> {
+        self.groups.get(&group_id).map_or(
+            Err(Error::RaftGroup(RaftGroupError::Deleted(
+                self.node_id,
+                group_id,
+            ))),
+            |group| Ok(group),
+        )
+    }
+
+    #[inline]
+    fn mut_group(&mut self, group_id: u64) -> Result<&mut RaftGroup<RS, RES>, Error> {
+        self.groups.get_mut(&group_id).map_or(
+            Err(Error::RaftGroup(RaftGroupError::Deleted(
+                self.node_id,
+                group_id,
+            ))),
+            |group| Ok(group),
+        )
+    }
     async fn commit_membership_change(&mut self, view: CommitMembership) -> Result<(), Error> {
         assert_eq!(
             view.change_request.changes.len(),
