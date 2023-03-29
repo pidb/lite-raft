@@ -660,15 +660,6 @@ where
     //     }
     // }
 
-    /// Get mutable event receiver by given `node_id`.
-    // pub fn mut_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Event>> {
-    //     self.events[to_index(node_id)].as_mut().unwrap()
-    // }
-
-    pub fn mut_apply_event_rx(&mut self, node_id: u64) -> &mut Receiver<Vec<Apply<W, R>>> {
-        self.apply_events[to_index(node_id)].as_mut().unwrap()
-    }
-
     /// Remove event rx from cluster events.
     // pub fn take_event_rx(&mut self, index: usize) -> Receiver<Vec<Event>> {
     //     std::mem::take(&mut self.events[index]).unwrap()

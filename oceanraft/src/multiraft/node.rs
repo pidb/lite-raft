@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use raft::Changer;
 use raft::StateRole;
+use raft::prelude::ConfState;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::Receiver;
@@ -1222,7 +1222,7 @@ where
             |group| Ok(group),
         )
     }
-    async fn commit_membership_change(&mut self, view: CommitMembership) -> Result<(), Error> {
+    async fn commit_membership_change(&mut self, view: CommitMembership) -> Result<ConfState, Error> {
         assert_eq!(
             view.change_request.changes.len(),
             view.conf_change.changes.len()
@@ -1288,16 +1288,9 @@ where
                 "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
                 self.node_id, group_id, group.replica_id, view.conf_change
             );
-            if !group
-                .raft_group
-                .raft
-                .prs()
-                .conf()
-                .to_conf_state()
-                .voters_outgoing
-                .is_empty()
-            {
-                return Ok(());
+            let conf_state = group.raft_group.raft.prs().conf().to_conf_state();
+            if !conf_state.voters_outgoing.is_empty() {
+                return Ok(conf_state);
             }
         }
 
@@ -1317,9 +1310,9 @@ where
             .storage
             .group_storage(group_id, group.replica_id)
             .await?;
-        gs.set_confstate(conf_state)?;
+        gs.set_confstate(conf_state.clone())?;
 
-        return Ok(());
+        return Ok(conf_state);
     }
 
     async fn membership_add(
@@ -1359,10 +1352,7 @@ where
 
         group.add_track_node(change.node_id);
 
-        info!(
-            "node {}: add membership change applied: node = {}, group = {}, replica = {}",
-            node_id, change.node_id, group_id, change.replica_id
-        );
+        debug!("node {}: add membership {:?}", node_id, change);
     }
 
     async fn membership_remove(
@@ -1396,10 +1386,7 @@ where
             );
         }
 
-        info!(
-            "node {}: remove membership change applied: node = {}, group = {}, replica = {}",
-            node_id, change_request.node_id, group_id, change_request.replica_id
-        );
+        debug!("node {}: remove membership {:?} ", node_id, change_request,);
     }
 
     async fn handle_readys(&mut self) {

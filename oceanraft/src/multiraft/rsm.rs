@@ -1,22 +1,13 @@
 extern crate raft_proto;
 
 use futures::Future;
-use prost::Message;
-use raft_proto::ConfChangeI;
-use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::multiraft::error::ChannelError;
 use crate::multiraft::WriteResponse;
-use crate::prelude::ConfChange;
-use crate::prelude::ConfChangeV2;
-use crate::prelude::Entry;
-use crate::prelude::EntryType;
+use crate::prelude::ConfState;
 use crate::prelude::MembershipChangeData;
 
 use super::error::Error;
-use super::msg::ApplyCommitMessage;
-use super::msg::CommitMembership;
 use super::GroupState;
 use super::WriteData;
 
@@ -40,7 +31,7 @@ where
     pub data: W,
     pub context: Option<Vec<u8>>,
     pub is_conf_change: bool,
-    pub tx: Option<oneshot::Sender<Result<R, Error>>>,
+    pub tx: Option<oneshot::Sender<Result<R, Error>>>, // TODO: consider the tx and apply data separation.
 }
 
 #[derive(Debug)]
@@ -48,91 +39,10 @@ pub struct ApplyMembership<RES: WriteResponse> {
     pub group_id: u64,
     pub index: u64,
     pub term: u64,
-    pub conf_change: ConfChangeV2,
+    // pub conf_change: ConfChangeV2,
     pub change_data: MembershipChangeData,
-    // pub entry: Entry,
+    pub conf_state: ConfState,
     pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
-    pub commit_tx: UnboundedSender<ApplyCommitMessage>,
-}
-
-impl<RES: WriteResponse> ApplyMembership<RES> {
-    /// Consumption entry is parse to `ApplyMembership`.
-    pub fn parse(
-        group_id: u64,
-        entry: Entry,
-        tx: Option<oneshot::Sender<Result<RES, Error>>>,
-        commit_tx: UnboundedSender<ApplyCommitMessage>,
-    ) -> Self {
-        let (index, term) = (entry.index, entry.term);
-        let (conf_change, change_data) = match entry.entry_type() {
-            EntryType::EntryNormal => unreachable!(),
-            EntryType::EntryConfChange => {
-                assert_ne!(entry.data.len(), 0);
-                assert_ne!(entry.context.len(), 0);
-
-                let mut conf_change = ConfChange::default();
-                conf_change.merge(entry.data.as_ref()).unwrap();
-
-                let mut change_data = MembershipChangeData::default();
-                change_data.merge(entry.context.as_ref()).unwrap();
-
-                (conf_change.into_v2(), change_data)
-            }
-            EntryType::EntryConfChangeV2 => {
-                assert_ne!(entry.data.len(), 0);
-                assert_ne!(entry.context.len(), 0);
-
-                let mut conf_change = ConfChangeV2::default();
-                conf_change.merge(entry.data.as_ref()).unwrap();
-
-                let mut change_data = MembershipChangeData::default();
-                change_data.merge(entry.context.as_ref()).unwrap();
-
-                (conf_change, change_data)
-            }
-        };
-
-        Self {
-            group_id,
-            index,
-            term,
-            conf_change,
-            change_data,
-            tx,
-            commit_tx,
-        }
-    }
-
-    /// Commit membership change to multiraft.
-    ///
-    /// Note: it's must be called because multiraft need apply membersip change to raft.
-    pub async fn done(&mut self) -> Result<(), Error> {
-        let (tx, rx) = oneshot::channel();
-        let commit = CommitMembership {
-            entry_index: self.index,
-            conf_change: self.conf_change.clone(),
-            change_request: self.change_data.clone(),
-        };
-
-        match self
-            .commit_tx
-            .send(ApplyCommitMessage::Membership((commit, tx)))
-        {
-            Ok(_) => {}
-            Err(_) => {
-                return Err(Error::Channel(ChannelError::ReceiverClosed(
-                    "node actor dropped".to_owned(),
-                )));
-            }
-        }
-
-        // TODO: got conf state from commit to raft and save to self.
-        let _ = rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed("node actor dropped".to_owned()))
-        })??;
-
-        Ok(())
-    }
 }
 
 #[derive(Debug)]

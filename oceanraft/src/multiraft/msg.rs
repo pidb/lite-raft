@@ -1,9 +1,13 @@
+extern crate raft_proto;
+
 use std::collections::HashMap;
 
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
 use crate::multiraft::WriteResponse;
+
+use crate::prelude::ConfState;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
@@ -130,18 +134,25 @@ pub struct ApplyResultMessage {
 /// If proposed change is ConfChange, the ConfChangeV2 is converted
 /// from ConfChange. If ConfChangeV2 is used, changes contains multiple
 /// requests, otherwise changes contains only one request.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommitMembership {
-    #[allow(unused)]
-    pub entry_index: u64,
+    /// Entry index.
+    pub index: u64,
+
+    /// Entry term.
+    pub term: u64,
+
+    /// Conf change.
     pub conf_change: ConfChangeV2,
+
+    /// Specific change request data from the client.
     pub change_request: MembershipChangeData,
 }
 
 #[derive(Debug)]
 pub enum ApplyCommitMessage {
     None,
-    Membership((CommitMembership, oneshot::Sender<Result<(), Error>>)),
+    Membership((CommitMembership, oneshot::Sender<Result<ConfState, Error>>)),
 }
 
 impl Default for ApplyCommitMessage {

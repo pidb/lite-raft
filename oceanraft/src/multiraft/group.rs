@@ -624,7 +624,6 @@ where
 
         let term = self.term();
         let data = match flexbuffer_serialize(&write_request.data)
-            .map_err(|err| Error::FlexBuffersSerialization(err))
         {
             Err(err) => {
                 return Some(ResponseCallbackQueue::new_error_callback(
