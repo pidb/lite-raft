@@ -17,7 +17,6 @@ use tracing::trace;
 use tracing::warn;
 use tracing::Level;
 
-
 use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -27,8 +26,8 @@ use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 
 use super::error::Error;
+use super::error::ProposeError;
 use super::error::RaftGroupError;
-use super::error::WriteError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
@@ -50,6 +49,7 @@ use super::storage::RaftStorage;
 use super::transport;
 use super::types::WriteData;
 use super::util;
+use super::util::flexbuffer_serialize;
 use super::Event;
 
 pub enum Status {
@@ -167,7 +167,7 @@ where
         let replica_desc = match replica_cache.replica_for_node(group_id, node_id).await {
             Err(err) => {
                 error!(
-                    "node {}: write is error, got {} group replica  of storage error {}",
+                    "node {}: can't handle ready, got {} group replica of storage error {}",
                     node_id, group_id, err
                 );
                 return;
@@ -209,13 +209,12 @@ where
             Ok(gs) => gs,
             Err(err) => {
                 error!(
-                    "node({}) group({}) ready but got group storage error {}",
+                    "node {}: group {} ready but got group storage error {}",
                     node_id, group_id, err
                 );
                 return;
             }
         };
-
         // send out messages
         if !rd.messages().is_empty() {
             transport::send_messages(
@@ -308,6 +307,7 @@ where
             self.raft_group.raft.raft_log.committed,
             self.raft_group.raft.raft_log.persisted,
         );
+        // TODO: handle error: if storage error we need retry instead of panic
         let commit_term = gs.term(commit_index).unwrap();
 
         let current_term = self.raft_group.raft.term;
@@ -404,32 +404,30 @@ where
             .await
         {
             Err(err) => {
-                error!("group({}) replica({}) become leader, but got it replica description for node id error {}",
-            group_id, ss.leader_id, err);
-                // FIXME: it maybe temporary error, retry or use NO_NODE.
+                // TODO: handle storage error kind, such as try again
+                error!("node {}: group {} replica{} become leader, but got it replica description for node id error {}",
+                    node_id, group_id, ss.leader_id, err);
                 return;
             }
-            Ok(op) => op,
-        };
+            Ok(op) => match op {
+                Some(desc) => desc,
+                None => {
+                    // this means that we do not know which node the leader is on,
+                    // but this does not affect us to send LeaderElectionEvent, as
+                    // this will be fixed by subsequent message communication.
+                    // TODO: and asynchronous broadcasting
+                    warn!(
+                        "replica {} of raft group {} becomes leader, but  node id is not known",
+                        ss.leader_id, group_id
+                    );
 
-        let replica_desc = match replica_desc {
-            Some(desc) => desc,
-            None => {
-                // this means that we do not know which node the leader is on,
-                // but this does not affect us to send LeaderElectionEvent, as
-                // this will be fixed by subsequent message communication.
-                // TODO: and asynchronous broadcasting
-                warn!(
-                    "replica {} of raft group {} becomes leader, but  node id is not known",
-                    ss.leader_id, group_id
-                );
-
-                ReplicaDesc {
-                    group_id,
-                    node_id: NO_NODE,
-                    replica_id: ss.leader_id,
+                    ReplicaDesc {
+                        group_id,
+                        node_id: NO_NODE,
+                        replica_id: ss.leader_id,
+                    }
                 }
-            }
+            },
         };
 
         // update shared states
@@ -460,14 +458,12 @@ where
         &mut self,
         node_id: u64,
         gwr: &mut RaftGroupWriteRequest,
-        gs: &RS,
+        gs: &RS, // TODO: cache storage in RaftGroup
         transport: &TR,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
     ) {
         let group_id = self.group_id;
-        // TODO: cache storage in RaftGroup
-
         let mut ready = gwr.ready.take().unwrap();
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
@@ -485,6 +481,7 @@ where
                 entries[0].index,
                 entries[entries.len() - 1].index
             );
+
             if let Err(_error) = gs.append(&entries) {
                 // FIXME: handle error
                 panic!("node {}: append entries error = {}", node_id, _error);
@@ -597,7 +594,7 @@ where
         // }
 
         if !self.is_leader() {
-            return Err(Error::Write(WriteError::NotLeader {
+            return Err(Error::Propose(ProposeError::NotLeader {
                 node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
@@ -605,7 +602,7 @@ where
         }
 
         if write_data.term != 0 && self.term() > write_data.term {
-            return Err(Error::Write(WriteError::Stale(
+            return Err(Error::Propose(ProposeError::Stale(
                 write_data.term,
                 self.term(),
             )));
@@ -616,7 +613,7 @@ where
 
     pub fn propose_write<WD: WriteData>(
         &mut self,
-        mut write_request: WriteRequest<WD, RES>,
+        write_request: WriteRequest<WD, RES>,
     ) -> Option<ResponseCallback> {
         if let Err(err) = self.pre_propose_write(&write_request) {
             return Some(ResponseCallbackQueue::new_error_callback(
@@ -626,20 +623,23 @@ where
         }
 
         let term = self.term();
-        let mut s = flexbuffers::FlexbufferSerializer::new();
-        write_request.data.serialize(&mut s).unwrap();
-        let write_data = s.take_buffer();
-
-        // let write_data = match write_request.data.encode() {
-        //     Err(err) => todo!(),
-        //     Ok(data) => data,
-        // };
+        let data = match flexbuffer_serialize(&write_request.data)
+            .map_err(|err| Error::FlexBuffersSerialization(err))
+        {
+            Err(err) => {
+                return Some(ResponseCallbackQueue::new_error_callback(
+                    write_request.tx,
+                    err,
+                ));
+            }
+            Ok(mut ser) => ser.take_buffer(),
+        };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
         if let Err(err) = self.raft_group.propose(
             write_request.context.map_or(vec![], |ctx_data| ctx_data),
-            write_data,
+            data,
         ) {
             return Some(ResponseCallbackQueue::new_error_callback(
                 write_request.tx,
@@ -651,7 +651,13 @@ where
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
                 write_request.tx,
-                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
+                Error::Propose(ProposeError::UnexpectedIndex {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    expected: next_index,
+                    unexpected: index - 1,
+                }),
             ));
         }
 
@@ -669,6 +675,7 @@ where
     pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
         // let uuid = Uuid::new_v4();
         let mut ctx = Vec::new();
+        // TODO: give up abomonatin.
         // Safety: This method is unsafe because it is unsafe to
         // transmute typed allocations to binary. Furthermore, Rust currently
         // indicates that it is undefined behavior to observe padding bytes,
@@ -688,6 +695,12 @@ where
     }
 
     fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error> {
+        if self.raft_group.raft.has_pending_conf() {
+            return Err(Error::Propose(
+                super::error::ProposeError::MembershipPending(self.node_id, self.group_id),
+            ));
+        }
+
         if data.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
@@ -699,7 +712,7 @@ where
         }
 
         if !self.is_leader() {
-            return Err(Error::Write(WriteError::NotLeader {
+            return Err(Error::Propose(ProposeError::NotLeader {
                 node_id: self.node_id,
                 group_id: self.group_id,
                 replica_id: self.replica_id,
@@ -707,7 +720,7 @@ where
         }
 
         if data.term != 0 && self.term() > data.term {
-            return Err(Error::Write(WriteError::Stale(data.term, self.term())));
+            return Err(Error::Propose(ProposeError::Stale(data.term, self.term())));
         }
 
         Ok(())
@@ -735,9 +748,11 @@ where
 
         let res = if data.changes.len() == 1 {
             let (ctx, cc) = to_cc(&data);
+            assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
             let (ctx, cc) = to_ccv2(&data);
+            assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         };
 
@@ -763,7 +778,13 @@ where
 
             return Some(ResponseCallbackQueue::new_error_callback(
                 tx,
-                Error::Write(WriteError::UnexpectedIndex(next_index, index - 1)),
+                Error::Propose(ProposeError::UnexpectedIndex {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    expected: next_index,
+                    unexpected: index - 1,
+                }),
             ));
         }
 

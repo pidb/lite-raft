@@ -58,7 +58,7 @@ pub enum ChannelError {
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
-pub enum WriteError {
+pub enum ProposeError {
     // TODO: more error info
     #[error("node {node_id:?} not leader: group = {group_id:?}, replica = {replica_id:?}")]
     NotLeader {
@@ -70,8 +70,17 @@ pub enum WriteError {
     #[error("stale write: expected is term {0}, current term is {1}")]
     Stale(u64, u64),
 
-    #[error("propose got unexpected index, expected index is {0}, got {1}")]
-    UnexpectedIndex(u64, u64),
+    #[error("node {node_id:?}: got unexpected index during proposal at group {group_id:?}, expected {expected:?}, got {unexpected:?}")]
+    UnexpectedIndex {
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+        expected: u64,
+        unexpected: u64,
+    },
+
+    #[error("node {0}: has pending membership change is being processed on group {1}")]
+    MembershipPending(u64 /* node_id */, u64 /* group_id */),
 }
 
 #[derive(thiserror::Error, Debug, PartialEq)]
@@ -80,7 +89,7 @@ pub enum NodeActorError {
     Stopped,
 }
 
-#[derive(thiserror::Error, Debug, PartialEq)]
+#[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// The configuration is invalid.
     #[error("{0}")]
@@ -95,14 +104,23 @@ pub enum Error {
     #[error("{0}")]
     Channel(#[from] ChannelError),
 
+    /// An error occurred during the proposal.
     #[error("{0}")]
-    Write(#[from] WriteError),
+    Propose(#[from] ProposeError),
 
     #[error("{0}")]
     NodeActor(#[from] NodeActorError),
 
     #[error("{0}")]
     Storage(#[from] super::storage::Error),
+
+    /// An error occurred when serializing with flexbuffer.
+    #[error("{0}")]
+    FlexBuffersSerialization(#[from] flexbuffers::SerializationError),
+
+    /// An error occurred when deserializing with flexbuffer.
+    #[error("{0}")]
+    FlexBuffersDeserialization(#[from] flexbuffers::DeserializationError),
 
     /// A raft error occurred.
     #[error("{0}")]

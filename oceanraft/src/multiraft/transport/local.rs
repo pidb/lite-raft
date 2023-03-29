@@ -194,7 +194,7 @@ where
             "node {}: group = {}, send {:?} to {} and forward replica {} -> {}",
             from_node,
             msg.group_id,
-            msg.get_msg().msg_type(),
+            msg,
             to_node,
             from_rep,
             to_rep,

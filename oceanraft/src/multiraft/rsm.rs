@@ -67,6 +67,9 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
         let (conf_change, change_data) = match entry.entry_type() {
             EntryType::EntryNormal => unreachable!(),
             EntryType::EntryConfChange => {
+                assert_ne!(entry.data.len(), 0);
+                assert_ne!(entry.context.len(), 0);
+
                 let mut conf_change = ConfChange::default();
                 conf_change.merge(entry.data.as_ref()).unwrap();
 
@@ -76,6 +79,9 @@ impl<RES: WriteResponse> ApplyMembership<RES> {
                 (conf_change.into_v2(), change_data)
             }
             EntryType::EntryConfChangeV2 => {
+                assert_ne!(entry.data.len(), 0);
+                assert_ne!(entry.context.len(), 0);
+
                 let mut conf_change = ConfChangeV2::default();
                 conf_change.merge(entry.data.as_ref()).unwrap();
 

@@ -1,12 +1,15 @@
+use std::mem::take;
+
 use oceanraft::multiraft::Error;
-use oceanraft::multiraft::WriteError;
+use oceanraft::multiraft::ProposeError;
 use oceanraft::prelude::StoreData;
 use oceanraft::util::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::MemStoreEnv;
+use crate::fixtures::RockStoreEnv;
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
@@ -18,12 +21,14 @@ use crate::fixtures::RockStorageEnv;
 async fn test_no_leader() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let mut env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
-        .storages(rockstore_env.storages.clone())
+        .state_machines(env.state_machines.clone())
+        .apply_rxs(take(&mut env.rxs))
+        .storages(env.storages.clone())
         .build()
         .await;
 
@@ -48,7 +53,7 @@ async fn test_no_leader() {
             key: "key".to_string(),
             value: "data".as_bytes().to_vec(),
         };
-        let expected_err = Error::Write(WriteError::NotLeader {
+        let expected_err = Error::Propose(ProposeError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
@@ -56,11 +61,11 @@ async fn test_no_leader() {
 
         match cluster.write_command(node_id, plan.group_id, data) {
             Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
-            Err(err) => assert_eq!(expected_err, err),
+            Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
         }
     }
 
-    rockstore_env.destory();
+    // rockstore_env.destory();
     // cluster.stop().await;
 }
 
@@ -76,14 +81,16 @@ async fn test_no_leader() {
 async fn test_bad_group() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let rockstore_env = RockStorageEnv::<()>::new(nodes);
+    let env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
-        .kv_stores(rockstore_env.rock_kv_stores.clone())
-        .storages(rockstore_env.storages.clone())
+        .state_machines(env.state_machines.clone())
+        .storages(env.storages.clone())
         .build()
         .await;
+
     let mut plan = MakeGroupPlan {
         group_id: 1,
         first_node_id: 1,
@@ -93,9 +100,7 @@ async fn test_bad_group() {
     // now, trigger leader elect and it's should became leader.
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(1, plan.group_id).await;
-    let _ = cluster.wait_leader_elect_event(1)
-        .await
-        .unwrap();
+    let _ = cluster.wait_leader_elect_event(1).await.unwrap();
 
     for i in 1..3 {
         let node_id = i + 1;
@@ -104,16 +109,16 @@ async fn test_bad_group() {
             key: "key".to_string(),
             value: "data".as_bytes().to_vec(),
         };
-        let expected_err = Error::Write(WriteError::NotLeader {
+        let expected_err = Error::Propose(ProposeError::NotLeader {
             node_id,
             group_id: plan.group_id,
             replica_id: i + 1,
         });
         match cluster.write_command(node_id, plan.group_id, data) {
-            Err(err) => assert_eq!(expected_err, err),
+            Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
             Ok(rx) => match rx.await.unwrap() {
                 Ok(res) => panic!("expected {:?}, got {:?}", expected_err, res),
-                Err(err) => assert_eq!(expected_err, err),
+                Err(err) => assert_eq!(expected_err.to_string(), err.to_string()),
             },
         }
     }

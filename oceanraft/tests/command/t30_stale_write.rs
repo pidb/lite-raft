@@ -3,11 +3,11 @@ use std::time::Duration;
 use oceanraft::prelude::StoreData;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::quickstart_group;
+use crate::fixtures::quickstart_rockstore_group;
 use crate::fixtures::rand_string;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::WriteChecker;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::RockStoreEnv;
 
 
 /// Testing pending proposals after removing the leader of
@@ -19,8 +19,8 @@ use crate::fixtures::RockStorageEnv;
 )]
 async fn test_group_stale_write() {
     let nodes = 3;
-    let rockstore_env = RockStorageEnv::new(nodes);
-    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
+    let mut rockstore_env = RockStoreEnv::new(nodes);
+    let (_, mut cluster) = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
 
     let group_id = 1;
 

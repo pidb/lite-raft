@@ -3,10 +3,10 @@ use std::time::Duration;
 use oceanraft::prelude::StoreData;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::quickstart_group;
-use crate::fixtures::quickstart_multi_groups;
+use crate::fixtures::quickstart_rockstore_group;
+use crate::fixtures::quickstart_rockstore_multi_groups;
 use crate::fixtures::rand_string;
-use crate::fixtures::RockStorageEnv;
+use crate::fixtures::RockStoreEnv;
 use crate::fixtures::WriteChecker;
 
 #[async_entry::test(
@@ -17,8 +17,8 @@ use crate::fixtures::WriteChecker;
 async fn test_group_write() {
     let nodes = 3;
     let command_nums = 10;
-    let rockstore_env = RockStorageEnv::new(nodes);
-    let (_, mut cluster) = quickstart_group(&rockstore_env, nodes).await;
+    let mut rockstore_env = RockStoreEnv::new(nodes);
+    let (_, mut cluster) = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
@@ -70,9 +70,9 @@ async fn test_multigroup_write() {
     let nodes = 3;
     let command_nums = 10;
 
-    let rockstore_env = RockStorageEnv::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
 
-    let (_, mut cluster) = quickstart_multi_groups(&rockstore_env, nodes, groups).await;
+    let (_, mut cluster) = quickstart_rockstore_multi_groups(&mut rockstore_env, nodes, groups).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
