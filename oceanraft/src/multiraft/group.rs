@@ -623,8 +623,7 @@ where
         }
 
         let term = self.term();
-        let data = match flexbuffer_serialize(&write_request.data)
-        {
+        let data = match flexbuffer_serialize(&write_request.data) {
             Err(err) => {
                 return Some(ResponseCallbackQueue::new_error_callback(
                     write_request.tx,
@@ -704,10 +703,6 @@ where
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
             ));
-        }
-
-        if data.changes.is_empty() {
-            return Err(Error::BadParameter("group id must not be empty".to_owned()));
         }
 
         if !self.is_leader() {
@@ -857,8 +852,8 @@ fn to_cc(data: &MembershipChangeData) -> (Vec<u8>, ConfChange) {
 }
 
 fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
-    assert!(data.changes.len() > 1);
     let mut cc = ConfChangeV2::default();
+    cc.set_transition(data.transition());
     let mut sc = vec![];
     for change in data.changes.iter() {
         sc.push(ConfChangeSingle {
@@ -867,7 +862,6 @@ fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
         });
     }
 
-    // TODO: consider setting transaction type
     cc.set_changes(sc);
     (data.encode_to_vec(), cc)
 }

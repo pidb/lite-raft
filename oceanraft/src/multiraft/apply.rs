@@ -495,33 +495,6 @@ where
         return None;
     }
 
-    /// Parse out ConfChangeV2 and MembershipChangeData from entry.
-    /// Return Error if serialization error.
-    fn parse_entry(ent: &Entry) -> Result<(ConfChangeV2, MembershipChangeData), Error> {
-        match ent.entry_type() {
-            EntryType::EntryNormal => unreachable!(),
-            EntryType::EntryConfChange => {
-                let conf_change = ConfChange::decode(ent.data.as_ref())
-                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
-
-                // TODO: use flexbuffer
-                let change_data = MembershipChangeData::decode(ent.context.as_ref())
-                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
-
-                Ok((conf_change.into_v2(), change_data))
-            }
-            EntryType::EntryConfChangeV2 => {
-                Ok((
-                    ConfChangeV2::decode(ent.data.as_ref())
-                        .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
-                    // TODO: use flexbuffer
-                    MembershipChangeData::decode(ent.context.as_ref())
-                        .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
-                ))
-            }
-        }
-    }
-
     /// Commit memberhsip change to specific raft group.
     async fn commit_membership_change(
         &self,
@@ -530,17 +503,14 @@ where
     ) -> Result<ConfState, Error> {
         let (tx, rx) = oneshot::channel();
 
-        
-
         if let Err(_) = ctx
             .commit_tx
-            .send(ApplyCommitMessage::Membership((commit, tx))) {
-return Err(Error::Channel(ChannelError::ReceiverClosed(
-                    "node actor dropped".to_owned(),
-                )));
-            }
-
-
+            .send(ApplyCommitMessage::Membership((commit, tx)))
+        {
+            return Err(Error::Channel(ChannelError::ReceiverClosed(
+                "node actor dropped".to_owned(),
+            )));
+        }
 
         // TODO: got conf state from commit to raft and save to self.
         let conf_state = rx.await.map_err(|_| {
@@ -548,6 +518,130 @@ return Err(Error::Channel(ChannelError::ReceiverClosed(
         })??;
 
         Ok(conf_state)
+    }
+
+    async fn handle_conf_change(
+        &mut self,
+        ctx: &ApplyContext<W, R, RSM>,
+        group_id: u64,
+        ent: Entry,
+    ) -> Option<Apply<W, R>> {
+        let index = ent.index;
+        let term = ent.term;
+        if ent.data.is_empty() && ent.entry_type() != EntryType::EntryConfChangeV2 {
+            return Some(Apply::NoOp(ApplyNoOp {
+                group_id,
+                index,
+                term,
+            }));
+        }
+
+        let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
+        let (conf_change, change_request) = match parse_conf_change(&ent) {
+            Err(err) => {
+                tx.map(|tx| {
+                    if let Err(backed) = tx.send(Err(err)) {
+                        error!(
+                            "response {:?} error to client failed, receiver dropped",
+                            backed
+                        )
+                    }
+                });
+
+                return None;
+            }
+            Ok(val) => val,
+        };
+
+        // apply the membership changes of apply to oceanraft and raft group first.
+        // It doesn't matter if the user state machine then fails to apply,
+        // because we set the applied index based on the index successfully
+        // applied by the user and then promote the raft based on that applied index,
+        // so the user can apply the log later. For oceanraft and raft,
+        // we make the commit an idempotent operation (TODO).
+        let conf_state = match self
+            .commit_membership_change(
+                ctx,
+                CommitMembership {
+                    index,
+                    term,
+                    conf_change,
+                    change_request: change_request.clone(),
+                },
+            )
+            .await
+        {
+            Err(err) => {
+                tx.map(|tx| {
+                    if let Err(backed) = tx.send(Err(err)) {
+                        error!(
+                            "response {:?} error to client failed, receiver dropped",
+                            backed
+                        )
+                    }
+                });
+                return None;
+            }
+            Ok(conf_state) => conf_state,
+        };
+
+        Some(Apply::Membership(ApplyMembership {
+            group_id,
+            index,
+            term,
+            // conf_change,
+            conf_state,
+            change_data: change_request,
+            tx,
+        }))
+    }
+
+    fn handle_normal(&mut self, group_id: u64, ent: Entry) -> Option<Apply<W, R>> {
+        let index = ent.index;
+        let term = ent.term;
+        if ent.data.is_empty() {
+            // When the new leader online, a no-op log will be send and commit.
+            // we will skip this log for the application and set index and term after
+            // apply.
+            info!(
+                "node {}: group = {} skip no-op entry index = {}, term = {}",
+                self.node_id, group_id, index, term
+            );
+            self.pending_senders.remove_stales(index, term);
+            return Some(Apply::NoOp(ApplyNoOp {
+                group_id,
+                index,
+                term,
+            }));
+        }
+
+        trace!(
+            "staging pending apply entry log ({}, {})",
+            ent.index,
+            ent.term
+        );
+
+        let tx = self
+            .find_pending(ent.term, ent.index, false)
+            .map_or(None, |p| p.tx);
+
+        // TODO: handle this error
+        let write_data = flexbuffer_deserialize(&ent.data).unwrap();
+
+        Some(Apply::Normal(ApplyNormal {
+            group_id,
+            is_conf_change: false,
+            // entry,
+            index,
+            term,
+            data: write_data,
+            context: if ent.context.is_empty() {
+                None
+            } else {
+                Some(ent.context)
+            },
+            tx,
+        }))
     }
 
     async fn handle_apply(
@@ -592,116 +686,17 @@ return Err(Error::Channel(ChannelError::ReceiverClosed(
 
         self.push_pending_proposals(std::mem::take(&mut apply.proposals));
 
-        let mut events = vec![];
-        for entry in apply.entries.into_iter() {
-            let entry_index = entry.index;
-            let entry_term = entry.term;
-            if entry.data.is_empty() {
-                // When the new leader online, a no-op log will be send and commit.
-                // we will skip this log for the application and set index and term after
-                // apply.
-                info!(
-                    "node {}: group = {} skip no-op entry index = {}, term = {}",
-                    self.node_id, group_id, entry_index, entry_term
-                );
-                self.pending_senders.remove_stales(entry_index, entry_term);
-                events.push(Apply::NoOp(ApplyNoOp {
-                    group_id,
-                    index: entry_index,
-                    term: entry_term,
-                }));
-            } else {
-                // TODO: add result
-                let event = match entry.entry_type() {
-                    EntryType::EntryNormal => {
-                        trace!(
-                            "staging pending apply entry log ({}, {})",
-                            entry_index,
-                            entry_term
-                        );
-                        let tx = self
-                            .find_pending(entry.term, entry.index, false)
-                            .map_or(None, |p| p.tx);
+        let mut applys = vec![];
+        for ent in apply.entries.into_iter() {
+            let apply = match ent.entry_type() {
+                EntryType::EntryNormal => self.handle_normal(group_id, ent),
+                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
+                    self.handle_conf_change(ctx, group_id, ent).await
+                }
+            };
 
-                        // TODO: handle this error
-                        let write_data = flexbuffer_deserialize(&entry.data).unwrap();
-
-                        Apply::Normal(ApplyNormal {
-                            group_id,
-                            is_conf_change: false,
-                            // entry,
-                            index: entry.index,
-                            term: entry.term,
-                            data: write_data,
-                            context: if entry.context.is_empty() {
-                                None
-                            } else {
-                                Some(entry.context)
-                            },
-                            tx,
-                        })
-                    }
-
-                    EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                        let tx = self
-                            .find_pending(entry.term, entry.index, true)
-                            .map_or(None, |p| p.tx);
-
-                        match Self::parse_entry(&entry) {
-                            Err(err) => {
-                                tx.map(|tx| {
-                                    
-                                    if let Err(backed) = tx.send(Err(err)) {
-                                        error!("response {:?} error to client failed, receiver dropped", backed)
-                                    }
-                                });
-                                continue;
-                            }
-                            Ok((conf_change, change_request)) => {
-                                // apply the membership changes of apply to oceanraft and raft group first.
-                                // It doesn't matter if the user state machine then fails to apply, 
-                                // because we set the applied index based on the index successfully 
-                                // applied by the user and then promote the raft based on that applied index, 
-                                // so the user can apply the log later. For oceanraft and raft, 
-                                // we make the commit an idempotent operation (TODO).
-                                let conf_state = match self
-                                    .commit_membership_change(
-                                        ctx,
-                                        CommitMembership {
-                                            index: entry_index,
-                                            term: entry_term,
-                                            conf_change: conf_change,
-                                            change_request: change_request.clone(),
-                                        },
-                                    )
-                                    .await {
-                                        Err(err) => {
-                                            tx.map(|tx| {
-                                                if let Err(backed) = tx.send(Err(err)) {
-                                                    error!("response {:?} error to client failed, receiver dropped", backed)
-                                                }
-                                            });
-                                            continue;
-                                        },
-                                        Ok(conf_state) => conf_state,
-                                    };
-                                
-
-                                Apply::Membership(ApplyMembership {
-                                    group_id,
-                                    index: entry_index,
-                                    term: entry_term,
-                                    // conf_change,
-                                    conf_state,
-                                    change_data: change_request,
-                                    tx,
-                                })
-                            }
-                        }
-                    }
-                };
-
-                events.push(event)
+            if let Some(apply) = apply {
+                applys.push(apply)
             }
         }
 
@@ -715,7 +710,7 @@ return Err(Error::Channel(ChannelError::ReceiverClosed(
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        ctx.rsm.apply(group_id, shared_state, events).await;
+        ctx.rsm.apply(group_id, shared_state, applys).await;
         apply_state.applied_index = apply.commit_index;
         apply_state.applied_term = apply.commit_term;
         // (apply_state.applied_index, apply_state.applied_term) =
@@ -749,6 +744,33 @@ return Err(Error::Channel(ChannelError::ReceiverClosed(
             applied_index: apply_state.applied_index,
             applied_term: apply_state.applied_term,
         })
+    }
+}
+
+/// Parse out ConfChangeV2 and MembershipChangeData from entry.
+/// Return Error if serialization error.
+fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipChangeData), Error> {
+    match ent.entry_type() {
+        EntryType::EntryNormal => unreachable!(),
+        EntryType::EntryConfChange => {
+            let conf_change = ConfChange::decode(ent.data.as_ref())
+                .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
+
+            // TODO: use flexbuffer
+            let change_data = MembershipChangeData::decode(ent.context.as_ref())
+                .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
+
+            Ok((conf_change.into_v2(), change_data))
+        }
+        EntryType::EntryConfChangeV2 => {
+            Ok((
+                ConfChangeV2::decode(ent.data.as_ref())
+                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                // TODO: use flexbuffer
+                MembershipChangeData::decode(ent.context.as_ref())
+                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+            ))
+        }
     }
 }
 

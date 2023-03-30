@@ -5,8 +5,8 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use raft::StateRole;
 use raft::prelude::ConfState;
+use raft::StateRole;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::Receiver;
@@ -1222,7 +1222,10 @@ where
             |group| Ok(group),
         )
     }
-    async fn commit_membership_change(&mut self, view: CommitMembership) -> Result<ConfState, Error> {
+    async fn commit_membership_change(
+        &mut self,
+        view: CommitMembership,
+    ) -> Result<ConfState, Error> {
         assert_eq!(
             view.change_request.changes.len(),
             view.conf_change.changes.len()
@@ -1311,7 +1314,10 @@ where
             .group_storage(group_id, group.replica_id)
             .await?;
         gs.set_confstate(conf_state.clone())?;
-
+        debug!(
+            "node {}: applied conf_state {:?} for group {} replica{}",
+            self.node_id, conf_state, group_id, group.replica_id
+        );
         return Ok(conf_state);
     }
 

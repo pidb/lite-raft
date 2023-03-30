@@ -45,6 +45,7 @@ message SingleMembershipChange {
 message MembershipChangeData {
   uint64 group_id = 1;
   uint64 term = 2;
-  repeated SingleMembershipChange changes = 3;
-  repeated ReplicaDesc replicas = 4;
+  eraftpb.ConfChangeTransition transition = 3;
+  repeated SingleMembershipChange changes = 4;
+  repeated ReplicaDesc replicas = 5;
 }
