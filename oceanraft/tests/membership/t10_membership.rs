@@ -4,48 +4,19 @@ use std::time::Duration;
 use oceanraft::multiraft::storage::MultiRaftStorage;
 use oceanraft::multiraft::storage::RaftStorageReader;
 use oceanraft::multiraft::Apply;
-use oceanraft::multiraft::ApplyMembership;
+use oceanraft::prelude::ConfChangeTransition;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
-use oceanraft::prelude::StoreData;
 use oceanraft::util::TaskGroup;
-use tokio::sync::oneshot;
-use tokio::time::timeout_at;
-use tokio::time::Instant;
+use tokio::time::sleep;
 
 use crate::fixtures::init_default_ut_tracing;
-use crate::fixtures::rand_string;
 use crate::fixtures::ClusterBuilder;
 use crate::fixtures::FixtureCluster;
 use crate::fixtures::MakeGroupPlan;
-use crate::fixtures::RockCluster;
 use crate::fixtures::RockStoreEnv;
-
-async fn check_cc<F>(
-    cluster: &mut RockCluster,
-    node_id: u64,
-    wait_node_id: u64,
-    timeout: Duration,
-    check: F,
-) where
-    F: FnOnce(&ApplyMembership<()>),
-{
-    let event = FixtureCluster::wait_membership_change_apply_event(cluster, node_id, timeout)
-        .await
-        .expect(
-            format!(
-                "wait {} apply membership change event timeout on node = {}",
-                wait_node_id, node_id
-            )
-            .as_str(),
-        );
-    check(&event);
-    //    event.done().await.unwrap();
-    // TODO: as method called
-    // event.tx.map(|tx| tx.send(Ok(())));
-}
 
 #[async_entry::test(
     flavor = "multi_thread",
@@ -95,6 +66,7 @@ async fn test_single_step() {
             term: 0, // not check
             changes: vec![change],
             replicas: vec![],
+            transition: 0,
         })
         .await
         .unwrap();
@@ -117,6 +89,7 @@ async fn test_single_step() {
                         term: 0, // not check
                         changes: vec![change],
                         replicas: vec![],
+                        transition: 0,
                     })
                     .await
                     .unwrap();
@@ -134,31 +107,8 @@ async fn test_single_step() {
         auto_leave: false,
     };
 
-    // wait all nodes apply conf state
-    for (i, rx) in cluster.apply_events.iter_mut().enumerate() {
-        let rx = rx.as_mut().unwrap();
-        loop {
-            cluster.tickers[i].tick().await;
-            match rx.try_recv() {
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(apply) => {
-                                let mut conf_state = apply.conf_state;
-                                conf_state.voters.sort();
-                                if conf_state == expected {
-                                    break;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // TODO: wait all nodes apply conf state, this need refactor
+    // heartbeat by heartbeat compensation
 
     // check leader conf_state in storage.
     let store = &cluster.storages[0]
@@ -170,26 +120,25 @@ async fn test_single_step() {
     conf_state.voters.sort();
     assert_eq!(expected, conf_state);
 
-    // TODO: check all nodes conf_state in rock state machine.
+    // check leader node conf_state in rock state machine.
+    let mut conf_state = rockstore_env.rock_kv_stores[0]
+        .get_conf_state(group_id)
+        .unwrap();
+    conf_state.voters.sort();
+    assert_eq!(expected, conf_state);
     rockstore_env.destory();
 }
 
+/// Test initial configuration for joint consensus.
 #[async_entry::test(
     flavor = "multi_thread",
     init = "init_default_ut_tracing()",
     tracing_span = "debug"
 )]
-async fn test_joint_consensus() {
+async fn test_initial_joint_consensus() {
     let task_group = TaskGroup::new();
-    // defer! {
-    //     task_group.stop();
-    //     // FIXME: use sync wait
-    //     // task_group.joinner().awa`it;
-    // }
 
-    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
-
-    // cluster.start();
+    // start five nodes.
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
@@ -201,6 +150,7 @@ async fn test_joint_consensus() {
         .build()
         .await;
 
+    // create leader at node 1.
     let group_id = 1;
     let node_id = 1;
     let mut plan = MakeGroupPlan {
@@ -209,66 +159,124 @@ async fn test_joint_consensus() {
         replica_nums: 1,
     };
     let _ = cluster.make_group(&mut plan).await.unwrap();
-
-    // triger group to leader election.
     cluster.campaign_group(node_id, plan.group_id).await;
     let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 
-    // create joint consenus for membership change
+    let leader = &cluster.nodes[0];
+
+    // create joint consenus to add nodes 2..5.
     let mut changes = vec![];
-    for i in 1..5 {
+    for next_id in 2..=5 {
         let mut change = SingleMembershipChange::default();
         change.set_change_type(ConfChangeType::AddNode);
-        change.node_id = (i + 1) as u64;
-        change.replica_id = (i + 1) as u64;
+        change.node_id = next_id;
+        change.replica_id = next_id;
         changes.push(change);
     }
-    let rx = cluster.nodes[0]
-        .membership_change_non_block(MembershipChangeData {
-            group_id,
-            changes,
-            term: 0, // no check term
-            replicas: vec![],
-        })
-        .unwrap();
+    let mut change = MembershipChangeData::default();
+    change.set_transition(ConfChangeTransition::Explicit);
+    change.set_group_id(group_id);
+    change.set_changes(changes);
+    change.set_term(0);
+    change.set_replicas(vec![]);
 
-    // let check_fn = |apply: &ApplyMembership<()>| {
-    //     let changes = apply
-    //         .conf_change
-    //         .changes
-    //         .iter()
-    //         .map(|change| (change.node_id, change.get_change_type()))
-    //         .collect::<Vec<_>>();
-    //     assert_eq!(
-    //         changes,
-    //         vec![
-    //             (2, ConfChangeType::AddNode),
-    //             (3, ConfChangeType::AddNode),
-    //             (4, ConfChangeType::AddNode),
-    //             (5, ConfChangeType::AddNode),
-    //         ]
-    //     );
-    // };
+    let _ = leader.membership_change(change).await.unwrap();
 
-    // wait joint consensus apply and check
-    // check_cc(&mut cluster, 1, 1, Duration::from_millis(100), check_fn).await;
-    match timeout_at(Instant::now() + Duration::from_millis(2000), rx).await {
-        Err(_) => panic!("timeouted for wait all membership change complte"),
-        Ok(_) => {}
-    }
+    let expected = ConfState {
+        voters: vec![1, 2, 3, 4, 5],
+        learners: vec![],
+        voters_outgoing: vec![],
+        learners_next: vec![],
+        auto_leave: false,
+    };
 
-    // send heartbeats to new replica and creating it.
+    // wait all replicas apply membership change.
     for _ in 0..10 {
-        cluster.tickers[0].tick().await;
+        cluster.tickers[0].non_blocking_tick();
+    }
+    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+        let rx = rx.as_mut().unwrap();
+        loop {
+            let mut matched = false;
+
+            match rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Membership(mut membership) => {
+                                membership.conf_state.voters.sort();
+                                if membership.conf_state.voters == expected.voters {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if matched {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
     }
 
-    // wait new replicas apply membership change
-    // check_cc(&mut cluster, 2, 2, Duration::from_millis(100), check_fn).await;
-    // check_cc(&mut cluster, 3, 3, Duration::from_millis(100), check_fn).await;
-    // check_cc(&mut cluster, 4, 4, Duration::from_millis(100), check_fn).await;
-    // check_cc(&mut cluster, 5, 5, Duration::from_millis(100), check_fn).await;
+    // leave joint consensus use no-op changes and wait it applied for all replicas.
+    let mut change = MembershipChangeData::default();
+    change.set_group_id(group_id);
+    change.set_changes(vec![]);
+    change.set_term(0);
+    change.set_replicas(vec![]);
+    let _ = leader.membership_change(change).await.unwrap();
+    for _ in 0..10 {
+        cluster.tickers[0].non_blocking_tick();
+    }
+    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+        let rx = rx.as_mut().unwrap();
+        loop {
+            let mut matched = false;
+
+            match rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Membership(mut membership) => {
+                                membership.conf_state.voters.sort();
+                                if membership.conf_state == expected {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if matched {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // check all replicas conf_states.
+    for i in 0..5 {
+        let store = &cluster.storages[i]
+            .group_storage(group_id, (i + 1) as u64)
+            .await
+            .unwrap();
+        let rs = store.initial_state().unwrap();
+        let mut conf_state = rs.conf_state;
+        conf_state.voters.sort();
+        assert_eq!(expected, conf_state);
+    }
 }
 
 #[async_entry::test(
@@ -278,9 +286,8 @@ async fn test_joint_consensus() {
 )]
 async fn test_remove() {
     let task_group = TaskGroup::new();
-    // let mut cluster = FixtureCluster::make(5, task_group.clone()).await;
-    // cluster.start();
 
+    // start five nodes
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
@@ -292,6 +299,7 @@ async fn test_remove() {
         .build()
         .await;
 
+    // create five replicas on group 1 and election replica 1 to leader.
     let group_id = 1;
     let node_id = 1;
     let plan = MakeGroupPlan {
@@ -300,77 +308,122 @@ async fn test_remove() {
         replica_nums: 5,
     };
     let _ = cluster.make_group(&plan).await.unwrap();
-
-    // triger group to leader election.
     cluster.campaign_group(node_id, plan.group_id).await;
     let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 
-    // Let's submit some commands
-    //   let node = cluster.nodes[0].clone();
-    //   tokio::spawn(async move {
-    //       let rx = FixtureCluster::write_command(&node, plan.group_id, "data".as_bytes().to_vec());
-    //       let _ = rx.await.unwrap();
-    //   });
+    let leader = cluster.nodes[0].clone();
+    // remove 3..5 nodes
+    let mut changes = vec![];
+    for next_id in 3..=5 {
+        let mut change = SingleMembershipChange::default();
+        change.set_change_type(ConfChangeType::RemoveNode);
+        change.node_id = next_id;
+        change.replica_id = next_id;
+        changes.push(change);
+    }
+    let mut req = MembershipChangeData {
+        group_id,
+        changes,
+        term: 0, // no check term
+        replicas: vec![],
+        transition: 0,
+    };
+    req.set_transition(ConfChangeTransition::Explicit);
+    let _ = leader.membership_change(req.clone()).await.unwrap();
 
-    // let res = FixtureCluster::wait_for_command_apply(&mut cluster, node_id, Duration::from_millis(100)).await;
-    // println!("res = {:?}", res);
+    // wait all nodes apply joint consensus membership change.
+    for _ in 0..10 {
+        cluster.tickers[0].non_blocking_tick();
+    }
+    let expected = ConfState {
+        voters: vec![1, 2],
+        learners: vec![],
+        voters_outgoing: vec![],
+        learners_next: vec![],
+        auto_leave: false,
+    };
 
-    let (done_tx, done_rx) = oneshot::channel();
-    let node = cluster.nodes[0].clone();
-    // remove 4, 5 nodes
-    tokio::spawn(async move {
-        let mut changes = vec![];
-        for i in 3..5 {
-            let mut change = SingleMembershipChange::default();
-            change.set_change_type(ConfChangeType::RemoveNode);
-            change.node_id = (i + 1) as u64;
-            change.replica_id = (i + 1) as u64;
-            changes.push(change);
-        }
-        let req = MembershipChangeData {
-            group_id,
-            changes,
-            term: 0, // no check term
-            replicas: vec![],
-        };
+    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+        let rx = rx.as_mut().unwrap();
+        loop {
+            let mut matched = false;
 
-        node.membership_change(req.clone()).await.unwrap();
-        done_tx.send(()).unwrap();
-    });
-
-    // let check_fn = |apply: &ApplyMembership<()>| {
-    //     let changes = apply
-    //         .conf_change
-    //         .changes
-    //         .iter()
-    //         .map(|change| (change.node_id, change.get_change_type()))
-    //         .collect::<Vec<_>>();
-    //     assert_eq!(
-    //         changes,
-    //         vec![
-    //             (4, ConfChangeType::RemoveNode),
-    //             (5, ConfChangeType::RemoveNode),
-    //         ]
-    //     );
-    // };
-
-    // check_cc(&mut cluster, 1, 1, Duration::from_millis(100), check_fn).await;
-    // check_cc(&mut cluster, 2, 2, Duration::from_millis(100), check_fn).await;
-    // check_cc(&mut cluster, 3, 3, Duration::from_millis(100), check_fn).await;
-
-    // TODO: check all replicas inner states
-    for i in 0..3 {
-        for _ in 0..10 {
-            cluster.tickers[i].tick().await;
+            match rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Membership(mut membership) => {
+                                membership.conf_state.voters.sort();
+                                if membership.conf_state.voters == expected.voters {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if matched {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
         }
     }
 
+    let mut change = MembershipChangeData::default();
+    change.set_group_id(group_id);
+    change.set_changes(vec![]);
+    change.set_term(0);
+    change.set_replicas(vec![]);
+    let _ = leader.membership_change(change).await.unwrap();
+    for _ in 0..10 {
+        cluster.tickers[0].non_blocking_tick();
+    }
+    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+        let rx = rx.as_mut().unwrap();
+        loop {
+            let mut matched = false;
+
+            match rx.try_recv() {
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
+                Ok(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Membership(mut membership) => {
+                                membership.conf_state.voters.sort();
+                                if membership.conf_state == expected {
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            if matched {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    // check all replicas conf_states.
+    for i in 0..5 {
+        let store = &cluster.storages[i]
+            .group_storage(group_id, (i + 1) as u64)
+            .await
+            .unwrap();
+        let rs = store.initial_state().unwrap();
+        let mut conf_state = rs.conf_state;
+        conf_state.voters.sort();
+        assert_eq!(expected, conf_state);
+    }
     // TODO: submmit command to bad node
-
-    match timeout_at(Instant::now() + Duration::from_millis(2000), done_rx).await {
-        Err(_) => panic!("timeouted for wait all membership change complte"),
-        Ok(_) => {}
-    }
 }
