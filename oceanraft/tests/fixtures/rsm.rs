@@ -111,6 +111,7 @@ where
                         // TODO: if group is leader, we need save conf state to kv store.
                         batch.set_applied_index(membership.index);
                         batch.set_applied_term(membership.term);
+                        batch.put_conf_state(&membership.conf_state);
                     }
                 }
             }

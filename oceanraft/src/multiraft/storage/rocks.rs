@@ -14,8 +14,8 @@ mod storage {
     use rocksdb::ReadOptions;
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
-    use tracing::info;
     use tracing::error;
+    use tracing::info;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::MultiRaftStorage;
@@ -260,7 +260,10 @@ mod storage {
                         ),
                     },
                 );
-            info!("replica {}: get entry meta, the empty is {}", self.replica_id, empty);
+            info!(
+                "replica {}: get entry meta, the empty is {}",
+                self.replica_id, empty
+            );
 
             if empty {
                 let snap_meta = self.get_snapshot_metadata()?;
@@ -541,7 +544,10 @@ mod storage {
                 .map_err(|err| raft::Error::Store(raft::StorageError::Other(Box::new(err))))?;
 
             if low < log_meta.first_index {
-                error!("replica {}: entries compacted, low = {}, first_index = {}", self.replica_id, low, log_meta.first_index);
+                error!(
+                    "replica {}: entries compacted, low = {}, first_index = {}",
+                    self.replica_id, low, log_meta.first_index
+                );
                 return Err(raft::Error::Store(raft::StorageError::Compacted));
             }
 
@@ -1170,6 +1176,18 @@ mod state_machine {
         }
     }
 
+    impl From<SnapshotMembership> for ConfState {
+        fn from(membership: SnapshotMembership) -> Self {
+            ConfState {
+                voters: membership.voters,
+                learners: membership.learners,
+                voters_outgoing: membership.voters_outgoing,
+                learners_next: membership.learners_next,
+                auto_leave: membership.auto_leave,
+            }
+        }
+    }
+
     #[derive(serde::Serialize, serde::Deserialize, Default)]
     pub(crate) struct SnapshotMetaSerializer {
         pub(crate) applied_index: u64,
@@ -1413,14 +1431,14 @@ mod state_machine {
             self.batch.put_cf(&cf, &key, &data.value);
         }
 
-        //#[inline]
-        //pub fn put_apply(&mut self, apply: Apply<StoreData, R>) {
-        //    match apply {
-        //        Apply::NoOp(noop) => self.put_noop(noop),
-        //        Apply::Normal(normal) => self.put_normal(normal),
-        //        Apply::Membership(membership) => self.put_membership(membership),
-        //    }
-        //}
+        #[inline]
+        pub fn put_conf_state(&mut self, conf_state: &ConfState) {
+            let cf = self.db.cf_handle(DATA_CF_NAME).unwrap();
+            let key = format_membership_key(self.group_id);
+            let to_membership = SnapshotMembership::from(conf_state.clone());
+            let data = serde_json::to_vec(&to_membership).unwrap();
+            self.batch.put_cf(&cf, &key, &data);
+        }
     }
 
     /*****************************************************************************
@@ -1690,6 +1708,35 @@ mod state_machine {
                 .get_pinned_cf_opt(&cf, &key, &readopts)
                 .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?
                 .map_or(Ok(vec![]), |data| Ok(data.to_vec()))
+        }
+
+        /// Get current conf_state from rocksdb.s
+        pub fn get_conf_state(&self, group_id: u64) -> Result<ConfState> {
+            let cf = self.get_data_cf()?;
+            let key = format_membership_key(group_id);
+            let readopts = ReadOptions::default();
+            self.db
+                .get_pinned_cf_opt(&cf, &key, &readopts)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?
+                .map_or(Ok(ConfState::default()), |data| {
+                    let membership: SnapshotMembership =
+                        serde_json::from_slice(data.as_ref()).unwrap();
+                    Ok(membership.into())
+                })
+        }
+
+        /// Save conf_state to rocksdb.s
+        pub fn save_conf_state(&self, group_id: u64, conf_state: ConfState) -> Result<()> {
+            let membership = SnapshotMembership::from(conf_state);
+            let cf = self.get_data_cf()?;
+            let key = format_membership_key(group_id);
+            let value = serde_json::to_vec(&membership)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))?;
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(&cf, key, value, &writeopts)
+                .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
         /// Save current last membership to data column of rocksdb.
