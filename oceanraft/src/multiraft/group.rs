@@ -813,17 +813,15 @@ where
     }
 
     /// Remove the node in the group where the replica is located in the tracing nodes.
-    /// return `false` if the nodes traced cannot find the given `node_id`, `true` otherwise.
-    pub(crate) fn remove_track_node(&mut self, node_id: u64) -> bool {
+    pub(crate) fn remove_track_node(&mut self, node_id: u64) {
         let len = self.node_ids.len();
         self.node_ids
             .iter()
             .position(|id| node_id == *id)
-            .map_or(false, |idx| {
+            .map(|idx| {
                 self.node_ids.swap(idx, len - 1);
                 self.node_ids.truncate(len - 1);
-                true
-            })
+            });
     }
 
     pub(crate) fn advance_apply(&mut self, result: &ApplyResultMessage) {

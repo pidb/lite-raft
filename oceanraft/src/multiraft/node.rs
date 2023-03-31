@@ -182,7 +182,7 @@ impl NodeManager {
 
     pub(crate) fn add_group(&mut self, node_id: u64, group_id: u64) {
         let node = match self.nodes.get_mut(&node_id) {
-            None => self.nodes.entry(group_id).or_insert(Node {
+            None => self.nodes.entry(node_id).or_insert(Node {
                 node_id,
                 group_map: HashMap::new(),
             }),
@@ -1256,25 +1256,47 @@ where
         {
             match conf_change.change_type() {
                 ConfChangeType::AddNode => {
-                    NodeWorker::<TR, RS, MRS, WD, RES>::membership_add(
+                    Self::add_replica(
                         self.node_id,
                         group,
-                        change_request,
                         &mut self.node_manager,
                         &mut self.replica_cache,
+                        change_request.node_id,
+                        change_request.replica_id,
                     )
-                    .await;
+                    .await
                 }
+                // {
+                //     NodeWorker::<TR, RS, MRS, WD, RES>::membership_add(
+                //         self.node_id,
+                //         group,
+                //         change_request,
+                //         &mut self.node_manager,
+                //         &mut self.replica_cache,
+                //     )
+                //     .await;
+                // }
                 ConfChangeType::RemoveNode => {
-                    NodeWorker::<TR, RS, MRS, WD, RES>::membership_remove(
+                    Self::add_replica(
                         self.node_id,
                         group,
-                        change_request,
                         &mut self.node_manager,
                         &mut self.replica_cache,
+                        change_request.node_id,
+                        change_request.replica_id,
                     )
-                    .await;
+                    .await
                 }
+                // {
+                //     NodeWorker::<TR, RS, MRS, WD, RES>::membership_remove(
+                //         self.node_id,
+                //         group,
+                //         change_request,
+                //         &mut self.node_manager,
+                //         &mut self.replica_cache,
+                //     )
+                //     .await;
+                // }
                 ConfChangeType::AddLearnerNode => unimplemented!(),
             }
         }
@@ -1361,6 +1383,76 @@ where
         debug!("node {}: add membership {:?}", node_id, change);
     }
 
+    async fn add_replica(
+        node_id: u64,
+        group: &mut RaftGroup<RS, RES>,
+        node_manager: &mut NodeManager,
+        replica_cache: &mut ReplicaCache<RS, MRS>,
+        change_node_id: u64,
+        change_replica_id: u64,
+    ) {
+        let group_id = group.group_id;
+        node_manager.add_group(change_node_id, group_id);
+
+        // TODO: this call need transfer to user call, and if user call return errored,
+        // the membership change should failed and user need to retry.
+        // we need a channel to provider user notify actor it need call these code.
+        // and we recv the notify can executing these code, if executed failed, we
+        // response to user and membership change is failed.
+        if let Err(err) = replica_cache
+            .cache_replica_desc(
+                group_id,
+                ReplicaDesc {
+                    group_id,
+                    node_id: change_node_id,
+                    replica_id: change_replica_id,
+                },
+                true,
+            )
+            .await
+        {
+            warn!(
+                "node {}: the membership change request to add replica desc error: {} ",
+                node_id, err
+            );
+        }
+
+        group.add_track_node(change_node_id);
+    }
+
+    async fn remove_replica(
+        node_id: u64,
+        group: &mut RaftGroup<RS, RES>,
+        node_manager: &mut NodeManager,
+        replica_cache: &mut ReplicaCache<RS, MRS>,
+        changed_node_id: u64,
+        changed_replica_id: u64,
+    ) {
+        let group_id = group.group_id;
+        let _ = group.remove_pending_proposals();
+        group.remove_track_node(changed_node_id);
+        // TODO: think remove if node has empty group_map.
+        let _ = node_manager.remove_group(changed_node_id, group_id);
+
+        if let Err(err) = replica_cache
+            .remove_replica_desc(
+                group_id,
+                ReplicaDesc {
+                    group_id,
+                    node_id: changed_node_id,
+                    replica_id: changed_replica_id,
+                },
+                true,
+            )
+            .await
+        {
+            warn!(
+                "node {}: the membership change request to add replica desc error: {} ",
+                node_id, err
+            );
+        }
+    }
+
     async fn membership_remove(
         node_id: u64,
         group: &mut RaftGroup<RS, RES>,
@@ -1370,7 +1462,7 @@ where
     ) {
         let group_id = group.group_id;
         let _ = group.remove_pending_proposals();
-        let _ = group.remove_track_node(change_request.node_id);
+        group.remove_track_node(change_request.node_id);
         // TODO: think remove if node has empty group_map.
         let _ = node_manager.remove_group(change_request.node_id, group_id);
 
@@ -1570,7 +1662,6 @@ mod tests {
     use crate::multiraft::Error;
     use crate::multiraft::MultiRaftMessageSenderImpl;
     use crate::prelude::ReplicaDesc;
-    use crate::prelude::SingleMembershipChange;
 
     use super::NodeManager;
     use crate::multiraft::state::GroupState;
@@ -1616,22 +1707,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_membership_add_remove() {
-        // let cfg = Config {
-        //     node_id: 1,
-        //     batch_append: false,
-        //     election_tick: 2,
-        //     heartbeat_tick: 1,
-        //     max_size_per_msg: 0,
-        //     max_inflight_msgs: 256,
-        //     tick_interval: 3_600_000, // hour ms
-        //     batch_apply: false,
-        //     batch_size: 0,
-        //     write_proposal_queue_size: 1000,
-        // };
-
-        // let transport = LocalTransport::new();
-        // let (event_tx, _) = channel(1);
-        // let mut worker = TestMultiRaftActorRuntime::new(&cfg, &transport, &storage, &event_tx);
         let raft_store = RaftMemStorage::new();
         let mut node_manager = NodeManager::new();
         let storage = MultiRaftMemoryStorage::new(1);
@@ -1640,32 +1715,28 @@ mod tests {
         let group_id = 1;
 
         // add five changes
-        let mut changes = vec![];
-        let first_node_id = 2;
-        for i in 0..4 {
-            let node_id = first_node_id + i;
-            let replica_id = first_node_id + i;
-            let mut change = SingleMembershipChange::default();
-            change.node_id = node_id;
-            change.replica_id = replica_id;
-            change.set_change_type(raft::prelude::ConfChangeType::AddNode);
-            TestMultiRaftActorRuntime::membership_add(
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
+            TestMultiRaftActorRuntime::add_replica(
                 1,
                 &mut raft_group,
-                &change,
                 &mut node_manager,
                 &mut replica_cache,
+                node_id,
+                replica_id,
             )
             .await;
-            changes.push(change);
         }
 
-        for change in changes.iter() {
-            let node = node_manager.get_node(&change.node_id).unwrap();
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
+            let node = node_manager.get_node(&node_id).unwrap();
             assert_eq!(node.group_map.contains_key(&group_id), true);
 
             let rep = replica_cache
-                .replica_desc(group_id, change.replica_id)
+                .replica_desc(group_id, replica_id)
                 .await
                 .unwrap()
                 .unwrap();
@@ -1674,42 +1745,125 @@ mod tests {
                 rep,
                 ReplicaDesc {
                     group_id,
-                    node_id: change.node_id,
-                    replica_id: change.replica_id,
+                    node_id,
+                    replica_id,
                 }
             );
         }
-
         assert_eq!(raft_group.node_ids, vec![1, 2, 3, 4, 5]);
 
-        let mut changes = vec![];
-        let first_node_id = 2;
-        for i in 0..4 {
-            let node_id = first_node_id + i;
-            let replica_id = first_node_id + i;
-            let mut change = SingleMembershipChange::default();
-            change.node_id = node_id;
-            change.replica_id = replica_id;
-            change.set_change_type(raft::prelude::ConfChangeType::RemoveNode);
-            TestMultiRaftActorRuntime::membership_remove(
+        // remove nodes
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
+            TestMultiRaftActorRuntime::remove_replica(
                 1,
                 &mut raft_group,
-                &change,
                 &mut node_manager,
                 &mut replica_cache,
+                node_id,
+                replica_id,
             )
             .await;
-            changes.push(change);
         }
 
-        for change in changes.iter() {
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
             // TODO: if node group is empty, should remove node item from map
-            let node = node_manager.get_node(&change.node_id).unwrap();
+            let node = node_manager.get_node(&node_id).unwrap();
             assert_eq!(node.group_map.contains_key(&group_id), false);
 
             assert_eq!(
                 replica_cache
-                    .replica_desc(group_id, change.replica_id)
+                    .replica_desc(group_id, replica_id)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                true
+            );
+        }
+
+        assert_eq!(raft_group.node_ids, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn test_replica_add_remove_idempotent() {
+        let raft_store = RaftMemStorage::new();
+        let mut node_manager = NodeManager::new();
+        let storage = MultiRaftMemoryStorage::new(1);
+        let mut replica_cache = ReplicaCache::new(storage);
+        let mut raft_group = new_raft_group(1, 1, 1, &raft_store).unwrap();
+        let group_id = 1;
+
+        // add five replicas for many times
+        for _ in 0..5 {
+            for i in 2..=5 {
+                let node_id = i;
+                let replica_id = i;
+                TestMultiRaftActorRuntime::add_replica(
+                    1,
+                    &mut raft_group,
+                    &mut node_manager,
+                    &mut replica_cache,
+                    node_id,
+                    replica_id,
+                )
+                .await;
+            }
+        }
+
+        // check inner status
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
+            let node = node_manager.get_node(&node_id).unwrap();
+            assert_eq!(node.group_map.contains_key(&group_id), true);
+
+            let rep = replica_cache
+                .replica_desc(group_id, replica_id)
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                rep,
+                ReplicaDesc {
+                    group_id,
+                    node_id,
+                    replica_id,
+                }
+            );
+        }
+        assert_eq!(raft_group.node_ids, vec![1, 2, 3, 4, 5]);
+
+        // remove nodes for many times
+        for _ in 0..5 {
+            for i in 2..=5 {
+                let node_id = i;
+                let replica_id = i;
+                TestMultiRaftActorRuntime::remove_replica(
+                    1,
+                    &mut raft_group,
+                    &mut node_manager,
+                    &mut replica_cache,
+                    node_id,
+                    replica_id,
+                )
+                .await;
+            }
+        }
+
+        for i in 2..=5 {
+            let node_id = i;
+            let replica_id = i;
+            // TODO: if node group is empty, should remove node item from map
+            let node = node_manager.get_node(&node_id).unwrap();
+            assert_eq!(node.group_map.contains_key(&group_id), false);
+
+            assert_eq!(
+                replica_cache
+                    .replica_desc(group_id, replica_id)
                     .await
                     .unwrap()
                     .is_none(),
