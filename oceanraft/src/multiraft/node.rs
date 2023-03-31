@@ -1222,6 +1222,7 @@ where
             |group| Ok(group),
         )
     }
+
     async fn commit_membership_change(
         &mut self,
         view: CommitMembership,
@@ -1266,16 +1267,7 @@ where
                     )
                     .await
                 }
-                // {
-                //     NodeWorker::<TR, RS, MRS, WD, RES>::membership_add(
-                //         self.node_id,
-                //         group,
-                //         change_request,
-                //         &mut self.node_manager,
-                //         &mut self.replica_cache,
-                //     )
-                //     .await;
-                // }
+
                 ConfChangeType::RemoveNode => {
                     Self::add_replica(
                         self.node_id,
@@ -1287,16 +1279,6 @@ where
                     )
                     .await
                 }
-                // {
-                //     NodeWorker::<TR, RS, MRS, WD, RES>::membership_remove(
-                //         self.node_id,
-                //         group,
-                //         change_request,
-                //         &mut self.node_manager,
-                //         &mut self.replica_cache,
-                //     )
-                //     .await;
-                // }
                 ConfChangeType::AddLearnerNode => unimplemented!(),
             }
         }
@@ -1341,46 +1323,6 @@ where
             self.node_id, conf_state, group_id, group.replica_id
         );
         return Ok(conf_state);
-    }
-
-    async fn membership_add(
-        node_id: u64,
-        group: &mut RaftGroup<RS, RES>,
-        change: &SingleMembershipChange,
-        node_manager: &mut NodeManager,
-        replica_cache: &mut ReplicaCache<RS, MRS>,
-    ) {
-        assert_eq!(change.change_type(), ConfChangeType::AddNode);
-        let group_id = group.group_id;
-        node_manager.add_group(change.node_id, group_id);
-
-        // TODO: this call need transfer to user call, and if user call return errored,
-        // the membership change should failed and user need to retry.
-        // we need a channel to provider user notify actor it need call these code.
-        // and we recv the notify can executing these code, if executed failed, we
-        // response to user and membership change is failed.
-
-        if let Err(err) = replica_cache
-            .cache_replica_desc(
-                group_id,
-                ReplicaDesc {
-                    group_id,
-                    node_id: change.node_id,
-                    replica_id: change.replica_id,
-                },
-                true,
-            )
-            .await
-        {
-            warn!(
-                "node {}: the membership change request to add replica desc error: {} ",
-                change.node_id, err
-            );
-        }
-
-        group.add_track_node(change.node_id);
-
-        debug!("node {}: add membership {:?}", node_id, change);
     }
 
     async fn add_replica(
@@ -1451,40 +1393,6 @@ where
                 node_id, err
             );
         }
-    }
-
-    async fn membership_remove(
-        node_id: u64,
-        group: &mut RaftGroup<RS, RES>,
-        change_request: &SingleMembershipChange,
-        node_manager: &mut NodeManager,
-        replica_cache: &mut ReplicaCache<RS, MRS>,
-    ) {
-        let group_id = group.group_id;
-        let _ = group.remove_pending_proposals();
-        group.remove_track_node(change_request.node_id);
-        // TODO: think remove if node has empty group_map.
-        let _ = node_manager.remove_group(change_request.node_id, group_id);
-
-        if let Err(err) = replica_cache
-            .remove_replica_desc(
-                group_id,
-                ReplicaDesc {
-                    group_id,
-                    node_id: change_request.node_id,
-                    replica_id: change_request.replica_id,
-                },
-                true,
-            )
-            .await
-        {
-            warn!(
-                "node {}: the membership change request to add replica desc error: {} ",
-                change_request.node_id, err
-            );
-        }
-
-        debug!("node {}: remove membership {:?} ", node_id, change_request,);
     }
 
     async fn handle_readys(&mut self) {
