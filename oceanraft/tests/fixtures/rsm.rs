@@ -1,4 +1,5 @@
 use futures::Future;
+use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
 use oceanraft::multiraft::GroupState;
@@ -6,6 +7,7 @@ use oceanraft::multiraft::StateMachine;
 use oceanraft::multiraft::WriteData;
 use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
+use tracing::info;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
@@ -31,24 +33,22 @@ where
         state: &GroupState,
         mut applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'life0> {
-            let tx = self.tx.clone();
-            async move {
-                for apply in applys.iter_mut() {
-                    match apply {
-                        Apply::NoOp(noop) => {
-                        }
-                        Apply::Normal(normal) => {
-                        }
-                        Apply::Membership(membership) => {
-                            // TODO: if group is leader, we need save conf state to kv store.
-                            membership.tx.take().map(|tx| tx.send(Ok(R::default())));
-                        }
+        let tx = self.tx.clone();
+        async move {
+            for apply in applys.iter_mut() {
+                match apply {
+                    Apply::NoOp(noop) => {}
+                    Apply::Normal(normal) => {}
+                    Apply::Membership(membership) => {
+                        // TODO: if group is leader, we need save conf state to kv store.
+                        membership.tx.take().map(|tx| tx.send(Ok(R::default())));
                     }
                 }
-    
-                tx.send(applys).await;
             }
+
+            tx.send(applys).await;
         }
+    }
 }
 
 impl<W, R> MemStoreStateMachine<W, R>
@@ -107,10 +107,11 @@ where
                         batch.set_applied_term(normal.term);
                     }
                     Apply::Membership(membership) => {
-                        membership.done().await.unwrap();
+                        // membership.done().await.unwrap();
                         // TODO: if group is leader, we need save conf state to kv store.
                         batch.set_applied_index(membership.index);
                         batch.set_applied_term(membership.term);
+                        batch.put_conf_state(&membership.conf_state);
                     }
                 }
             }
@@ -118,20 +119,17 @@ where
 
             for apply in applys.iter_mut() {
                 match apply {
-                    Apply::NoOp(noop) => {
-                    }
+                    Apply::NoOp(_) => {}
                     Apply::Normal(normal) => {
-                         normal.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        normal.tx.take().map(|tx| tx.send(Ok(R::default())));
                     }
                     Apply::Membership(membership) => {
-                         membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        membership.tx.take().map(|tx| tx.send(Ok(R::default())));
                     }
                 }
             }
 
-
-
-            // tx.send(applys).await;
+            if let Err(_) = tx.send(applys).await {}
         }
     }
 }

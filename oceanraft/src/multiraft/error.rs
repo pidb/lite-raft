@@ -89,6 +89,31 @@ pub enum NodeActorError {
     Stopped,
 }
 
+/// Wrap serialization errors that occurred for specific types
+#[derive(thiserror::Error, Debug)]
+pub enum SerializationError {
+    /// An error occurred when encode with prost.
+    #[error("{0}")]
+    Prost(#[from] prost::EncodeError),
+
+    /// An error occurred when serializing with flexbuffer.
+    #[error("{0}")]
+    Flexbuffer(#[from] flexbuffers::SerializationError),
+}
+
+
+/// Wrap deserialization errors that occurred for specific types
+#[derive(thiserror::Error, Debug)]
+pub enum DeserializationError {
+    /// An error occurred when decode with prost.
+    #[error("{0}")]
+    Prost(#[from] prost::DecodeError),
+
+    /// An error occurred when deserializing with flexbuffer.
+    #[error("{0}")]
+    Flexbuffer(#[from] flexbuffers::DeserializationError),
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// The configuration is invalid.
@@ -114,13 +139,11 @@ pub enum Error {
     #[error("{0}")]
     Storage(#[from] super::storage::Error),
 
-    /// An error occurred when serializing with flexbuffer.
     #[error("{0}")]
-    FlexBuffersSerialization(#[from] flexbuffers::SerializationError),
+    Serialization(#[from] SerializationError),
 
-    /// An error occurred when deserializing with flexbuffer.
     #[error("{0}")]
-    FlexBuffersDeserialization(#[from] flexbuffers::DeserializationError),
+    Deserialization(#[from] DeserializationError),
 
     /// A raft error occurred.
     #[error("{0}")]

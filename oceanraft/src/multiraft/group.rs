@@ -623,9 +623,7 @@ where
         }
 
         let term = self.term();
-        let data = match flexbuffer_serialize(&write_request.data)
-            .map_err(|err| Error::FlexBuffersSerialization(err))
-        {
+        let data = match flexbuffer_serialize(&write_request.data) {
             Err(err) => {
                 return Some(ResponseCallbackQueue::new_error_callback(
                     write_request.tx,
@@ -705,10 +703,6 @@ where
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
             ));
-        }
-
-        if data.changes.is_empty() {
-            return Err(Error::BadParameter("group id must not be empty".to_owned()));
         }
 
         if !self.is_leader() {
@@ -819,17 +813,15 @@ where
     }
 
     /// Remove the node in the group where the replica is located in the tracing nodes.
-    /// return `false` if the nodes traced cannot find the given `node_id`, `true` otherwise.
-    pub(crate) fn remove_track_node(&mut self, node_id: u64) -> bool {
+    pub(crate) fn remove_track_node(&mut self, node_id: u64) {
         let len = self.node_ids.len();
         self.node_ids
             .iter()
             .position(|id| node_id == *id)
-            .map_or(false, |idx| {
+            .map(|idx| {
                 self.node_ids.swap(idx, len - 1);
                 self.node_ids.truncate(len - 1);
-                true
-            })
+            });
     }
 
     pub(crate) fn advance_apply(&mut self, result: &ApplyResultMessage) {
@@ -858,8 +850,8 @@ fn to_cc(data: &MembershipChangeData) -> (Vec<u8>, ConfChange) {
 }
 
 fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
-    assert!(data.changes.len() > 1);
     let mut cc = ConfChangeV2::default();
+    cc.set_transition(data.transition());
     let mut sc = vec![];
     for change in data.changes.iter() {
         sc.push(ConfChangeSingle {
@@ -868,7 +860,6 @@ fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
         });
     }
 
-    // TODO: consider setting transaction type
     cc.set_changes(sc);
     (data.encode_to_vec(), cc)
 }

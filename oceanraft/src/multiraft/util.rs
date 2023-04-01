@@ -2,10 +2,8 @@ use std::sync::Arc;
 #[allow(unused)]
 use std::time::Duration;
 
-use flexbuffers::DeserializationError;
 use flexbuffers::FlexbufferSerializer;
 use flexbuffers::Reader;
-use flexbuffers::SerializationError;
 use futures::future::BoxFuture;
 use prost::Message;
 use serde::de::DeserializeOwned;
@@ -22,6 +20,10 @@ use tokio::time::Interval;
 
 use crate::prelude::Entry;
 
+use super::error::DeserializationError;
+use super::error::SerializationError;
+use super::Error;
+
 #[inline]
 pub fn compute_entry_size(ent: &Entry) -> usize {
     Message::encoded_len(ent)
@@ -31,24 +33,27 @@ pub fn compute_entry_size(ent: &Entry) -> usize {
 /// If Ok, `FlexbufferSerializer` is returned and the user can call `take_buffer` to get
 /// the data.
 #[inline]
-pub fn flexbuffer_serialize<S>(data: &S) -> Result<FlexbufferSerializer, SerializationError>
+pub fn flexbuffer_serialize<S>(data: &S) -> Result<FlexbufferSerializer, Error>
 where
     S: Serialize,
 {
     let mut ser = FlexbufferSerializer::new();
-    data.serialize(&mut ser)?;
+    data.serialize(&mut ser)
+        .map_err(|err| Error::Serialization(SerializationError::Flexbuffer(err)))?;
     Ok(ser)
 }
 
 /// Zero copy deserialization using flexbuffer. if Ok, `D` of implementation `DeserializeOwned`
 /// is returned.
 #[inline]
-pub fn flexbuffer_deserialize<D>(data: &[u8]) -> Result<D, DeserializationError>
+pub fn flexbuffer_deserialize<D>(data: &[u8]) -> Result<D, Error>
 where
     D: DeserializeOwned,
 {
-    let reader = Reader::get_root(data)?;
+    let reader = Reader::get_root(data).unwrap(); // TODO: add erro to Other
+
     D::deserialize(reader)
+        .map_err(|err| Error::Deserialization(DeserializationError::Flexbuffer(err)))
 }
 
 /// Ticker periodically sends tick and provides recv future.
