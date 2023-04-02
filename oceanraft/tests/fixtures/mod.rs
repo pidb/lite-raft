@@ -9,6 +9,7 @@ pub use cluster::{
     new_rocks_storeages,
     quickstart_rockstore_multi_groups,
     quickstart_rockstore_group,
+    quickstart_memstorage_group,
     rand_temp_dir,
     rand_string,
     ClusterBuilder,

@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use oceanraft::multiraft::storage::MemStorage;
 use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
-use oceanraft::multiraft::storage::RaftMemStorage;
 use oceanraft::multiraft::storage::RockStoreCore;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::StateMachine;
@@ -476,7 +476,7 @@ impl std::fmt::Display for MakeGroupPlanStatus {
 }
 
 pub type MemStoreCluster = FixtureCluster<
-    RaftMemStorage,
+    MemStorage,
     MultiRaftMemoryStorage,
     StoreData,
     (),
@@ -890,6 +890,55 @@ pub async fn quickstart_rockstore_group(
         .storages(rockstore_env.storages.clone())
         .task_group(task_group.clone())
         .apply_rxs(std::mem::take(&mut rockstore_env.rxs))
+        .build()
+        .await;
+
+    // cluster.start();
+
+    // create multi groups
+    let group_id = 1;
+    let plan = MakeGroupPlan {
+        group_id,
+        first_node_id: 1,
+        replica_nums: 3,
+    };
+    let _ = cluster.make_group(&plan).await.unwrap();
+    cluster.campaign_group(1, plan.group_id).await;
+
+    // check each replica should recv leader election event
+    for i in 0..nodes {
+        let leader_event = FixtureCluster::wait_leader_elect_event(&mut cluster, i as u64 + 1)
+            .await
+            .unwrap();
+        assert_eq!(leader_event.group_id, 1);
+        assert_eq!(leader_event.replica_id, 1);
+    }
+
+    (task_group, cluster)
+}
+
+pub async fn quickstart_memstorage_group(
+    env: &mut MemStoreEnv<StoreData, ()>,
+    nodes: usize,
+) -> (
+    TaskGroup,
+    FixtureCluster<
+        MemStorage,
+        MultiRaftMemoryStorage,
+        StoreData,
+        (),
+        MemStoreStateMachine<StoreData, ()>,
+    >,
+) {
+    // FIXME: each node has task group, if not that joinner can block.
+    let task_group = TaskGroup::new();
+    //  let rockstore_env = RockStorageEnv::new(nodes);
+    let mut cluster = ClusterBuilder::new(nodes)
+        .election_ticks(2)
+        .state_machines(env.state_machines.clone())
+        .storages(env.storages.clone())
+        .task_group(task_group.clone())
+        .apply_rxs(std::mem::take(&mut env.rxs))
         .build()
         .await;
 

@@ -30,7 +30,6 @@ use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
-use crate::prelude::SingleMembershipChange;
 use crate::util::Stopper;
 use crate::util::TaskGroup;
 
@@ -1397,59 +1396,61 @@ where
 
     async fn handle_readys(&mut self) {
         let drainned = self.active_groups.drain();
-        let mut multi_groups_write = HashMap::new();
+        let mut writes = HashMap::new();
         let mut applys = HashMap::new();
         for group_id in drainned {
             if group_id == NO_GORUP {
                 continue;
             }
-
-            match self.groups.get_mut(&group_id) {
+            let group = match self.groups.get_mut(&group_id) {
                 None => {
                     // TODO: remove pending proposals related to this group
                     error!(
                         "node {}: handle group-{} ready, but dropped",
                         self.node_id, group_id
-                    )
+                    );
+                    continue;
                 }
-                Some(group) => {
-                    // TODO: move to group inside as method.
-                    if !group.raft_group.has_ready() {
-                        continue;
-                    }
-
-                    // TODO: if an error occurs, we should decide to retry depending on the kind of error.
-                    group
-                        .handle_ready(
-                            self.node_id,
-                            &self.transport,
-                            &self.storage,
-                            &mut self.replica_cache,
-                            &mut self.node_manager,
-                            &mut multi_groups_write,
-                            &mut applys,
-                            &mut self.event_chan,
-                        )
-                        .await;
-                }
+                Some(group) => group,
+            };
+            if !group.raft_group.has_ready() {
+                continue;
             }
+
+            let res = group
+                .handle_ready(
+                    self.node_id,
+                    &self.transport,
+                    &self.storage,
+                    &mut self.replica_cache,
+                    &mut self.node_manager,
+                    &mut self.event_chan,
+                )
+                .await;
+
+            // TODO: if an error occurs, we should decide to retry depending on the kind of error.
+            let err = match res {
+                Ok((gwr, apply)) => {
+                    writes.insert(group_id, gwr);
+                    apply.map(|apply| applys.insert(group_id, apply));
+                    continue;
+                }
+                Err(err) => err,
+            };
         }
 
         if !applys.is_empty() {
             self.send_applys(applys);
         }
 
-        // TODO: if an error occurs, we should decide to retry depending on the kind of error.
-        let gwrs = self.do_multi_groups_write(multi_groups_write).await;
-        self.do_multi_groups_write_finish(gwrs).await;
+        self.handle_writes(writes).await;
     }
 
-    async fn do_multi_groups_write(
-        &mut self,
-        mut ready_write_groups: HashMap<u64, RaftGroupWriteRequest>,
-    ) -> HashMap<u64, RaftGroupWriteRequest> {
+    async fn handle_writes(&mut self, mut writes: HashMap<u64, RaftGroupWriteRequest>) {
+        let mut applys = HashMap::new();
+
         // TODO(yuanchang.xu) Disk write flow control
-        for (group_id, gwr) in ready_write_groups.iter_mut() {
+        for (group_id, gwr) in writes.iter_mut() {
             // TODO: cache storage in related raft group.
             let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
@@ -1462,72 +1463,67 @@ where
                 }
             };
 
-            if let Some(group) = self.groups.get_mut(&group_id) {
-                // TODO: return LightRaftGroupWrite
-                // TODO: if an error occurs, we should decide to retry depending on the kind of error.
-                group
-                    .handle_ready_write(
-                        self.node_id,
-                        gwr,
-                        &gs,
-                        &self.transport,
-                        &mut self.replica_cache,
-                        &mut self.node_manager,
-                    )
-                    .await;
-            } else {
-                // TODO: remove pending proposals related to this group
-                // If the group does not exist at this point
-                // 1. we may have finished sending messages to the group, role changed notifications,
-                //    committable entires commits
-                // 2. we may not have completed the new proposal append, there may be multiple scenarios
-                //     - The current group is the leader, sent AE, but was deleted before it received a
-                //       response from the follower, so it did not complete the append drop
-                //     - The current group is the follower, which does not affect the completion of the
-                //       AE
-                error!(
-                    "node {}: handle group-{} write ready, but dropped",
-                    self.node_id, group_id
-                );
-            }
-        }
-
-        ready_write_groups
-    }
-
-    async fn do_multi_groups_write_finish(
-        &mut self,
-        ready_groups: HashMap<u64, RaftGroupWriteRequest>,
-    ) {
-        let mut multi_groups_apply = HashMap::new();
-        for (group_id, mut gwr) in ready_groups.into_iter() {
-            let mut_group = match self.groups.get_mut(&group_id) {
+            let group = match self.groups.get_mut(&group_id) {
+                Some(group) => group,
                 None => {
                     // TODO: remove pending proposals related to this group
+                    // If the group does not exist at this point
+                    // 1. we may have finished sending messages to the group, role changed notifications,
+                    //    committable entires commits
+                    // 2. we may not have completed the new proposal append, there may be multiple scenarios
+                    //     - The current group is the leader, sent AE, but was deleted before it received a
+                    //       response from the follower, so it did not complete the append drop
+                    //     - The current group is the follower, which does not affect the completion of the
+                    //       AE
                     error!(
-                        "node {}: handle group-{} write finish, but dropped",
+                        "node {}: handle group-{} write ready, but dropped",
                         self.node_id, group_id
                     );
                     continue;
                 }
-                Some(g) => g,
             };
 
-            mut_group
-                .handle_light_ready(
+            let res = group
+                .handle_write(
                     self.node_id,
+                    gwr,
+                    &gs,
                     &self.transport,
-                    &self.storage,
                     &mut self.replica_cache,
                     &mut self.node_manager,
-                    &mut gwr,
-                    &mut multi_groups_apply,
                 )
                 .await;
+
+            let write_err = match res {
+                Ok(apply) => {
+                    apply.map(|apply| applys.insert(*group_id, apply));
+                    continue;
+                }
+
+                Err(err) => err,
+            };
+
+            match write_err {
+                // if it is, temporary storage unavailability causes write log entries and
+                // status failure, this is a recoverable failure, we will consider retrying 
+                // later.
+                super::storage::Error::LogTemporarilyUnavailable => {
+                    self.active_groups.insert(*group_id);
+                },
+
+                super::storage::Error::SnapshotTemporarilyUnavailable => {
+                    self.active_groups.insert(*group_id);
+                },
+
+                super::storage::Error::Unavailable => {
+                    // TODO: consider response and panic here.
+                },
+                _ => todo!(),
+            }
         }
 
-        if !multi_groups_apply.is_empty() {
-            self.send_applys(multi_groups_apply);
+        if !applys.is_empty() {
+            self.send_applys(applys);
         }
     }
 
@@ -1559,8 +1555,8 @@ mod tests {
     use super::NodeWorker;
     use crate::multiraft::proposal::ProposalQueue;
     use crate::multiraft::proposal::ReadIndexQueue;
+    use crate::multiraft::storage::MemStorage;
     use crate::multiraft::storage::MultiRaftMemoryStorage;
-    use crate::multiraft::storage::RaftMemStorage;
 
     use crate::multiraft::group::RaftGroup;
     use crate::multiraft::group::Status;
@@ -1575,7 +1571,7 @@ mod tests {
     use crate::multiraft::state::GroupState;
     type TestMultiRaftActorRuntime = NodeWorker<
         LocalTransport<MultiRaftMessageSenderImpl>,
-        RaftMemStorage,
+        MemStorage,
         MultiRaftMemoryStorage,
         (),
         (),
@@ -1584,8 +1580,8 @@ mod tests {
         node_id: u64,
         group_id: u64,
         replica_id: u64,
-        store: &RaftMemStorage,
-    ) -> Result<RaftGroup<RaftMemStorage, ()>, Error> {
+        store: &MemStorage,
+    ) -> Result<RaftGroup<MemStorage, ()>, Error> {
         let raft_cfg = raft::Config {
             id: replica_id,
             ..Default::default()
@@ -1615,7 +1611,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_membership_add_remove() {
-        let raft_store = RaftMemStorage::new();
+        let raft_store = MemStorage::new();
         let mut node_manager = NodeManager::new();
         let storage = MultiRaftMemoryStorage::new(1);
         let mut replica_cache = ReplicaCache::new(storage);
@@ -1697,7 +1693,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_replica_add_remove_idempotent() {
-        let raft_store = RaftMemStorage::new();
+        let raft_store = MemStorage::new();
         let mut node_manager = NodeManager::new();
         let storage = MultiRaftMemoryStorage::new(1);
         let mut replica_cache = ReplicaCache::new(storage);
