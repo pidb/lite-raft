@@ -1,9 +1,7 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use prost::Message;
 use raft::prelude::Entry;
-use raft::LightReady;
 use raft::RawNode;
 use raft::ReadState;
 use raft::Ready;
@@ -61,7 +59,6 @@ pub enum Status {
 pub struct RaftGroupWriteRequest {
     pub replica_id: u64,
     pub ready: Option<Ready>,
-    pub light_ready: Option<LightReady>,
 }
 
 /// Represents a replica of a raft group.
@@ -152,69 +149,40 @@ where
         storage: &MRS,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
-        multi_groups_write: &mut HashMap<u64, RaftGroupWriteRequest>,
-        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
         event_bcast: &mut EventChannel,
-    ) {
-        debug!(
-            "node {}: group = {} is now ready for processing",
-            node_id, self.group_id
-        );
+    ) -> Result<(RaftGroupWriteRequest, Option<ApplyData<RES>>), Error> {
         let group_id = self.group_id;
         let mut rd = self.raft_group.ready();
 
         // we need to know which replica in raft group is ready.
-        let replica_desc = match replica_cache.replica_for_node(group_id, node_id).await {
-            Err(err) => {
-                error!(
-                    "node {}: can't handle ready, got {} group replica of storage error {}",
-                    node_id, group_id, err
-                );
-                return;
+        let replica_desc = replica_cache.replica_for_node(group_id, node_id).await?;
+        let replica_desc = match replica_desc {
+            Some(replica_desc) => {
+                assert_eq!(replica_desc.replica_id, self.raft_group.raft.id);
+                replica_desc
             }
-            Ok(replica_desc) => match replica_desc {
-                Some(replica_desc) => {
-                    assert_eq!(replica_desc.replica_id, self.raft_group.raft.id);
-                    replica_desc
-                }
-                None => {
-                    // if we can't look up the replica in storage, but the group is ready,
-                    // we know that one of the replicas must be ready, so we can repair the
-                    // storage to store this replica.
-                    let repaired_replica_desc = ReplicaDesc {
-                        group_id,
-                        node_id,
-                        replica_id: self.raft_group.raft.id,
-                    };
-                    if let Err(err) = replica_cache
-                        .cache_replica_desc(group_id, repaired_replica_desc.clone(), true)
-                        .await
-                    {
-                        error!(
-                            "write is error, got {} group replica  of storage error {}",
-                            group_id, err
-                        );
-                        return;
-                    }
-                    repaired_replica_desc
-                }
-            },
+            None => {
+                // if we can't look up the replica in storage, but the group is ready,
+                // we know that one of the replicas must be ready, so we can repair the
+                // storage to store this replica.
+                let repaired_replica_desc = ReplicaDesc {
+                    group_id,
+                    node_id,
+                    replica_id: self.raft_group.raft.id,
+                };
+
+                replica_cache
+                    .cache_replica_desc(group_id, repaired_replica_desc.clone(), true)
+                    .await?;
+                repaired_replica_desc
+            }
         };
 
         // TODO: cache storage in related raft group.
-        let gs = match storage
+        let gs = storage
             .group_storage(group_id, replica_desc.replica_id)
-            .await
-        {
-            Ok(gs) => gs,
-            Err(err) => {
-                error!(
-                    "node {}: group {} ready but got group storage error {}",
-                    node_id, group_id, err
-                );
-                return;
-            }
-        };
+            .await?;
+
         // send out messages
         if !rd.messages().is_empty() {
             transport::send_messages(
@@ -238,41 +206,35 @@ where
         }
 
         // make apply task if need to apply commit entries
-        if !rd.committed_entries().is_empty() {
+        let apply = if !rd.committed_entries().is_empty() {
             // insert_commit_entries will update latest commit term by commit entries.
-            self.handle_committed_entries(
+            let apply = self.handle_can_apply_entries(
                 node_id,
                 &gs,
                 replica_desc.replica_id,
                 rd.take_committed_entries(),
-                multi_groups_apply,
-            );
-        }
+            )?;
 
+            Some(apply)
+        } else {
+            None
+        };
+
+        let gwr = RaftGroupWriteRequest {
+            replica_id: replica_desc.replica_id,
+            ready: Some(rd),
+        };
         // make write task if need to write disk.
-        multi_groups_write.insert(
-            group_id,
-            RaftGroupWriteRequest {
-                replica_id: replica_desc.replica_id,
-                ready: Some(rd),
-                light_ready: None,
-            },
-        );
+        Ok((gwr, apply))
     }
 
-    // #[tracing::instrument(
-    //     level = Level::TRACE,
-    //     name = "RaftGroup:handle_committed_entries",
-    //     skip_all
-    // )]
-    fn handle_committed_entries(
+    fn handle_can_apply_entries(
         &mut self,
         node_id: u64,
         gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
-        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
-    ) {
+    ) -> Result<ApplyData<RES>, super::storage::Error> {
         debug!(
             "node {}: create apply entries [{}, {}], group = {}, replica = {}",
             node_id,
@@ -281,7 +243,7 @@ where
             self.group_id,
             replica_id
         );
-        let group_id = self.group_id;
+        // let group_id = self.group_id;
         let last_commit_ent = &entries[entries.len() - 1];
 
         // update shared_state for latest commit
@@ -296,11 +258,15 @@ where
             self.commit_index = last_commit_ent.index;
         }
 
-        let apply = self.create_apply(gs, replica_id, entries);
-        multi_groups_apply.insert(group_id, apply);
+        self.create_apply(gs, replica_id, entries)
     }
 
-    fn create_apply(&mut self, gs: &RS, replica_id: u64, entries: Vec<Entry>) -> ApplyData<RES> {
+    fn create_apply(
+        &mut self,
+        gs: &RS,
+        replica_id: u64,
+        entries: Vec<Entry>,
+    ) -> Result<ApplyData<RES>, super::storage::Error> {
         // this is different from `commit_index` and `commit_term` for self local,
         // we need a commit state that has been advanced to the state machine.
         let commit_index = std::cmp::min(
@@ -308,7 +274,7 @@ where
             self.raft_group.raft.raft_log.persisted,
         );
         // TODO: handle error: if storage error we need retry instead of panic
-        let commit_term = gs.term(commit_index).unwrap();
+        let commit_term = gs.term(commit_index)?;
 
         let current_term = self.raft_group.raft.term;
         let mut proposals = Vec::new();
@@ -360,7 +326,7 @@ where
 
         // trace!("make apply {:?}", apply);
 
-        apply
+        Ok(apply)
     }
 
     fn on_reads_ready(&mut self, rss: Vec<ReadState>) {
@@ -454,23 +420,23 @@ where
         skip_all,
         fields(node_id=node_id, group_id=self.group_id)
     )]
-    pub(crate) async fn handle_ready_write<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
+    pub(crate) async fn handle_write<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
-        gwr: &mut RaftGroupWriteRequest,
+        write: &mut RaftGroupWriteRequest,
         gs: &RS, // TODO: cache storage in RaftGroup
         transport: &TR,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         node_manager: &mut NodeManager,
-    ) {
+    ) -> Result<Option<ApplyData<RES>>, super::storage::Error> {
         let group_id = self.group_id;
-        let mut ready = gwr.ready.take().unwrap();
+        let mut ready = write.ready.take().unwrap();
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
-            // FIXME: handle error
-            // FIXME: call add voters to track node, node mgr etc.
             debug!("node {}: install snapshot {:?}", node_id, snapshot);
-            gs.install_snapshot(snapshot).unwrap();
+            // FIXME: call add voters to track node, node mgr etc.
+            // TODO: consider move install_snapshot to async queues.
+            gs.install_snapshot(snapshot)?;
         }
 
         if !ready.entries().is_empty() {
@@ -482,18 +448,12 @@ where
                 entries[entries.len() - 1].index
             );
 
-            if let Err(_error) = gs.append(&entries) {
-                // FIXME: handle error
-                panic!("node {}: append entries error = {}", node_id, _error);
-            }
+            // If append fails due to temporary storage unavailability,
+            // we will try again later.
+            gs.append(&entries)?;
         }
-
         if let Some(hs) = ready.hs() {
-            let hs = hs.clone();
-            if let Err(_error) = gs.set_hardstate(hs) {
-                // FIXME: handle error
-                panic!("node {}: set hardstate error = {}", node_id, _error);
-            }
+            gs.set_hardstate(hs.clone())?
         }
 
         if !ready.persisted_messages().is_empty() {
@@ -508,40 +468,10 @@ where
             .await;
         }
 
-        let light_ready = self.raft_group.advance_append(ready);
-        // self.raft_group
-        //    .advance_apply_to(self.state.apply_state.applied_index);
-        gwr.light_ready = Some(light_ready);
-    }
-
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "RaftGroup::handle_light_ready",
-        skip_all,
-        fields(node_id=node_id, group_id=self.group_id)
-    )]
-    pub async fn handle_light_ready<TR: transport::Transport, MRS: MultiRaftStorage<RS>>(
-        &mut self,
-        node_id: u64,
-        transport: &TR,
-        storage: &MRS,
-        replica_cache: &mut ReplicaCache<RS, MRS>,
-        node_manager: &mut NodeManager,
-        gwr: &mut RaftGroupWriteRequest,
-        multi_groups_apply: &mut HashMap<u64, ApplyData<RES>>,
-    ) {
-        let group_id = self.group_id;
-        let replica_id = gwr.replica_id;
-        let mut light_ready = gwr.light_ready.take().unwrap();
-        // let group_storage = self
-        //     .storage
-        //     .group_storage(group_id, gwr.replica_id)
-        //     .await
-        //     .unwrap();
-
+        let mut light_ready = self.raft_group.advance_append(ready);
         if let Some(commit) = light_ready.commit_index() {
             debug!("node {}: set commit = {}", node_id, commit);
-            // group_storage.set_commit(commit);
+            self.commit_index = commit;
         }
 
         if !light_ready.messages().is_empty() {
@@ -558,29 +488,15 @@ where
         }
 
         if !light_ready.committed_entries().is_empty() {
-            debug!("node {}: light ready has committed entries", node_id);
-            // TODO: cache storage in related raft group.
-            let gs = match storage.group_storage(group_id, gwr.replica_id).await {
-                Ok(gs) => gs,
-                Err(err) => {
-                    error!(
-                        "node({}) group({}) ready but got group storage error {}",
-                        node_id, group_id, err
-                    );
-                    return;
-                }
-            };
-            self.handle_committed_entries(
+            let apply = self.handle_can_apply_entries(
                 node_id,
                 &gs,
-                replica_id,
+                write.replica_id,
                 light_ready.take_committed_entries(),
-                multi_groups_apply,
-            );
+            )?;
+            return Ok(Some(apply));
         }
-        // FIXME: always advance apply
-        // TODO: move to upper layer
-        // self.raft_group.advance_apply();
+        Ok(None)
     }
 
     fn pre_propose_write<WD: WriteData>(

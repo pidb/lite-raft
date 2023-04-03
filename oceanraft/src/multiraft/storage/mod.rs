@@ -221,5 +221,5 @@ mod mem;
 
 #[cfg(feature = "store-rocksdb")]
 mod rocks;
-pub use mem::{MultiRaftMemoryStorage, RaftMemStorage};
+pub use mem::{MultiRaftMemoryStorage, MemStorage};
 pub use rocks::{ApplyWriteBatch, RockStore, RockStoreCore, StateMachineStore};
