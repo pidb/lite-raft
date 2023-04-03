@@ -5,9 +5,12 @@ mod storage {
     use prost::Message;
     use raft::RaftState;
     use raft::Result as RaftResult;
+    use raft::StorageError as RaftStorageError;
     use rocksdb::BoundColumnFamily;
     use rocksdb::ColumnFamilyDescriptor;
     use rocksdb::DBWithThreadMode;
+    use rocksdb::Error as RocksdbError;
+    use rocksdb::ErrorKind as RocksdbErrorKind;
     use rocksdb::IteratorMode;
     use rocksdb::MultiThreaded;
     use rocksdb::Options as RocksdbOptions;
@@ -15,7 +18,6 @@ mod storage {
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
     use tracing::error;
-    use tracing::info;
 
     use crate::multiraft::storage::Error;
     use crate::multiraft::storage::MultiRaftStorage;
@@ -31,6 +33,189 @@ mod storage {
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
+
+    /// Save rocksdb error context.
+    #[derive(Clone)]
+    struct ErrorContext {
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+        operation: String,
+        is_log: bool,
+        is_snap: bool,
+    }
+
+    impl ErrorContext {
+        /// Dump the context and return an error message.
+        fn dump(&self, kind: &RocksdbErrorKind) -> String {
+            let who = if self.is_log {
+                "log"
+            } else if self.is_snap {
+                "snapshot"
+            } else {
+                "storage"
+            };
+
+            match kind {
+                RocksdbErrorKind::NotFound => {
+                    format!("node {}: NotFound error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::Corruption => {
+                    format!("node {}: Corruption error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::NotSupported => {
+                    format!("node {}: NotSupported error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::InvalidArgument => {
+                    format!("node {}: InvalidArgument error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::IOError => {
+                    format!("node {}: IOError error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::MergeInProgress => {
+                    format!("node {}: MergeInProgress error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::Incomplete => {
+                    format!("node {}: Incomplete error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::ShutdownInProgress => {
+                    format!("node {}: Incomplete error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::TimedOut => {
+                    format!("node {}: TimedOut error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::Aborted => {
+                    format!(
+                    "node {}: Aborted error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is unavailable for {}",
+                    self.node_id,  self.operation, self.group_id, self.replica_id, who
+                )
+                }
+                RocksdbErrorKind::Busy => {
+                    format!("node {}: Busy error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::Expired => {
+                    format!("node {}: Expired error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::TryAgain => {
+                    format!("node {}: TryAgain error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::CompactionTooLarge => {
+                    format!("node {}: CompactionTooLarge error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::ColumnFamilyDropped => {
+                    format!("node {}: ColumnFamilyDropped error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is temporarily unavailable for {}",self.node_id,  self.operation, self.group_id, self.replica_id, who)
+                }
+                RocksdbErrorKind::Unknown => {
+                    format!(
+                    "node {}: Unkown error occurs on the rocksdb storage. operation ({}) that replica {} of group {} is unavailable for {}",
+                    self.node_id, self.operation,self.group_id, self.replica_id, who
+                )
+                }
+            }
+        }
+    }
+
+    struct ErrorHandler {
+        ctx: ErrorContext,
+        err: RocksdbError,
+    }
+
+    impl From<ErrorHandler> for Error {
+        /// Convert rocksdb error to storage error.
+        fn from(handling: ErrorHandler) -> Self {
+            let kind = handling.err.kind();
+            error!("{}", handling.ctx.dump(&kind));
+            match kind {
+                RocksdbErrorKind::NotFound
+                | RocksdbErrorKind::NotSupported
+                | RocksdbErrorKind::InvalidArgument
+                | RocksdbErrorKind::IOError
+                | RocksdbErrorKind::MergeInProgress
+                | RocksdbErrorKind::Incomplete
+                | RocksdbErrorKind::TimedOut
+                | RocksdbErrorKind::Busy
+                | RocksdbErrorKind::Expired
+                | RocksdbErrorKind::TryAgain
+                | RocksdbErrorKind::CompactionTooLarge
+                | RocksdbErrorKind::ColumnFamilyDropped
+                | RocksdbErrorKind::Aborted
+                | RocksdbErrorKind::Unknown => {
+                    if handling.ctx.is_log {
+                        Error::LogTemporarilyUnavailable
+                    } else if handling.ctx.is_log {
+                        Error::SnapshotTemporarilyUnavailable
+                    } else {
+                        Error::StorageTemporarilyUnavailable
+                    }
+                }
+                RocksdbErrorKind::Corruption => {
+                    // If this error occurs, there is a corruption
+                    // with the data.
+                    // returned the unavailable error to the upper
+                    // layer and output the error.
+                    // TODO: Further, we should save the context of data corruption
+                    if handling.ctx.is_log {
+                        Error::LogUnavailable
+                    } else if handling.ctx.is_snap {
+                        Error::SnapshotUnavailable
+                    } else {
+                        Error::StorageUnavailable
+                    }
+                }
+                RocksdbErrorKind::ShutdownInProgress => {
+                    if handling.ctx.is_log {
+                        Error::LogUnavailable
+                    } else if handling.ctx.is_snap {
+                        Error::SnapshotUnavailable
+                    } else {
+                        Error::StorageUnavailable
+                    }
+                }
+            }
+        }
+    }
+
+    impl From<ErrorHandler> for RaftStorageError {
+        /// Convert rocksdb error to raft storage error.
+        fn from(handling: ErrorHandler) -> Self {
+            let kind = handling.err.kind();
+            error!("{}", handling.ctx.dump(&kind));
+            match kind {
+                RocksdbErrorKind::NotFound
+                | RocksdbErrorKind::NotSupported
+                | RocksdbErrorKind::InvalidArgument
+                | RocksdbErrorKind::IOError
+                | RocksdbErrorKind::MergeInProgress
+                | RocksdbErrorKind::Incomplete
+                | RocksdbErrorKind::TimedOut
+                | RocksdbErrorKind::Busy
+                | RocksdbErrorKind::Expired
+                | RocksdbErrorKind::TryAgain
+                | RocksdbErrorKind::CompactionTooLarge
+                | RocksdbErrorKind::ColumnFamilyDropped
+                | RocksdbErrorKind::Aborted
+                | RocksdbErrorKind::Unknown => {
+                    if handling.ctx.is_log {
+                        RaftStorageError::LogTemporarilyUnavailable
+                    } else if handling.ctx.is_snap {
+                        RaftStorageError::SnapshotTemporarilyUnavailable
+                    } else {
+                        // just to make the compiler happy, never reach here.
+                        RaftStorageError::Unavailable
+                    }
+                }
+                RocksdbErrorKind::Corruption => {
+                    // If this error occurs, there is a corruption
+                    // with the data.
+                    // returned the unavailable error to the upper
+                    // layer and output the error.
+                    // TODO: Further, we should save the context of data corruption
+                    RaftStorageError::Unavailable
+                }
+                RocksdbErrorKind::ShutdownInProgress => RaftStorageError::Unavailable,
+            }
+        }
+    }
 
     /// Type define for rocksdb with multi-thread.
     type MDB = DBWithThreadMode<MultiThreaded>;
@@ -65,42 +250,20 @@ mod storage {
     /// Constant prerfix for log last index and store in log column family.
     const LOG_LAST_INDEX_PREFIX: &'static str = "lidx";
 
-    /// The error type define for rocksdb.
-    #[derive(thiserror::Error, Debug)]
-    pub enum RocksError {
-        /// A Cloumn missing error occurred and if the
-        /// error occur that the error message contains specific
-        /// cloumn family.
-        #[error("{0} column family missing")]
-        ColumnFamilyMissing(String),
-
-        /// A error occurred form rocksdb.
-        #[error("{0}")]
-        Rockdb(#[from] Box<dyn std::error::Error + Sync + Send>),
-    }
-
     /// A lightweight helper method for mdb
     struct DBEnv;
 
     impl DBEnv {
         #[inline]
-        fn get_metadata_cf(db: &Arc<MDB>) -> Result<Arc<BoundColumnFamily>> {
-            db.cf_handle(METADATA_CF_NAME).map_or(
-                Err(Error::Other(Box::new(RocksError::ColumnFamilyMissing(
-                    METADATA_CF_NAME.to_owned(),
-                )))),
-                |cf| Ok(cf),
-            )
+        fn get_metadata_cf(db: &Arc<MDB>) -> Arc<BoundColumnFamily> {
+            db.cf_handle(METADATA_CF_NAME)
+                .expect("unreachable: metadata_cf handler missing")
         }
 
         #[inline]
-        fn get_log_cf(db: &Arc<MDB>) -> Result<Arc<BoundColumnFamily>> {
-            db.cf_handle(LOG_CF_NAME).map_or(
-                Err(Error::Other(Box::new(RocksError::ColumnFamilyMissing(
-                    LOG_CF_NAME.to_owned(),
-                )))),
-                |cf| Ok(cf),
-            )
+        fn get_log_cf(db: &Arc<MDB>) -> Arc<BoundColumnFamily> {
+            db.cf_handle(LOG_CF_NAME)
+                .expect("unreachable: raft_log_cf handler missing")
         }
 
         /// Format hardstate key with mode `{group_id}_{replica_id}_hs`.
@@ -176,6 +339,7 @@ mod storage {
      *****************************************************************************/
     #[derive(Clone)]
     pub struct RockStoreCore<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> {
+        node_id: u64,
         group_id: u64,
         replica_id: u64,
         db: Arc<MDB>,
@@ -189,6 +353,7 @@ mod storage {
         /// # Panics
         /// if RockStoreCore has been initialized
         fn new(
+            node_id: u64,
             group_id: u64,
             replica_id: u64,
             db: &Arc<MDB>,
@@ -196,6 +361,7 @@ mod storage {
             wsnap: &SW,
         ) -> Result<Self> {
             let core = RockStoreCore {
+                node_id,
                 group_id,
                 replica_id,
                 db: db.clone(),
@@ -203,31 +369,96 @@ mod storage {
                 wsnap: wsnap.clone(),
             };
 
-            core.set_empty_flag(true)?;
+            core.set_empty_flag(true).map_err(|err| {
+                core.to_write_err(
+                    err,
+                    false,
+                    false,
+                    "initial_storage: set log empty flag".into(),
+                )
+            })?;
 
-            let meta_cf = DBEnv::get_metadata_cf(db)?;
+            let meta_cf = DBEnv::get_metadata_cf(db);
             let mut batch = WriteBatch::default();
+            // put default hard_state
+            let hs = HardState::default();
+            let key = DBEnv::format_hardstate_key(group_id, replica_id);
+            let value = hs.encode_to_vec();
+            batch.put_cf(&meta_cf, key, value);
 
-            // set default for hard_state, conf_state, snapshot_metadata.
-            core.set_hardstate_with_batch(HardState::default(), &meta_cf, &mut batch);
-            core.set_confstate_with_batch(ConfState::default(), &meta_cf, &mut batch);
-            core.set_snapshot_metadata_with_batch(
-                SnapshotMetadata::default(),
-                &meta_cf,
-                &mut batch,
-            );
+            // put default conf_state
+            let cs = ConfState::default();
+            let key = DBEnv::format_confstate_key(group_id, replica_id);
+            let value = cs.encode_to_vec();
+            batch.put_cf(&meta_cf, key, value);
+
+            // put default snapshot_metadata
+            let meta = SnapshotMetadata::default();
+            let key = DBEnv::format_snapshot_metadata_key(group_id, replica_id);
+            let value = meta.encode_to_vec();
+            batch.put_cf(&meta_cf, key, value);
+
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            core.db
-                .write_opt(batch, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))?;
+            core.db.write_opt(batch, &writeopts).map_err(|err| {
+                core.to_write_err(
+                    err,
+                    false,
+                    false,
+                    "initial_storage: set initialize default values".into(),
+                )
+            })?;
 
             Ok(core)
         }
 
+        /// Handling rocksdb write related error and returned Error.
+        #[inline]
+        fn to_write_err(
+            &self,
+            err: RocksdbError,
+            is_log: bool,
+            is_snap: bool,
+            op: String,
+        ) -> Error {
+            Error::from(ErrorHandler {
+                ctx: ErrorContext {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    operation: op,
+                    is_log,
+                    is_snap,
+                },
+                err,
+            })
+        }
+
+        /// Handling rocksdb read related error and returned RaftStorageError.
+        #[inline]
+        fn to_read_err(
+            &self,
+            err: RocksdbError,
+            is_log: bool,
+            is_snap: bool,
+            op: String,
+        ) -> RaftStorageError {
+            RaftStorageError::from(ErrorHandler {
+                ctx: ErrorContext {
+                    node_id: self.node_id,
+                    group_id: self.group_id,
+                    replica_id: self.replica_id,
+                    operation: op,
+                    is_log,
+                    is_snap,
+                },
+                err,
+            })
+        }
+
         /// Get `EntryMetadata` from given rocksdb.
-        fn get_entry_meta(&self) -> Result<EntryMetadata> {
-            let cf = DBEnv::get_log_cf(&self.db)?;
+        fn get_entry_meta(&self) -> std::result::Result<EntryMetadata, RocksdbError> {
+            let cf = DBEnv::get_log_cf(&self.db);
 
             let keys = vec![
                 DBEnv::format_empty_key(self.group_id, self.replica_id),
@@ -242,27 +473,18 @@ mod storage {
                 .into_iter();
             assert_eq!(batchs.len(), keys.len());
 
-            let empty = batchs
-                .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or_else(
-                    || {
-                        unreachable!(
-                            "the log empty flag should be created when storage is initialized"
-                        )
-                    },
-                    |data| match String::from_utf8(data.to_vec()).unwrap().as_str() {
-                        "true" => true,
-                        "false" => false,
-                        _ => unreachable!(
-                            "the log empty flag invalid, it can only be either true or false."
-                        ),
-                    },
-                );
-            info!(
-                "replica {}: get entry meta, the empty is {}",
-                self.replica_id, empty
+            let empty = batchs.next().expect("unreachable")?.map_or_else(
+                || unreachable!("the log empty flag should be created when storage is initialized"),
+                |data| match String::from_utf8(data.to_vec())
+                    .expect("invalid log empty flag data")
+                    .as_str()
+                {
+                    "true" => true,
+                    "false" => false,
+                    _ => unreachable!(
+                        "the log empty flag invalid, it can only be either true or false."
+                    ),
+                },
             );
 
             if empty {
@@ -276,18 +498,18 @@ mod storage {
 
             let data = batchs
                 .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .unwrap();
+                .expect("unreachable")?
+                .expect("log is not empty, but failed to multiget first_index");
 
-            let first_index = u64::from_be_bytes(data.to_vec().try_into().unwrap());
+            let first_index =
+                u64::from_be_bytes(data.to_vec().try_into().expect("invalid first_index data"));
 
             let data = batchs
                 .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .unwrap();
-            let last_index = u64::from_be_bytes(data.to_vec().try_into().unwrap());
+                .expect("unreachable")?
+                .expect("log is not empty, but failed to multiget last_index");
+            let last_index =
+                u64::from_be_bytes(data.to_vec().try_into().expect("invalid last_index data"));
 
             Ok(EntryMetadata {
                 first_index,
@@ -296,135 +518,93 @@ mod storage {
             })
         }
 
-        fn is_empty(&self, log_cf: &Arc<BoundColumnFamily>) -> Result<bool> {
+        fn is_empty(
+            &self,
+            log_cf: &Arc<BoundColumnFamily>,
+        ) -> std::result::Result<bool, RocksdbError> {
             let key = DBEnv::format_empty_key(self.group_id, self.replica_id);
             let readopts = ReadOptions::default();
             let value = self
                 .db
-                .get_cf_opt(log_cf, key, &readopts)
-                .map_err(|err| Error::Other(Box::new(RocksError::Rockdb(Box::new(err)))))?
-                .unwrap();
+                .get_cf_opt(log_cf, key, &readopts)?
+                .expect("unreachable: log empty flag always initialized");
 
-            match String::from_utf8(value).unwrap().as_str() {
+            match String::from_utf8(value)
+                .expect("unreachable: log empty data always utf8 valid")
+                .as_str()
+            {
                 "true" => Ok(true),
                 "false" => Ok(false),
-                _ => unreachable!(),
+                _ => unreachable!("log empty flag data invalid"),
             }
         }
 
-        fn get_hardstate(&self) -> Result<HardState> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        fn get_hard_state(&self) -> std::result::Result<HardState, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
             let readopts = ReadOptions::default();
             self.db
-                .get_cf_opt(&metacf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
+                .get_cf_opt(&metacf, &key, &readopts)?
                 .map_or(Ok(HardState::default()), |data| {
                     Ok(HardState::decode(data.as_ref()).unwrap()) // TODO: use difference serializer
                 })
         }
 
-        fn get_confstate(&self) -> Result<ConfState> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        fn get_conf_state(&self) -> std::result::Result<ConfState, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_confstate_key(self.group_id, self.replica_id);
             let readopts = ReadOptions::default();
             self.db
-                .get_cf_opt(&metacf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
+                .get_cf_opt(&metacf, &key, &readopts)?
                 .map_or(Ok(ConfState::default()), |data| {
                     Ok(ConfState::decode(data.as_ref()).unwrap()) // TODO: use difference serializer
                 })
         }
 
-        fn get_entry(&self, index: u64) -> Result<Entry> {
-            let logcf = DBEnv::get_log_cf(&self.db)?;
+        fn get_entry(&self, index: u64) -> std::result::Result<Entry, RocksdbError> {
+            let logcf = DBEnv::get_log_cf(&self.db);
             let key = DBEnv::format_entry_key(self.group_id, index);
             let readopts = ReadOptions::default();
-            match self
-                .db
-                .get_cf_opt(&logcf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
-            {
-                None => panic!("invalid index"),
+            match self.db.get_cf_opt(&logcf, &key, &readopts)? {
+                None => panic!("index out of bounds: the index is {}", index),
                 Some(data) => Ok(Entry::decode(data.as_ref()).unwrap()), // TODO: use difference serializer
             }
         }
 
-        fn get_snapshot_metadata(&self) -> Result<SnapshotMetadata> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+        fn get_snapshot_metadata(&self) -> std::result::Result<SnapshotMetadata, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_snapshot_metadata_key(self.group_id, self.replica_id);
             let readopts = ReadOptions::default();
-            self.db
-                .get_cf_opt(&metacf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
-                .map_or(Ok(SnapshotMetadata::default()), |data| {
+            self.db.get_cf_opt(&metacf, &key, &readopts)?.map_or(
+                Ok(SnapshotMetadata::default()),
+                |data| {
                     Ok(SnapshotMetadata::decode(data.as_ref()).unwrap()) // TODO: use difference serializer
-                })
+                },
+            )
         }
 
-        fn set_snapshot_metadata(&self, meta: &SnapshotMetadata) -> Result<()> {
-            if self.first_index()? > meta.index {
-                return Err(Error::SnapshotOutOfDate);
-            }
-
-            let cf = DBEnv::get_metadata_cf(&self.db)?;
+        fn set_snapshot_metadata(
+            &self,
+            meta: &SnapshotMetadata,
+        ) -> std::result::Result<(), RocksdbError> {
+            let cf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_snapshot_metadata_key(self.group_id, self.replica_id);
             let value = meta.encode_to_vec(); // TODO: use difference serializer
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            self.db
-                .put_cf_opt(&cf, key, value, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))
+            self.db.put_cf_opt(&cf, key, value, &writeopts)
         }
 
-        fn set_empty_flag(&self, flag: bool) -> Result<()> {
-            let logcf = DBEnv::get_log_cf(&self.db)?;
+        fn set_empty_flag(&self, flag: bool) -> std::result::Result<(), RocksdbError> {
+            let logcf = DBEnv::get_log_cf(&self.db);
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            self.db
-                .put_cf_opt(
-                    &logcf,
-                    DBEnv::format_empty_key(self.group_id, self.replica_id),
-                    flag.to_string(),
-                    &writeopts,
-                )
-                .map_err(|err| Error::Other(Box::new(err)))
-        }
-
-        #[inline]
-        fn set_hardstate_with_batch(
-            &self,
-            hs: HardState,
-            meta_cf: &Arc<BoundColumnFamily>,
-            batch: &mut WriteBatch,
-        ) {
-            let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
-            let value = hs.encode_to_vec();
-            batch.put_cf(meta_cf, key, value)
-        }
-
-        #[inline]
-        fn set_confstate_with_batch(
-            &self,
-            cs: ConfState,
-            meta_cf: &Arc<BoundColumnFamily>,
-            batch: &mut WriteBatch,
-        ) {
-            let key = DBEnv::format_confstate_key(self.group_id, self.replica_id);
-            let value = cs.encode_to_vec();
-            batch.put_cf(meta_cf, key, value)
-        }
-
-        #[inline]
-        fn set_snapshot_metadata_with_batch(
-            &self,
-            meta: SnapshotMetadata,
-            meta_cf: &Arc<BoundColumnFamily>,
-            batch: &mut WriteBatch,
-        ) {
-            let key = DBEnv::format_snapshot_metadata_key(self.group_id, self.replica_id);
-            let value = meta.encode_to_vec();
-            batch.put_cf(meta_cf, key, value)
+            self.db.put_cf_opt(
+                &logcf,
+                DBEnv::format_empty_key(self.group_id, self.replica_id),
+                flag.to_string(),
+                &writeopts,
+            )
         }
     }
 
@@ -436,7 +616,7 @@ mod storage {
             }
 
             let log_meta = self.get_entry_meta().unwrap();
-            let log_cf = DBEnv::get_log_cf(&self.db).unwrap();
+            let log_cf = DBEnv::get_log_cf(&self.db);
 
             let mut batch = WriteBatch::default();
             if log_meta.empty {
@@ -472,7 +652,7 @@ mod storage {
         #[allow(unused)]
         pub fn entries_unchecked(&self) -> Vec<Entry> {
             let mut ents = vec![];
-            let log_cf = DBEnv::get_log_cf(&self.db).unwrap();
+            let log_cf = DBEnv::get_log_cf(&self.db);
             let prefix = DBEnv::format_entry_key_prefix(self.group_id);
             let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
             let readopts = ReadOptions::default();
@@ -493,7 +673,7 @@ mod storage {
 
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageReader for RockStoreCore<SR, SW> {
         fn initial_state(&self) -> RaftResult<RaftState> {
-            let cf = DBEnv::get_metadata_cf(&self.db)?;
+            let cf = DBEnv::get_metadata_cf(&self.db);
 
             let keys = vec![
                 DBEnv::format_hardstate_key(self.group_id, self.replica_id),
@@ -508,8 +688,15 @@ mod storage {
 
             let hard_state = batches
                 .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
+                .expect("unreachable: multiget for hard_state of initial_state")
+                .map_err(|err| {
+                    self.to_read_err(
+                        err,
+                        true,
+                        false,
+                        "initial_state: multiget for hard_state".into(),
+                    )
+                })?
                 .map_or(HardState::default(), |data| {
                     let mut hs = HardState::default();
                     hs.merge(data.as_ref()).unwrap(); // TODO: handle error
@@ -518,8 +705,15 @@ mod storage {
 
             let conf_state = batches
                 .next()
-                .unwrap()
-                .map_err(|err| Error::Other(Box::new(err)))?
+                .expect("unreachable: multiget for hard_state of initial_state")
+                .map_err(|err| {
+                    self.to_read_err(
+                        err,
+                        true,
+                        false,
+                        "initial_state: multiget for hard_state".into(),
+                    )
+                })?
                 .map_or(ConfState::default(), |data| {
                     let mut cs = ConfState::default();
                     cs.merge(data.as_ref()).unwrap(); // TODO: handle error
@@ -541,7 +735,7 @@ mod storage {
         ) -> RaftResult<Vec<raft::prelude::Entry>> {
             let log_meta = self
                 .get_entry_meta()
-                .map_err(|err| raft::Error::Store(raft::StorageError::Other(Box::new(err))))?;
+                .map_err(|err| self.to_read_err(err, true, false, "entires".into()))?;
 
             if low < log_meta.first_index {
                 error!(
@@ -562,7 +756,7 @@ mod storage {
             let high = std::cmp::min(high, log_meta.last_index + 1);
 
             let mut ents = Vec::with_capacity((high - low) as usize);
-            let log_cf = DBEnv::get_log_cf(&self.db)?; // TODO handle error
+            let log_cf = DBEnv::get_log_cf(&self.db); // TODO handle error
             let start_key = DBEnv::format_entry_key(self.group_id, low);
             let iter_mode = IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward);
             let mut readopts = ReadOptions::default();
@@ -600,7 +794,10 @@ mod storage {
                 return Ok(snap_meta.term);
             }
 
-            let log_meta = self.get_entry_meta()?;
+            let log_meta = self
+                .get_entry_meta()
+                .map_err(|err| self.to_read_err(err, true, false, "term".into()))?;
+
             if idx < log_meta.first_index {
                 return Err(raft::Error::Store(raft::StorageError::Compacted));
             }
@@ -609,7 +806,7 @@ mod storage {
                 return Err(raft::Error::Store(raft::StorageError::Unavailable));
             }
 
-            let log_cf = DBEnv::get_log_cf(&self.db)?;
+            let log_cf = DBEnv::get_log_cf(&self.db);
             let key = DBEnv::format_entry_key(self.group_id, idx);
             let readopts = ReadOptions::default();
             let value = self
@@ -622,45 +819,51 @@ mod storage {
         }
 
         fn first_index(&self) -> RaftResult<u64> {
-            let log_cf = DBEnv::get_log_cf(&self.db)?;
-            match self.is_empty(&log_cf)? {
-                true => {
-                    let snap_meta = self.get_snapshot_metadata()?;
-                    Ok(snap_meta.index + 1)
-                }
-                false => {
-                    let key = DBEnv::format_first_index_key(self.group_id, self.replica_id);
-                    let readopts = ReadOptions::default();
-                    let value = self
-                        .db
-                        .get_cf_opt(&log_cf, &key, &readopts)
-                        .unwrap()
-                        .unwrap();
-                    let idx = u64::from_be_bytes(value.try_into().unwrap());
-                    Ok(idx)
-                }
+            let log_cf = DBEnv::get_log_cf(&self.db);
+            let empty = self
+                .is_empty(&log_cf)
+                .map_err(|err| self.to_read_err(err, true, false, "first_index".into()))?;
+
+            if empty {
+                let snap_meta = self
+                    .get_snapshot_metadata()
+                    .map_err(|err| self.to_read_err(err, true, false, "first_index".into()))?;
+                return Ok(snap_meta.index + 1);
             }
+
+            let key = DBEnv::format_first_index_key(self.group_id, self.replica_id);
+            let readopts = ReadOptions::default();
+            let value = self
+                .db
+                .get_cf_opt(&log_cf, &key, &readopts)
+                .unwrap()
+                .unwrap();
+            let idx = u64::from_be_bytes(value.try_into().unwrap());
+            Ok(idx)
         }
 
         fn last_index(&self) -> RaftResult<u64> {
-            let log_cf = DBEnv::get_log_cf(&self.db)?;
-            match self.is_empty(&log_cf)? {
-                true => {
-                    let snap_meta = self.get_snapshot_metadata()?;
-                    Ok(snap_meta.index)
-                }
-                false => {
-                    let key = DBEnv::format_last_index_key(self.group_id, self.replica_id);
-                    let readopts = ReadOptions::default();
-                    let value = self
-                        .db
-                        .get_cf_opt(&log_cf, &key, &readopts)
-                        .unwrap()
-                        .unwrap();
-                    let idx = u64::from_be_bytes(value.try_into().unwrap());
-                    Ok(idx)
-                }
+            let log_cf = DBEnv::get_log_cf(&self.db);
+            let empty = self
+                .is_empty(&log_cf)
+                .map_err(|err| self.to_read_err(err, true, false, "last_index".into()))?;
+
+            if empty {
+                let snap_meta = self
+                    .get_snapshot_metadata()
+                    .map_err(|err| self.to_read_err(err, true, false, "last_index".into()))?;
+                return Ok(snap_meta.index);
             }
+
+            let key = DBEnv::format_last_index_key(self.group_id, self.replica_id);
+            let readopts = ReadOptions::default();
+            let value = self
+                .db
+                .get_cf_opt(&log_cf, &key, &readopts)
+                .unwrap()
+                .unwrap();
+            let idx = u64::from_be_bytes(value.try_into().unwrap());
+            Ok(idx)
         }
 
         fn snapshot(&self, request_index: u64, _to: u64) -> RaftResult<Snapshot> {
@@ -670,9 +873,15 @@ mod storage {
             snap.set_data(data);
 
             // constructor snapshot metadata from store.
-            let snap_meta = self.get_snapshot_metadata()?;
-            let cs = self.get_confstate()?;
-            let hs = self.get_hardstate()?;
+            let snap_meta = self
+                .get_snapshot_metadata()
+                .map_err(|err| self.to_read_err(err, false, true, "snapshot".into()))?;
+            let cs = self
+                .get_conf_state()
+                .map_err(|err| self.to_read_err(err, false, true, "snapshot".into()))?;
+            let hs = self
+                .get_hard_state()
+                .map_err(|err| self.to_read_err(err, false, true, "snapshot".into()))?;
             // We assume all entries whose indexes are less than `hard_state.commit`
             // have been applied, so use the latest commit index to construct the snapshot.
             // TODO: This is not true for async ready.
@@ -682,7 +891,9 @@ mod storage {
                 std::cmp::Ordering::Equal => snap_meta.term,
                 std::cmp::Ordering::Greater => {
                     // committed index greater than current snapshot index
-                    self.get_entry(mut_meta.index)?.term
+                    self.get_entry(mut_meta.index)
+                        .map_err(|err| self.to_read_err(err, false, true, "snapshot".into()))?
+                        .term
                 }
                 std::cmp::Ordering::Less => {
                     panic!(
@@ -703,25 +914,39 @@ mod storage {
 
     impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageWriter for RockStoreCore<SR, SW> {
         fn set_hardstate(&self, hs: HardState) -> Result<()> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
             let value = hs.encode_to_vec(); // TODO: add feature for difference serializers.
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
             self.db
                 .put_cf_opt(&metacf, &key, &value, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))
+                .map_err(|err| {
+                    self.to_write_err(
+                        err,
+                        true,
+                        false,
+                        format!("set_hard_state: hard_state = {:?}", hs),
+                    )
+                })
         }
 
         fn set_confstate(&self, cs: ConfState) -> Result<()> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_confstate_key(self.group_id, self.replica_id);
             let value = cs.encode_to_vec(); // TODO: add feature for difference serializers.
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
             self.db
                 .put_cf_opt(&metacf, &key, &value, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))
+                .map_err(|err| {
+                    self.to_write_err(
+                        err,
+                        true,
+                        false,
+                        format!("set_conf_state: conf_state = {:?}", cs),
+                    )
+                })
         }
 
         fn append(&self, ents: &[Entry]) -> Result<()> {
@@ -729,7 +954,9 @@ mod storage {
                 return Ok(());
             }
 
-            let ent_meta = self.get_entry_meta()?;
+            let ent_meta = self
+                .get_entry_meta()
+                .map_err(|err| self.to_write_err(err, true, false, "append".into()))?;
 
             if ent_meta.first_index > ents[0].index {
                 panic!(
@@ -746,17 +973,29 @@ mod storage {
                 )
             }
 
-            let log_cf = DBEnv::get_log_cf(&self.db)?;
+            let log_cf = DBEnv::get_log_cf(&self.db);
 
             // remove all entries overwritten by ents.
             if ents[0].index <= ent_meta.last_index {
+                // FIXME: delete range has bug, see https://medium.com/@pingcap/how-we-found-a-data-corruption-bug-in-rocksdb-60e708769352
+                // to get more information, we need refactor it.
                 let start_key = DBEnv::format_entry_key(self.group_id, ents[0].index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db
-                    .delete_range_cf_opt(&log_cf, start_key, last_key, &writeopts)
-                    .map_err(|err| Error::Other(Box::new(err)))?;
+                    .delete_range_cf_opt(&log_cf, &start_key, &last_key, &writeopts)
+                    .map_err(|err| {
+                        self.to_write_err(
+                            err,
+                            true,
+                            false,
+                            format!(
+                                "append: delete entries ranges is start = {}, last = {}",
+                                start_key, last_key
+                            ),
+                        )
+                    })?;
             }
 
             // batch writes empty_flag (if need), first_index(if need), last_index and
@@ -787,13 +1026,18 @@ mod storage {
 
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            self.db.write_opt(batch, &writeopts).unwrap();
-            Ok(())
+            self.db
+                .write_opt(batch, &writeopts)
+                .map_err(|err| self.to_write_err(err, true, false, "append".into()))
         }
 
         fn install_snapshot(&self, mut snapshot: Snapshot) -> Result<()> {
             let mut snap_meta = snapshot.metadata.as_ref().expect("unreachable").clone();
-            if self.first_index()? > snap_meta.index {
+            let ent_meta = self
+                .get_entry_meta()
+                .map_err(|err| self.to_write_err(err, false, true, "install_snapshot".into()))?;
+
+            if ent_meta.first_index > snap_meta.index {
                 return Err(Error::SnapshotOutOfDate);
             }
 
@@ -802,7 +1046,14 @@ mod storage {
             }
 
             // save snapshot metadata
-            self.set_snapshot_metadata(&snap_meta)?;
+            self.set_snapshot_metadata(&snap_meta).map_err(|err| {
+                self.to_write_err(
+                    err,
+                    false,
+                    true,
+                    format!("install_snapshot: meta = {:?}", snap_meta),
+                )
+            })?;
             // save snapshot data to user statemachine
             // TODO: consider save snapshot metadata to user statemachine.
             // TODO: consider use async method and add scheduler api
@@ -810,23 +1061,36 @@ mod storage {
                 .install_snapshot(self.group_id, self.replica_id, snapshot.take_data())?;
 
             // update hardstate
-            let mut hs = self.get_hardstate()?;
+            let mut hs = self
+                .get_hard_state()
+                .map_err(|err| self.to_write_err(err, false, true, "install_snapshot".into()))?;
             hs.term = std::cmp::max(snap_meta.term, hs.term);
             hs.commit = snap_meta.index;
             self.set_hardstate(hs)?;
 
             // clear entries
-            let ent_meta = self.get_entry_meta()?;
             if !ent_meta.empty {
                 // TODO: need add tests for here
-                let cf = DBEnv::get_log_cf(&self.db)?;
+                // FIXME: delete range has bug, see https://medium.com/@pingcap/how-we-found-a-data-corruption-bug-in-rocksdb-60e708769352
+                // to get more information, we need refactor it.
+                let cf = DBEnv::get_log_cf(&self.db);
                 let start_key = DBEnv::format_entry_key(self.group_id, ent_meta.first_index);
                 let last_key = DBEnv::format_entry_key(self.group_id, ent_meta.last_index + 1);
                 let mut writeopts = WriteOptions::default();
                 writeopts.set_sync(true);
                 self.db
-                    .delete_range_cf_opt(&cf, start_key, last_key, &writeopts)
-                    .map_err(|err| Error::Other(Box::new(err)))?;
+                    .delete_range_cf_opt(&cf, &start_key, &last_key, &writeopts)
+                    .map_err(|err| {
+                        self.to_write_err(
+                            err,
+                            false,
+                            true,
+                            format!(
+                                "install_snapshot: clear entries ranges is start = {}, last = {}",
+                                start_key, last_key
+                            ),
+                        )
+                    })?;
             }
 
             // update confstate
@@ -895,16 +1159,28 @@ mod storage {
             group_id: u64,
             replica_id: u64,
         ) -> Result<RockStoreCore<SR, SW>> {
-            let meta_cf = DBEnv::get_metadata_cf(&self.db)?;
+            let meta_cf = DBEnv::get_metadata_cf(&self.db);
             let key = self.group_store_key(group_id, replica_id);
             let readopts = ReadOptions::default();
             match self
                 .db
                 .get_cf_opt(&meta_cf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
-            {
+                .map_err(|err| {
+                    Error::from(ErrorHandler {
+                        ctx: ErrorContext {
+                            node_id: self.node_id,
+                            group_id,
+                            replica_id,
+                            operation: "create_group_store_if_missing".to_owned(),
+                            is_log: false,
+                            is_snap: false,
+                        },
+                        err,
+                    })
+                })? {
                 Some(_) => {
                     return Ok(RockStoreCore {
+                        node_id: self.node_id,
                         group_id,
                         replica_id,
                         db: self.db.clone(),
@@ -913,6 +1189,7 @@ mod storage {
                     })
                 }
                 None => RockStoreCore::<SR, SW>::new(
+                    self.node_id,
                     group_id,
                     replica_id,
                     &self.db,
@@ -932,7 +1209,7 @@ mod storage {
         }
 
         fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<Option<ReplicaDesc>> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::replica_desc_key(group_id, replica_id);
             let readopts = ReadOptions::default();
 
@@ -950,7 +1227,7 @@ mod storage {
         }
 
         fn set_replica_desc(&self, group_id: u64, rd: &ReplicaDesc) -> Result<()> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::replica_desc_key(group_id, rd.replica_id);
             let value = rd.encode_to_vec();
             let writeopts = WriteOptions::default();
@@ -961,7 +1238,7 @@ mod storage {
         }
 
         fn remove_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<()> {
-            let metacf = DBEnv::get_metadata_cf(&self.db)?;
+            let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::replica_desc_key(group_id, replica_id);
             let writeopts = WriteOptions::default();
             // TODO: with fsync by config
@@ -1019,7 +1296,7 @@ mod storage {
 
         fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
             async move {
-                let metacf = DBEnv::get_metadata_cf(&self.db)?;
+                let metacf = DBEnv::get_metadata_cf(&self.db);
                 let seek = format!("{}_{}_", REPLICA_DESC_PREFIX, group_id);
                 let iter_mode = IteratorMode::From(seek.as_bytes(), rocksdb::Direction::Forward);
                 let readopts = ReadOptions::default();
@@ -2522,6 +2799,6 @@ mod tests {
     }
 }
 
-pub use storage::{RockStore, RockStoreCore, RocksError};
+pub use storage::{RockStore, RockStoreCore};
 
 pub use state_machine::{ApplyWriteBatch, StateMachineStore, StateMachineStoreError};

@@ -69,7 +69,7 @@ impl MemStorageCore {
     /// Saves the current HardState.
     pub fn set_hardstate(&mut self, hs: HardState) -> Result<()> {
         if self.trigger_log_unavailable {
-            return Err(super::Error::Unavailable);
+            return Err(super::Error::LogUnavailable);
         }
 
         if self.trigger_log_temp_unavailable {
@@ -115,7 +115,7 @@ impl MemStorageCore {
     /// Saves the current conf state.
     pub fn set_conf_state(&mut self, cs: ConfState) -> Result<()> {
         if self.trigger_log_unavailable {
-            return Err(super::Error::Unavailable);
+            return Err(super::Error::LogUnavailable);
         }
 
         if self.trigger_log_temp_unavailable {
@@ -253,7 +253,7 @@ impl MemStorageCore {
         }
 
         if self.trigger_log_unavailable {
-            return Err(super::Error::Unavailable);
+            return Err(super::Error::LogUnavailable);
         }
 
         if self.trigger_log_temp_unavailable {

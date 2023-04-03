@@ -11,18 +11,34 @@ use crate::prelude::Snapshot;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// The storage was temporarily unavailable.
+    #[error("storage unavailable")]
+    StorageUnavailable,
+
+    /// The storage was temporarily unavailable.
+    #[error("storage temporarily unavailable")]
+    StorageTemporarilyUnavailable,
+
     /// The storage was compacted and not accessible
     #[error("log compacted")]
-    Compacted,
+    LogCompacted,
+
     /// The log is not available.
     #[error("log unavailable")]
-    Unavailable,
+    LogUnavailable,
+
     /// The log is being fetched.
     #[error("log is temporarily unavailable")]
     LogTemporarilyUnavailable,
+
     /// The snapshot is out of date.
     #[error("snapshot out of date")]
     SnapshotOutOfDate,
+
+    /// The snapshot is not available.
+    #[error("snapshot unavailable")]
+    SnapshotUnavailable,
+
     /// The snapshot is being created.
     #[error("snapshot is temporarily unavailable")]
     SnapshotTemporarilyUnavailable,
@@ -36,8 +52,8 @@ impl PartialEq for Error {
     fn eq(&self, other: &Error) -> bool {
         matches!(
             (self, other),
-            (Error::Compacted, Error::Compacted)
-                | (Error::Unavailable, Error::Unavailable)
+            (Error::LogCompacted, Error::LogCompacted)
+                | (Error::LogUnavailable, Error::LogUnavailable)
                 | (
                     Error::LogTemporarilyUnavailable,
                     Error::LogTemporarilyUnavailable
@@ -54,8 +70,8 @@ impl PartialEq for Error {
 impl From<StorageError> for Error {
     fn from(that: raft::StorageError) -> Self {
         match that {
-            StorageError::Compacted => Self::Compacted,
-            StorageError::Unavailable => Self::Unavailable,
+            StorageError::Compacted => Self::LogCompacted,
+            StorageError::Unavailable => Self::LogUnavailable,
             StorageError::LogTemporarilyUnavailable => Self::LogTemporarilyUnavailable,
             StorageError::SnapshotOutOfDate => Self::SnapshotOutOfDate,
             StorageError::SnapshotTemporarilyUnavailable => Self::SnapshotTemporarilyUnavailable,
@@ -76,8 +92,14 @@ impl From<RaftError> for Error {
 impl From<Error> for RaftStorageError {
     fn from(that: Error) -> Self {
         match that {
-            Error::Compacted => Self::Compacted,
-            Error::Unavailable => Self::Unavailable,
+            // just to make the compiler happy, should never reach here.
+            Error::StorageUnavailable => Self::Unavailable,
+            // just to make the compiler happy, should never reach here.
+            Error::StorageTemporarilyUnavailable => Self::LogTemporarilyUnavailable,
+            // just to make the compiler happy, should never reach here.
+            Error::SnapshotUnavailable => Self::Unavailable,
+            Error::LogCompacted => Self::Compacted,
+            Error::LogUnavailable => Self::Unavailable,
             Error::LogTemporarilyUnavailable => Self::LogTemporarilyUnavailable,
             Error::SnapshotOutOfDate => Self::SnapshotOutOfDate,
             Error::SnapshotTemporarilyUnavailable => Self::SnapshotTemporarilyUnavailable,
@@ -89,8 +111,16 @@ impl From<Error> for RaftStorageError {
 impl From<Error> for RaftError {
     fn from(that: Error) -> Self {
         match that {
-            Error::Compacted => RaftError::Store(RaftStorageError::Compacted),
-            Error::Unavailable => RaftError::Store(RaftStorageError::Unavailable),
+            // just to make the compiler happy, should never reach here.
+            Error::StorageUnavailable => RaftError::Store(RaftStorageError::Unavailable),
+            // just to make the compiler happy, should never reach here.
+            Error::StorageTemporarilyUnavailable => {
+                RaftError::Store(RaftStorageError::LogTemporarilyUnavailable)
+            }
+            // just to make the compiler happy, should never reach here.
+            Error::SnapshotUnavailable => RaftError::Store(RaftStorageError::Unavailable),
+            Error::LogCompacted => RaftError::Store(RaftStorageError::Compacted),
+            Error::LogUnavailable => RaftError::Store(RaftStorageError::Unavailable),
             Error::LogTemporarilyUnavailable => {
                 RaftError::Store(RaftStorageError::LogTemporarilyUnavailable)
             }
@@ -221,5 +251,5 @@ mod mem;
 
 #[cfg(feature = "store-rocksdb")]
 mod rocks;
-pub use mem::{MultiRaftMemoryStorage, MemStorage};
+pub use mem::{MemStorage, MultiRaftMemoryStorage};
 pub use rocks::{ApplyWriteBatch, RockStore, RockStoreCore, StateMachineStore};
