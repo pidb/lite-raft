@@ -314,15 +314,24 @@ mod storage {
             format!("ent_{}_", group_id)
         }
 
-        /// Format snapshot metadata key with mode `snap_meta_{group_id}_{replica_id}/`
+        /// Format snapshot metadata key with mode `snap_meta_{group_id}_{replica_id}`
         #[inline]
         fn format_snapshot_metadata_key(group_id: u64, replica_id: u64) -> String {
             format!("{}_{}_{}", LOG_SNAP_META_PREFIX, group_id, replica_id)
         }
 
+        /// Format replica description key with mode `rd_{group_id}_{replica_id}` and
+        /// stored in metadata cf.
         #[inline]
-        fn replica_desc_key(group_id: u64, replica_id: u64) -> String {
+        fn format_replica_desc_key(group_id: u64, replica_id: u64) -> String {
             format!("{}_{}_{}", REPLICA_DESC_PREFIX, group_id, replica_id)
+        }
+
+        /// Format replica description seek specific group by key with mode `rd_{group_id}_` and
+        /// stored in metadata cf.
+        #[inline]
+        fn format_replica_desc_seek_key(group_id: u64) -> String {
+            format!("{}_{}_", REPLICA_DESC_PREFIX, group_id)
         }
     }
 
@@ -359,7 +368,7 @@ mod storage {
             db: &Arc<MDB>,
             rsnap: &SR,
             wsnap: &SW,
-        ) -> Result<Self> {
+        ) -> std::result::Result<Self, RocksdbError> {
             let core = RockStoreCore {
                 node_id,
                 group_id,
@@ -369,14 +378,7 @@ mod storage {
                 wsnap: wsnap.clone(),
             };
 
-            core.set_empty_flag(true).map_err(|err| {
-                core.to_write_err(
-                    err,
-                    false,
-                    false,
-                    "initial_storage: set log empty flag".into(),
-                )
-            })?;
+            core.set_empty_flag(true)?;
 
             let meta_cf = DBEnv::get_metadata_cf(db);
             let mut batch = WriteBatch::default();
@@ -400,14 +402,7 @@ mod storage {
 
             let mut writeopts = WriteOptions::default();
             writeopts.set_sync(true);
-            core.db.write_opt(batch, &writeopts).map_err(|err| {
-                core.to_write_err(
-                    err,
-                    false,
-                    false,
-                    "initial_storage: set initialize default values".into(),
-                )
-            })?;
+            core.db.write_opt(batch, &writeopts)?;
 
             Ok(core)
         }
@@ -812,8 +807,8 @@ mod storage {
             let value = self
                 .db
                 .get_cf_opt(&log_cf, &key, &readopts)
-                .unwrap()
-                .unwrap();
+                .map_err(|err| self.to_read_err(err, true, false, "term".into()))?
+                .expect("unreachable: the entry index valid but can't got entry data");
             let ent = Entry::decode(value.as_ref()).unwrap();
             Ok(ent.term)
         }
@@ -836,8 +831,8 @@ mod storage {
             let value = self
                 .db
                 .get_cf_opt(&log_cf, &key, &readopts)
-                .unwrap()
-                .unwrap();
+                .map_err(|err| self.to_read_err(err, true, false, "first_index".into()))?
+                .expect("unreachable: log empty flag is false, but get first_index data is none");
             let idx = u64::from_be_bytes(value.try_into().unwrap());
             Ok(idx)
         }
@@ -860,8 +855,8 @@ mod storage {
             let value = self
                 .db
                 .get_cf_opt(&log_cf, &key, &readopts)
-                .unwrap()
-                .unwrap();
+                .map_err(|err| self.to_read_err(err, true, false, "last_index".into()))?
+                .expect("unreachable: log empty flag is false, but get last_index data is none");
             let idx = u64::from_be_bytes(value.try_into().unwrap());
             Ok(idx)
         }
@@ -1154,30 +1149,37 @@ mod storage {
             }
         }
 
+        /// Convert rocksdb error to storage error.
+        #[inline]
+        fn to_storage_err(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+            err: RocksdbError,
+            op: String,
+        ) -> Error {
+            Error::from(ErrorHandler {
+                ctx: ErrorContext {
+                    node_id: self.node_id,
+                    group_id,
+                    replica_id,
+                    operation: op,
+                    is_log: false,
+                    is_snap: false,
+                },
+                err,
+            })
+        }
+
         pub(crate) fn create_group_store_if_missing(
             &self,
             group_id: u64,
             replica_id: u64,
-        ) -> Result<RockStoreCore<SR, SW>> {
+        ) -> std::result::Result<RockStoreCore<SR, SW>, RocksdbError> {
             let meta_cf = DBEnv::get_metadata_cf(&self.db);
             let key = self.group_store_key(group_id, replica_id);
             let readopts = ReadOptions::default();
-            match self
-                .db
-                .get_cf_opt(&meta_cf, &key, &readopts)
-                .map_err(|err| {
-                    Error::from(ErrorHandler {
-                        ctx: ErrorContext {
-                            node_id: self.node_id,
-                            group_id,
-                            replica_id,
-                            operation: "create_group_store_if_missing".to_owned(),
-                            is_log: false,
-                            is_snap: false,
-                        },
-                        err,
-                    })
-                })? {
+            match self.db.get_cf_opt(&meta_cf, &key, &readopts)? {
                 Some(_) => {
                     return Ok(RockStoreCore {
                         node_id: self.node_id,
@@ -1201,23 +1203,22 @@ mod storage {
                     writeopts.set_sync(true);
                     // TODO: add added timestamp as data
                     self.db
-                        .put_cf_opt(&meta_cf, key, b"".to_vec(), &writeopts)
-                        .map_err(|err| Error::Other(Box::new(err)))?;
+                        .put_cf_opt(&meta_cf, key, b"".to_vec(), &writeopts)?;
                     Ok(core)
                 }),
             }
         }
 
-        fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<Option<ReplicaDesc>> {
+        fn get_replica_desc(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> std::result::Result<Option<ReplicaDesc>, RocksdbError> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
-            let key = DBEnv::replica_desc_key(group_id, replica_id);
+            let key = DBEnv::format_replica_desc_key(group_id, replica_id);
             let readopts = ReadOptions::default();
 
-            match self
-                .db
-                .get_pinned_cf_opt(&metacf, &key, &readopts)
-                .map_err(|err| Error::Other(Box::new(err)))?
-            {
+            match self.db.get_pinned_cf_opt(&metacf, &key, &readopts)? {
                 Some(data) => {
                     let rd = ReplicaDesc::decode(data.as_ref()).unwrap();
                     Ok(Some(rd))
@@ -1226,25 +1227,61 @@ mod storage {
             }
         }
 
-        fn set_replica_desc(&self, group_id: u64, rd: &ReplicaDesc) -> Result<()> {
+        fn set_replica_desc(
+            &self,
+            group_id: u64,
+            rd: &ReplicaDesc,
+        ) -> std::result::Result<(), RocksdbError> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
-            let key = DBEnv::replica_desc_key(group_id, rd.replica_id);
+            let key = DBEnv::format_replica_desc_key(group_id, rd.replica_id);
             let value = rd.encode_to_vec();
             let writeopts = WriteOptions::default();
             // TODO: with fsync by config
-            self.db
-                .put_cf_opt(&metacf, &key, value, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))
+            self.db.put_cf_opt(&metacf, &key, value, &writeopts)
         }
 
-        fn remove_replica_desc(&self, group_id: u64, replica_id: u64) -> Result<()> {
+        fn remove_replica_desc(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> std::result::Result<(), RocksdbError> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
-            let key = DBEnv::replica_desc_key(group_id, replica_id);
+            let key = DBEnv::format_replica_desc_key(group_id, replica_id);
             let writeopts = WriteOptions::default();
             // TODO: with fsync by config
-            self.db
-                .delete_cf_opt(&metacf, &key, &writeopts)
-                .map_err(|err| Error::Other(Box::new(err)))
+            self.db.delete_cf_opt(&metacf, &key, &writeopts)
+        }
+
+        fn search_replica_desc_on_node(
+            &self,
+            group_id: u64,
+            target_node_id: u64,
+        ) -> std::result::Result<Option<ReplicaDesc>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let seek = DBEnv::format_replica_desc_seek_key(group_id);
+            let iter_mode = IteratorMode::From(seek.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+            for item in iter {
+                let (key, value) = item?;
+
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => return Ok(None), /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&seek) {
+                    true => {
+                        let rd = ReplicaDesc::decode(value.as_ref()).unwrap();
+                        if rd.node_id == target_node_id {
+                            return Ok(Some(rd));
+                        }
+                    }
+                    false => return Ok(None), /* prefix is no longer matched */
+                }
+            }
+
+            return Ok(None);
         }
     }
 
@@ -1258,14 +1295,23 @@ mod storage {
         Self: 'life0;
 
         fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_> {
-            async move { self.create_group_store_if_missing(group_id, replica_id) }
+            async move {
+                self.create_group_store_if_missing(group_id, replica_id)
+                    .map_err(|err| {
+                        self.to_storage_err(group_id, replica_id, err, "group_storage".into())
+                    })
+            }
         }
 
         type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
     where
         Self: 'life0;
         fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
-            async move { self.get_replica_desc(group_id, replica_id) }
+            async move {
+                self.get_replica_desc(group_id, replica_id).map_err(|err| {
+                    self.to_storage_err(group_id, replica_id, err, "get_replica_desc".into())
+                })
+            }
         }
 
         type SetReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
@@ -1276,7 +1322,17 @@ mod storage {
             group_id: u64,
             replica_desc: ReplicaDesc,
         ) -> Self::SetReplicaDescFuture<'_> {
-            async move { self.set_replica_desc(group_id, &replica_desc) }
+            async move {
+                self.set_replica_desc(group_id, &replica_desc)
+                    .map_err(|err| {
+                        self.to_storage_err(
+                            group_id,
+                            replica_desc.replica_id,
+                            err,
+                            "set_replica_desc".into(),
+                        )
+                    })
+            }
         }
 
         type RemoveReplicaDescFuture<'life0> = impl Future<Output = Result<()>> + 'life0
@@ -1287,7 +1343,12 @@ mod storage {
             group_id: u64,
             replica_id: u64,
         ) -> Self::RemoveReplicaDescFuture<'_> {
-            async move { self.remove_replica_desc(group_id, replica_id) }
+            async move {
+                self.remove_replica_desc(group_id, replica_id)
+                    .map_err(|err| {
+                        self.to_storage_err(group_id, replica_id, err, "remove_replica_desc".into())
+                    })
+            }
         }
 
         type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
@@ -1296,23 +1357,15 @@ mod storage {
 
         fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
             async move {
-                let metacf = DBEnv::get_metadata_cf(&self.db);
-                let seek = format!("{}_{}_", REPLICA_DESC_PREFIX, group_id);
-                let iter_mode = IteratorMode::From(seek.as_bytes(), rocksdb::Direction::Forward);
-                let readopts = ReadOptions::default();
-                let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
-                for item in iter {
-                    let (key, value) = item.unwrap();
-                    let key = std::str::from_utf8(&key).unwrap();
-                    if key.starts_with(&seek) {
-                        let rd = ReplicaDesc::decode(value.as_ref()).unwrap();
-                        if rd.node_id == node_id {
-                            return Ok(Some(rd));
-                        }
-                    }
-                }
-
-                return Ok(None);
+                self.search_replica_desc_on_node(group_id, node_id)
+                    .map_err(|err| {
+                        self.to_storage_err(
+                            group_id,
+                            0, /*search replica can't provide replica_id */
+                            err,
+                            "replica_for_node".into(),
+                        )
+                    })
             }
         }
     }
