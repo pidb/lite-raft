@@ -1515,7 +1515,7 @@ where
                     self.active_groups.insert(*group_id);
                 },
 
-                super::storage::Error::Unavailable => {
+                super::storage::Error::LogUnavailable => {
                     // TODO: consider response and panic here.
                 },
                 _ => todo!(),
