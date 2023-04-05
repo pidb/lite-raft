@@ -538,7 +538,7 @@ where
 
         if !self.groups.contains_key(&group_id) {
             // TODO: if group mark deleted, we need return error
-            // we can't create_raft_group on whether it is an initial message or not, 
+            // we can't create_raft_group on whether it is an initial message or not,
             // just like following codes:
             // ```
             // let msg_type = msg.get_msg_type();
@@ -1396,10 +1396,10 @@ where
     }
 
     async fn handle_readys(&mut self) {
-        let drainned = self.active_groups.drain();
         let mut writes = HashMap::new();
         let mut applys = HashMap::new();
-        for group_id in drainned {
+        let ready_groups = self.active_groups.drain().collect::<Vec<u64>>();
+        for group_id in ready_groups {
             if group_id == NO_GORUP {
                 continue;
             }
@@ -1429,7 +1429,6 @@ where
                 )
                 .await;
 
-            // TODO: if an error occurs, we should decide to retry depending on the kind of error.
             let err = match res {
                 Ok((gwr, apply)) => {
                     writes.insert(group_id, gwr);
@@ -1438,6 +1437,26 @@ where
                 }
                 Err(err) => err,
             };
+
+            match err {
+                Error::Storage(storage_err) => match storage_err {
+                    super::storage::Error::StorageTemporarilyUnavailable => {
+                        warn!(
+                            "node {}: group {} storage temporarily unavailable",
+                            self.node_id, group_id
+                        );
+                        self.active_groups.insert(group_id);
+                        continue;
+                    }
+                    _ => {
+                        panic!("node {}: storage unavailable", self.node_id)
+                    }
+                },
+                _ => {
+                    self.active_groups.insert(group_id);
+                    continue;
+                }
+            }
         }
 
         if !applys.is_empty() {
@@ -1456,11 +1475,24 @@ where
             let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
                 Err(err) => {
-                    error!(
-                        "node {}: handle group-{} write ready, but got group storage error {}",
-                        self.node_id, group_id, err
-                    );
-                    continue;
+                    match err {
+                        super::storage::Error::StorageTemporarilyUnavailable => {
+                            warn!("node {}: group {} handle_write but storage temporarily unavailable ", self.node_id, group_id);
+
+                            self.active_groups.insert(*group_id);
+                            continue;
+                        }
+                        super::storage::Error::StorageUnavailable => {
+                            panic!("node {}: storage unavailable", self.node_id)
+                        }
+                        _ => {
+                            warn!(
+                                "node {}: get raft storage for group {} to handle_writes error: {}",
+                                self.node_id, *group_id, err
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
 
@@ -1508,18 +1540,29 @@ where
                 // if it is, temporary storage unavailability causes write log entries and
                 // status failure, this is a recoverable failure, we will consider retrying
                 // later.
-                super::storage::Error::LogTemporarilyUnavailable => {
+                super::storage::Error::LogTemporarilyUnavailable
+                | super::storage::Error::SnapshotTemporarilyUnavailable
+                | super::storage::Error::StorageTemporarilyUnavailable => {
                     self.active_groups.insert(*group_id);
+                    continue;
                 }
 
-                super::storage::Error::SnapshotTemporarilyUnavailable => {
-                    self.active_groups.insert(*group_id);
-                }
+                super::storage::Error::LogUnavailable
+                | super::storage::Error::SnapshotUnavailable => {
+                    panic!(
+                        "node {}: group {} storage unavailable",
+                        self.node_id, *group_id
+                    );
 
-                super::storage::Error::LogUnavailable => {
                     // TODO: consider response and panic here.
                 }
-                _ => todo!(),
+                _ => {
+                    warn!(
+                        "node {}: group {} raft storage to handle_write got error: {}",
+                        self.node_id, *group_id, write_err
+                    );
+                    continue;
+                }
             }
         }
 

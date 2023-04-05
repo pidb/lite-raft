@@ -385,7 +385,7 @@ impl MemStorage {
 impl RaftStorageReader for MemStorage {
     /// Implements the Storage trait.
     fn initial_state(&self) -> RaftResult<RaftState> {
-        let core = self.rl(); 
+        let core = self.rl();
         if core.trigger_log_read_slow.enable {
             sleep(core.trigger_log_read_slow.block);
         }
@@ -453,7 +453,7 @@ impl RaftStorageReader for MemStorage {
             return Err(RaftError::Store(StorageError::Unavailable));
         }
 
-        let core = self.rl(); 
+        let core = self.rl();
         if core.trigger_log_read_slow.enable {
             sleep(core.trigger_log_read_slow.block);
         }
@@ -545,6 +545,7 @@ impl RaftStorage for MemStorage {
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
     node_id: u64,
+    trigger_storage_temp_unavailable: Arc<AsyncRwLock<bool>>,
     groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
     replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaDesc>>>>,
 }
@@ -553,9 +554,16 @@ impl MultiRaftMemoryStorage {
     pub fn new(node_id: u64) -> Self {
         Self {
             node_id,
+            trigger_storage_temp_unavailable: Default::default(),
             groups: Default::default(),
             replicas: Default::default(),
         }
+    }
+
+    /// Trigger storage temporarily unavailable if enable is true.
+    pub async fn trigger_storage_temp_unavailable(&self, enable: bool) {
+        let mut wl = self.trigger_storage_temp_unavailable.write().await;
+        *wl = enable;
     }
 }
 
@@ -566,6 +574,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
     #[allow(unused)]
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_> {
         async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
             let mut wl = self.groups.write().await;
             match wl.get_mut(&group_id) {
                 None => {
@@ -583,6 +597,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         Self: 'life0;
     fn get_replica_desc(&self, group_id: u64, replica_id: u64) -> Self::ReplicaDescFuture<'_> {
         async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
             let rl = self.replicas.read().await;
             return match rl.get(&group_id) {
                 Some(replicas) => {
@@ -605,6 +625,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         replica_desc: ReplicaDesc,
     ) -> Self::SetReplicaDescFuture<'_> {
         async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
             let mut wl = self.replicas.write().await;
             return match wl.get_mut(&group_id) {
                 Some(replicas) => {
@@ -632,6 +658,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         replica_id: u64,
     ) -> Self::RemoveReplicaDescFuture<'_> {
         async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
             let mut wl = self.replicas.write().await;
             return match wl.get_mut(&group_id) {
                 Some(replicas) => {
@@ -653,6 +685,12 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
 
     fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
         async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
             let rl = self.replicas.read().await;
             return match rl.get(&group_id) {
                 Some(replicas) => {
@@ -667,15 +705,14 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
     }
 }
 
-
 #[cfg(test)]
 mod test {
     use std::panic::{self, AssertUnwindSafe};
 
     use protobuf::Message as PbMessage;
     use raft::Error as RaftError;
-    use raft::StorageError;
     use raft::Storage;
+    use raft::StorageError;
 
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
