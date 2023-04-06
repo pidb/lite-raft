@@ -678,7 +678,9 @@ where
         if apply_state.applied_index != 0 && apply.entries[0].index != apply_state.applied_index + 1
         {
             panic!(
-                "apply entries index does not match, expect {}, but got {}",
+                "node {}: group {} apply entries index does not match, expect {}, but got {}",
+                self.node_id,
+                group_id,
                 apply_state.applied_index + 1,
                 apply.entries[0].index
             );
@@ -710,9 +712,11 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
+        let last_applied_index = applys.last().unwrap().get_index();
+        let last_applied_term = applys.last().unwrap().get_term();
         ctx.rsm.apply(group_id, shared_state, applys).await;
-        apply_state.applied_index = apply.commit_index;
-        apply_state.applied_term = apply.commit_term;
+        apply_state.applied_index = last_applied_index;
+        apply_state.applied_term = last_applied_term;
         // (apply_state.applied_index, apply_state.applied_term) =
         //     iter.next()
         //         .map_or((apply.commit_index, apply.commit_term), |next| {

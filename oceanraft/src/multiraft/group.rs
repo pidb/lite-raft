@@ -152,8 +152,6 @@ where
         event_bcast: &mut EventChannel,
     ) -> Result<(RaftGroupWriteRequest, Option<ApplyData<RES>>), Error> {
         let group_id = self.group_id;
-        let mut rd = self.raft_group.ready();
-
         // we need to know which replica in raft group is ready.
         let replica_desc = replica_cache.replica_for_node(group_id, node_id).await?;
         let replica_desc = match replica_desc {
@@ -182,6 +180,10 @@ where
         let gs = storage
             .group_storage(group_id, replica_desc.replica_id)
             .await?;
+
+        // TODO: move brefore codes to node.rs, because theses codes maybe trigger storage error and the ready  is impacted.
+
+        let mut rd = self.raft_group.ready();
 
         // send out messages
         if !rd.messages().is_empty() {
@@ -469,6 +471,7 @@ where
         }
 
         let mut light_ready = self.raft_group.advance_append(ready);
+        
         if let Some(commit) = light_ready.commit_index() {
             debug!("node {}: set commit = {}", node_id, commit);
             self.commit_index = commit;

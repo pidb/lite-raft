@@ -42,6 +42,7 @@ pub enum Error {
     /// The snapshot is being created.
     #[error("snapshot is temporarily unavailable")]
     SnapshotTemporarilyUnavailable,
+
     /// Some other error occurred.
     #[error("unknown error {0}")]
     Other(#[from] Box<dyn std::error::Error + Sync + Send>),

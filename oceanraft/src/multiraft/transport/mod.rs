@@ -66,6 +66,7 @@ pub async fn send_messages<TR, RS, MRS>(
             }
             _ => false,
         };
+        trace!("skip = {}, msg = {:?}", skip, msg.msg_type());
 
         if !skip {
             send_message(

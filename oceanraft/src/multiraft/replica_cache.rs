@@ -3,7 +3,7 @@ use std::marker::PhantomData;
 
 use crate::prelude::ReplicaDesc;
 
-use super::error::Error;
+use super::storage::Error;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 
@@ -16,7 +16,6 @@ where
     MRS: MultiRaftStorage<RS>,
 {
     storage: MRS,
-    // pub groups: HashMap<u64, RaftGroupDesc>,
     cache: HashMap<u64, Vec<ReplicaDesc>>,
     _m: PhantomData<RS>,
 }

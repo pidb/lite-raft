@@ -35,10 +35,10 @@ pub enum RaftGroupError {
 
     // #[error("bootstrap group ({0}) error, the voters of initial_state is empty in store ({1})")]
     // BootstrapError(u64, u64),
-    #[error("raft group not exist, node_id = {1}, group_d = {1}")]
+    #[error("raft group not exist, node_id = {1}, group_id = {1}")]
     NotExist(u64, u64),
 
-    #[error("raft group deleted, node_id = {1}, group_d = {1}")]
+    #[error("raft group deleted, node_id = {1}, group_id = {1}")]
     Deleted(u64, u64),
 
     #[error("the raft group ({1}) already exists in node ({0}")]

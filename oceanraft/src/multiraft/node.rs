@@ -421,7 +421,7 @@ where
                     ticks += 1;
                     if ticks >= self.cfg.heartbeat_tick {
                         ticks = 0;
-                        self.incorporate_heatbeats();
+                        self.merge_heartbeats();
                     }
                 },
 
@@ -458,7 +458,7 @@ where
 
     /// The node sends heartbeats to other nodes instead
     /// of all raft groups on that node.
-    fn incorporate_heatbeats(&self) {
+    fn merge_heartbeats(&self) {
         for (to_node, _) in self.node_manager.iter() {
             if *to_node == self.node_id {
                 continue;
@@ -524,7 +524,6 @@ where
             .expect("invalid message, raft Message should not be none.");
         let group_id = msg.group_id;
 
-        // processing messages between replicas from other nodes to self node.
         let from_replica = ReplicaDesc {
             group_id,
             node_id: msg.from_node,
@@ -537,6 +536,31 @@ where
             replica_id: raft_msg.to,
         };
 
+        if !self.groups.contains_key(&group_id) {
+            // TODO: if group mark deleted, we need return error
+            // we can't create_raft_group on whether it is an initial message or not,
+            // just like following codes:
+            // ```
+            // let msg_type = msg.get_msg_type();
+            // msg_type == MessageType::MsgRequestVote
+            // || msg_type == MessageType::MsgRequestPreVote
+            // || (msg_type == MessageType::MsgHeartbeat && msg.commit == 0)
+            // ```
+            // because the heartbeats msg always hajacked and fanouted, so the msg.commit
+            // always meanless.
+            let _ = self
+                .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
+                .await
+                .map_err(|err| {
+                    error!(
+                        "node {}: create group for replica {} error {}",
+                        self.node_id, to_replica.replica_id, err
+                    );
+                    err
+                })?;
+        }
+
+        // processing messages between replicas from other nodes to self node.
         trace!(
             "node {}: recv msg {:?} from {}: group = {}, from_replica = {}, to_replica = {}",
             self.node_id,
@@ -562,40 +586,17 @@ where
         }
 
         // if a group exists, try to maintain groups on the node
-        if self.groups.contains_key(&group_id)
-            && !self.node_manager.contains_node(&to_replica.node_id)
-        {
-            self.node_manager.add_group(to_replica.node_id, group_id);
-        }
+        // if self.groups.contains_key(&group_id)
+        //     && !self.node_manager.contains_node(&to_replica.node_id)
+        // {
+        //     self.node_manager.add_group(to_replica.node_id, group_id);
+        // }
 
-        let group = match self.groups.get_mut(&group_id) {
-            Some(group) => group,
-            None => {
-                info!(
-                    "node {}: got message for unknow group {}; creating replica {}",
-                    self.node_id, group_id, to_replica.replica_id
-                );
-                // if we receive initialization messages from a raft replica
-                // on another node, this means that a member change has occurred
-                // and we should create a new raft replica.
-                // Note. MsgHeartbeat && commit = 0 is not initial message because we
-                // hijacked in fanout_heartbeat.
-                let _ = self
-                    .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
-                    .await
-                    .map_err(|err| {
-                        error!(
-                            "node {}: create group for replica {} error {}",
-                            self.node_id, to_replica.replica_id, err
-                        );
-                        err
-                    })?;
+        let group = self
+            .groups
+            .get_mut(&group_id)
+            .expect("unreachable: group always initialize or return error in the previouse code");
 
-                self.groups.get_mut(&group_id).expect("unreachable")
-            }
-        };
-
-        // FIX: t30_membership single_step
         if let Err(err) = group.raft_group.step(raft_msg) {
             warn!("node {}: step raf message error: {}", self.node_id, err);
         }
@@ -1395,10 +1396,10 @@ where
     }
 
     async fn handle_readys(&mut self) {
-        let drainned = self.active_groups.drain();
         let mut writes = HashMap::new();
         let mut applys = HashMap::new();
-        for group_id in drainned {
+        let ready_groups = self.active_groups.drain().collect::<Vec<u64>>();
+        for group_id in ready_groups {
             if group_id == NO_GORUP {
                 continue;
             }
@@ -1428,7 +1429,6 @@ where
                 )
                 .await;
 
-            // TODO: if an error occurs, we should decide to retry depending on the kind of error.
             let err = match res {
                 Ok((gwr, apply)) => {
                     writes.insert(group_id, gwr);
@@ -1437,6 +1437,26 @@ where
                 }
                 Err(err) => err,
             };
+
+            match err {
+                Error::Storage(storage_err) => match storage_err {
+                    super::storage::Error::StorageTemporarilyUnavailable => {
+                        warn!(
+                            "node {}: group {} storage temporarily unavailable",
+                            self.node_id, group_id
+                        );
+                        self.active_groups.insert(group_id);
+                        continue;
+                    }
+                    _ => {
+                        panic!("node {}: storage unavailable", self.node_id)
+                    }
+                },
+                _ => {
+                    self.active_groups.insert(group_id);
+                    continue;
+                }
+            }
         }
 
         if !applys.is_empty() {
@@ -1455,11 +1475,24 @@ where
             let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
                 Ok(gs) => gs,
                 Err(err) => {
-                    error!(
-                        "node {}: handle group-{} write ready, but got group storage error {}",
-                        self.node_id, group_id, err
-                    );
-                    continue;
+                    match err {
+                        super::storage::Error::StorageTemporarilyUnavailable => {
+                            warn!("node {}: group {} handle_write but storage temporarily unavailable ", self.node_id, group_id);
+
+                            self.active_groups.insert(*group_id);
+                            continue;
+                        }
+                        super::storage::Error::StorageUnavailable => {
+                            panic!("node {}: storage unavailable", self.node_id)
+                        }
+                        _ => {
+                            warn!(
+                                "node {}: get raft storage for group {} to handle_writes error: {}",
+                                self.node_id, *group_id, err
+                            );
+                            continue;
+                        }
+                    }
                 }
             };
 
@@ -1505,20 +1538,31 @@ where
 
             match write_err {
                 // if it is, temporary storage unavailability causes write log entries and
-                // status failure, this is a recoverable failure, we will consider retrying 
+                // status failure, this is a recoverable failure, we will consider retrying
                 // later.
-                super::storage::Error::LogTemporarilyUnavailable => {
+                super::storage::Error::LogTemporarilyUnavailable
+                | super::storage::Error::SnapshotTemporarilyUnavailable
+                | super::storage::Error::StorageTemporarilyUnavailable => {
                     self.active_groups.insert(*group_id);
-                },
+                    continue;
+                }
 
-                super::storage::Error::SnapshotTemporarilyUnavailable => {
-                    self.active_groups.insert(*group_id);
-                },
+                super::storage::Error::LogUnavailable
+                | super::storage::Error::SnapshotUnavailable => {
+                    panic!(
+                        "node {}: group {} storage unavailable",
+                        self.node_id, *group_id
+                    );
 
-                super::storage::Error::LogUnavailable => {
                     // TODO: consider response and panic here.
-                },
-                _ => todo!(),
+                }
+                _ => {
+                    warn!(
+                        "node {}: group {} raft storage to handle_write got error: {}",
+                        self.node_id, *group_id, write_err
+                    );
+                    continue;
+                }
             }
         }
 
