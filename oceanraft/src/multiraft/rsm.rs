@@ -61,7 +61,7 @@ where
     W: WriteData,
     R: WriteResponse,
 {
-    pub(crate) fn get_index(&self) -> u64 {
+    pub fn get_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.index,
             Self::Normal(normal) => normal.index,
@@ -70,7 +70,7 @@ where
     }
 
     #[allow(unused)]
-    pub(crate) fn get_term(&self) -> u64 {
+    pub fn get_term(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.term,
             Self::Normal(normal) => normal.term,
@@ -79,7 +79,7 @@ where
     }
 
     #[allow(unused)]
-    pub(crate) fn get_data(&self) -> W {
+    pub fn get_data(&self) -> W {
         match self {
             Self::NoOp(noop) => W::default(),
             Self::Normal(normal) => normal.data.clone(),
@@ -88,12 +88,33 @@ where
     }
 }
 
+#[derive(Debug, Default)]
+pub struct ApplyResult<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    /// The index of successful apply entries applied by the state machine,
+    /// which should be set to 0 if no successful apply entries were applied.
+    pub index: u64,
+
+    /// The index entry corresponding term. which should be set to 0 if no
+    /// successful apply entries were applied.
+    pub term: u64,
+
+    /// If apply fails, unapplied indicates the entry after the successful entries.
+    pub unapplied: Option<Vec<Apply<W, R>>>,
+
+    /// If apply fails, reason returns a specific error message.
+    pub reason: Option<String>,
+}
+
 pub trait StateMachine<W, R>: Send + Sync + 'static
 where
     W: WriteData,
     R: WriteResponse,
 {
-    type ApplyFuture<'life0>: Send + Future<Output = ()> + 'life0
+    type ApplyFuture<'life0>: Send + Future<Output = ApplyResult<W, R>> + 'life0
     where
         Self: 'life0;
 

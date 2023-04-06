@@ -712,22 +712,21 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        let last_applied_index = applys.last().unwrap().get_index();
-        let last_applied_term = applys.last().unwrap().get_term();
-        ctx.rsm.apply(group_id, shared_state, applys).await;
-        apply_state.applied_index = last_applied_index;
-        apply_state.applied_term = last_applied_term;
-        // (apply_state.applied_index, apply_state.applied_term) =
-        //     iter.next()
-        //         .map_or((apply.commit_index, apply.commit_term), |next| {
-        //             let index = next.get_index();
-        //             assert_ne!(index, 0);
-        //             if index == 1 {
-        //                 (0, 0)
-        //             } else {
-        //                 (index - 1, 0 /* TODO: load term from stored entries*/)
-        //             }
-        //         });
+        let apply_result = ctx.rsm.apply(group_id, shared_state, applys).await;
+        if apply_result.index != 0 {
+            apply_state.applied_index = apply_result.index;
+        }
+
+        if apply_result.term != 0 {
+            apply_state.applied_index = apply_result.index;
+        }
+
+        if let Some(_unapplied) = apply_result.unapplied {
+            // TODO: handle this case
+            if let Some(_reason) = apply_result.reason {
+                // TODO: output reason
+            }
+        }
     }
 
     async fn handle_applys(
@@ -827,19 +826,20 @@ mod test {
     use crate::multiraft::state::GroupState;
     use crate::multiraft::state::GroupStates;
     use crate::multiraft::util::compute_entry_size;
+    use crate::multiraft::ApplyResult;
     use crate::multiraft::Config;
-    // use crate::multiraft::MultiStateMachine;
     use crate::multiraft::StateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
 
+    use super::Apply;
     use super::ApplyData;
     use super::ApplyMessage;
     use super::ApplyWorker;
 
     struct NoOpStateMachine {}
     impl StateMachine<(), ()> for NoOpStateMachine {
-        type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
+        type ApplyFuture<'life0> = impl Future<Output = ApplyResult<(), ()>> + 'life0
         where
             Self: 'life0;
         fn apply(
@@ -848,7 +848,7 @@ mod test {
             _: &GroupState,
             _: Vec<crate::multiraft::Apply<(), ()>>,
         ) -> Self::ApplyFuture<'_> {
-            async move {}
+            async move { ApplyResult::default() }
         }
     }
 

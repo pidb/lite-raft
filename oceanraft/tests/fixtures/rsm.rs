@@ -1,13 +1,12 @@
 use futures::Future;
-use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
+use oceanraft::multiraft::ApplyResult;
 use oceanraft::multiraft::GroupState;
 use oceanraft::multiraft::StateMachine;
 use oceanraft::multiraft::WriteData;
 use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
-use tracing::info;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Clone)]
@@ -24,7 +23,7 @@ where
     W: WriteData,
     R: WriteResponse,
 {
-    type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
+    type ApplyFuture<'life0> = impl Future<Output = ApplyResult<W, R>> + 'life0
         where
             Self: 'life0;
     fn apply<'life0>(
@@ -46,7 +45,15 @@ where
                 }
             }
 
+            let res = ApplyResult {
+                index: applys.last().unwrap().get_index(),
+                term: applys.last().unwrap().get_term(),
+                unapplied: None,
+                reason: None,
+            };
+
             tx.send(applys).await;
+            res
         }
     }
 }
@@ -83,7 +90,7 @@ impl<R> StateMachine<StoreData, R> for RockStoreStateMachine<R>
 where
     R: WriteResponse,
 {
-    type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
+    type ApplyFuture<'life0> = impl Future<Output = ApplyResult<StoreData, R>> + 'life0
     where
         Self: 'life0;
     fn apply<'life0>(
@@ -129,7 +136,15 @@ where
                 }
             }
 
+            let res = ApplyResult {
+                index: applys.last().unwrap().get_index(),
+                term: applys.last().unwrap().get_term(),
+                unapplied: None,
+                reason: None,
+            };
+
             if let Err(_) = tx.send(applys).await {}
+            res
         }
     }
 }
