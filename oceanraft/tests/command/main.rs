@@ -8,3 +8,4 @@ mod t20_basic_write;
 mod t30_stale_write;
 mod t40_read_index;
 mod t50_storage_failure;
+mod t60_apply_failure;

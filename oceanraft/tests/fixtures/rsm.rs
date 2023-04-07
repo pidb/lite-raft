@@ -1,13 +1,20 @@
+use std::sync::Arc;
+
 use futures::Future;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
+use oceanraft::multiraft::ApplyMembership;
+use oceanraft::multiraft::ApplyNoOp;
+use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::ApplyResult;
 use oceanraft::multiraft::GroupState;
 use oceanraft::multiraft::StateMachine;
 use oceanraft::multiraft::WriteData;
 use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
+use slog::info;
 use tokio::sync::mpsc::Sender;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct MemStoreStateMachine<W, R>
@@ -15,7 +22,26 @@ where
     W: WriteData,
     R: WriteResponse,
 {
+    trigger_apply_error: Arc<RwLock<(bool, u64)>>,
     tx: Sender<Vec<Apply<W, R>>>,
+}
+
+impl<W, R> MemStoreStateMachine<W, R>
+where
+    W: WriteData,
+    R: WriteResponse,
+{
+    pub fn new(tx: Sender<Vec<Apply<W, R>>>) -> Self {
+        Self {
+            tx,
+            trigger_apply_error: Default::default(),
+        }
+    }
+
+    pub async fn trigger_apply_error(&self, enable: bool, which: u64) {
+        let mut wl = self.trigger_apply_error.write().await;
+        *wl = (enable, which)
+    }
 }
 
 impl<W, R> StateMachine<W, R> for MemStoreStateMachine<W, R>
@@ -33,38 +59,95 @@ where
         mut applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'life0> {
         let tx = self.tx.clone();
+
+        let mut send_applys = vec![];
         async move {
-            for apply in applys.iter_mut() {
+            let lock = self.trigger_apply_error.read().await;
+            if lock.0 && lock.1 == 0 {
+                return ApplyResult {
+                    index: 0,
+                    term: 0,
+                    unapplied: Some(applys),
+                    reason: None,
+                };
+            }
+
+            if let Some(apply) = applys.first() {
+                if lock.0 && apply.get_index() == lock.1 {
+                    return ApplyResult {
+                        index: 0,
+                        term: 0,
+                        unapplied: Some(applys),
+                        reason: None,
+                    };
+                }
+            }
+            drop(lock);
+
+            let mut applied_index = 0;
+            let mut applied_term = 0;
+
+            while let Some(apply) = applys.pop() {
+                let lock = self.trigger_apply_error.read().await;
+                if lock.0 && apply.get_index() == lock.1 {
+                    tracing::info!("trigger errored at apply {}", apply.get_index());
+                    drop(lock);
+                    break;
+                }
+                drop(lock);
+
+                applied_index = apply.get_index();
+                applied_term = apply.get_term();
                 match apply {
-                    Apply::NoOp(noop) => {}
-                    Apply::Normal(normal) => {}
-                    Apply::Membership(membership) => {
+                    Apply::NoOp(noop) => {
+                        send_applys.push(Apply::NoOp(ApplyNoOp {
+                            group_id: noop.group_id,
+                            index: noop.index,
+                            term: noop.term,
+                        }));
+                    }
+                    Apply::Normal(mut normal) => {
+                        send_applys.push(Apply::Normal(ApplyNormal {
+                            group_id: normal.group_id,
+                            index: normal.index,
+                            term: normal.term,
+                            data: normal.data,
+                            context: normal.context.take(),
+                            is_conf_change: normal.is_conf_change,
+                            tx: normal.tx.take(),
+                        }));
+                    }
+                    Apply::Membership(mut membership) => {
                         // TODO: if group is leader, we need save conf state to kv store.
                         membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        send_applys.push(Apply::Membership(ApplyMembership {
+                            group_id: membership.group_id,
+                            index: membership.index,
+                            term: membership.term,
+                            change_data: membership.change_data,
+                            conf_state: membership.conf_state,
+                            tx: None,
+                        }));
                     }
                 }
             }
 
+            tracing::info!("return apply index = {}", applied_index);
             let res = ApplyResult {
-                index: applys.last().unwrap().get_index(),
-                term: applys.last().unwrap().get_term(),
-                unapplied: None,
+                index: applied_index,
+                term: applied_term,
+                unapplied: if applys.is_empty() {
+                    None
+                } else {
+                    Some(applys)
+                },
                 reason: None,
             };
 
-            tx.send(applys).await;
+            tx.send(send_applys).await;
+
             res
         }
-    }
-}
-
-impl<W, R> MemStoreStateMachine<W, R>
-where
-    W: WriteData,
-    R: WriteResponse,
-{
-    pub fn new(tx: Sender<Vec<Apply<W, R>>>) -> Self {
-        Self { tx }
     }
 }
 

@@ -722,6 +722,10 @@ where
         }
 
         if let Some(_unapplied) = apply_result.unapplied {
+            warn!(
+                "node {}: group {} has unapplied, applied index = {}, term = {}",
+                self.node_id, group_id, apply_result.index, apply_result.term
+            );
             // TODO: handle this case
             if let Some(_reason) = apply_result.reason {
                 // TODO: output reason
