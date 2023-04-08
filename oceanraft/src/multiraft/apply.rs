@@ -6,15 +6,12 @@ use prost::Message;
 use raft::prelude::ConfState;
 use raft::prelude::Entry;
 use raft_proto::ConfChangeI;
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 use tracing::error;
 use tracing::info;
 use tracing::trace;
-use tracing::warn;
-use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::util::flexbuffer_deserialize;
@@ -51,7 +48,7 @@ struct LocalApplyState {
     applied_index: u64,
 }
 
-pub struct ApplyActor {}
+pub struct ApplyActor;
 
 impl ApplyActor {
     pub(crate) fn spawn<W, R, RSM>(
@@ -88,8 +85,6 @@ where
     cfg: Config,
     rx: UnboundedReceiver<(tracing::span::Span, ApplyMessage<R>)>,
     tx: UnboundedSender<ApplyResultMessage>,
-    pending_applys: HashMap<u64, Vec<ApplyData<R>>>,
-    ctx: ApplyContext<W, R, RSM>,
     delegate: ApplyDelegate<W, R, RSM>,
     local_apply_states: HashMap<u64, LocalApplyState>,
     shared_states: GroupStates,
@@ -101,38 +96,16 @@ where
     R: WriteResponse,
     RSM: StateMachine<W, R>,
 {
-    fn new(
-        cfg: &Config,
-        rsm: RSM,
-        shared_states: GroupStates,
-        request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
-        response_tx: UnboundedSender<ApplyResultMessage>,
-        commit_tx: UnboundedSender<ApplyCommitMessage>,
-    ) -> Self {
-        Self {
-            local_apply_states: HashMap::default(),
-            node_id: cfg.node_id,
-            cfg: cfg.clone(),
-            rx: request_rx,
-            tx: response_tx,
-            shared_states,
-            pending_applys: HashMap::new(),
-            delegate: ApplyDelegate::new(cfg.node_id),
-            ctx: ApplyContext {
-                rsm,
-                commit_tx,
-                _m1: PhantomData,
-                _m2: PhantomData,
-            },
-        }
-    }
-
     #[inline]
-    fn insert_pending_apply(&mut self, group_id: u64, apply: ApplyData<R>) {
-        match self.pending_applys.get_mut(&group_id) {
+    fn insert_pending_apply(
+        applys: &mut HashMap<u64, Vec<ApplyData<R>>>,
+        group_id: u64,
+        apply: ApplyData<R>,
+    ) {
+        match applys.get_mut(&group_id) {
             Some(applys) => applys.push(apply),
             None => {
-                self.pending_applys.insert(group_id, vec![apply]);
+                applys.insert(group_id, vec![apply]);
             }
         };
     }
@@ -142,32 +115,30 @@ where
     // otherwise pending in FIFO order.
     //
     // Note: This method provides scalability for us to make more flexible apply decisions in the future.
-    fn batch_requests(&mut self, requests: Vec<ApplyMessage<R>>) {
-        // let mut pending_applys: HashMap<u64, Vec<Apply>> = HashMap::new();
+    fn batch_msgs(
+        &mut self,
+        msgs: std::vec::Drain<'_, ApplyMessage<R>>,
+    ) -> HashMap<u64, Vec<ApplyData<R>>> {
+        let mut pending_applys = HashMap::<u64, Vec<ApplyData<R>>>::new();
         let mut batch_applys: HashMap<u64, Option<ApplyData<R>>> = HashMap::new();
 
-        // let mut batcher = Batcher::new(self.cfg.batch_apply, self.cfg.batch_size);
-        for request in requests {
-            match request {
+        for msg in msgs {
+            match msg {
                 ApplyMessage::Apply { applys } => {
                     for (group_id, mut apply) in applys.into_iter() {
                         if !self.cfg.batch_apply {
-                            self.insert_pending_apply(group_id, apply);
+                            Self::insert_pending_apply(&mut pending_applys, group_id, apply);
                         } else {
-                            // 如果可以 batch, 则新的 apply 和之前的 apply batch. 如果不存在之前
-                            // 的 batch apply, 则用当前的 apply 设置.
-                            // 如果不能 batch, 则之前的 batch_apply 拿到 pending applys 对应的组里面, 当前的 apply 设置为
-                            // batch_apply 继续尝试 batch.
                             match batch_applys.get_mut(&group_id) {
                                 Some(batch_apply) => {
-                                    // FIXME: use take instead of as_mut
                                     if let Some(batch) = batch_apply.as_mut() {
                                         if batch.try_batch(&mut apply, self.cfg.batch_size) {
                                             continue;
                                         } else {
-                                            self.insert_pending_apply(
+                                            Self::insert_pending_apply(
+                                                &mut pending_applys,
                                                 group_id,
-                                                batch_apply.take().unwrap(),
+                                                batch_apply.take().expect("unreachable"),
                                             );
                                         }
                                     }
@@ -183,15 +154,18 @@ where
             }
         }
 
-        for (group_id, mut batch_apply) in batch_applys.into_iter() {
-            batch_apply
-                .take()
-                .map(|batch_apply| self.insert_pending_apply(group_id, batch_apply));
+        for (group_id, batch_apply) in batch_applys {
+            if let Some(batch_apply) = batch_apply {
+                Self::insert_pending_apply(&mut pending_applys, group_id, batch_apply);
+            }
         }
+
+        pending_applys
     }
 
-    async fn delegate_handle_applys(&mut self) {
-        for (group_id, applys) in self.pending_applys.drain() {
+    async fn handle_msgs(&mut self, msgs: std::vec::Drain<'_, ApplyMessage<R>>) {
+        let pending_applys = self.batch_msgs(msgs);
+        for (group_id, applys) in pending_applys {
             // FIXME: don't unwrap.
             let shared_state = self.shared_states.get(group_id).unwrap();
             let apply_state = self
@@ -202,96 +176,68 @@ where
                     applied_term: shared_state.get_applied_term(),
                 });
 
-            let response = self
+            let _ = self
                 .delegate
-                .handle_applys(
-                    group_id,
-                    applys,
-                    apply_state,
-                    shared_state.as_ref(),
-                    &self.ctx,
-                )
-                .await
-                .unwrap();
-            // TODO: batch send?
-            // FIXME: handle error
-            if let Err(_) = self.tx.send(response) {
+                .handle_applys(group_id, applys, apply_state, shared_state.as_ref())
+                .await;
+
+            let res = ApplyResultMessage {
+                group_id,
+                applied_index: apply_state.applied_index,
+                applied_term: apply_state.applied_term,
+            };
+
+            if let Err(_) = self.tx.send(res) {
                 error!(
                     "node {}: send response failed, the node actor dropped",
                     self.node_id
                 );
             }
-            // futs.push(tokio::spawn(async move {
-            //     // TODO: new delegate
-            //     // let mut response = Response {
-            //     //     group_id,
-            //     //     apply_results: Vec::new(),
-            //     //     apply_state: RaftGroupApplyState::default(),
-            //     // };
-            //     delegate.handle_applys(group_id, applys).await.unwrap()
-            //     // response.apply_results.push(apply_result);
-            //     // response.apply_state = delegate.apply_state.clone();
-            //     // response
-            // }));
         }
-
-        // for fut in futs {
-        //     let response = fut.await.unwrap();
-        //     self.multi_groups_apply_state
-        //         .insert(response.group_id, response.apply_state.clone());
-        //     self.tx.send(response).unwrap();
-        // }
     }
 
     async fn main_loop(mut self, mut stopper: Stopper) {
         info!("node {}: start apply main_loop", self.node_id);
+        let mut pending_msgs = Vec::with_capacity(self.cfg.max_batch_apply_msgs);
 
-        let request_limit = 100; // FIXME: as cfg
         loop {
             tokio::select! {
                 _ = &mut stopper => {
-                    self.do_stop();
+                    // self.do_stop();
                     break
                 },
                 // TODO: handle if the node actor stopped
-                Some((_span, incoming_request)) = self.rx.recv() =>  {
-                    let mut requests = vec![];
-                    requests.push(incoming_request);
-                    // try to receive more requests until channel buffer
-                    // empty or reach limit.
-                    loop {
-                        // TODO: try stop
-                        // TODO: better limit by compute  entries size
-                        if requests.len() >= request_limit {
-                            break;
-                        }
-
-                        let request = match self.rx.try_recv() {
-                            Ok((_, request)) => request,
-                            Err(TryRecvError::Empty) => break,
-                            Err(TryRecvError::Disconnected) => {
-                                self.do_stop();
-                                return;
-                            }
-                        };
-
-                        requests.push(request);
+                Some((_span, msg)) = self.rx.recv() =>  {
+                    if pending_msgs.len() < self.cfg.max_batch_apply_msgs {
+                        pending_msgs.push(msg);
                     }
-
-                    self.batch_requests(requests);
-                    self.delegate_handle_applys().await;
                 },
+                else => {}
+            }
+
+            if pending_msgs.len() == self.cfg.max_batch_apply_msgs {
+                self.handle_msgs(pending_msgs.drain(..)).await;
             }
         }
     }
 
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "ApplyActorRuntime::do_stop", 
-        skip_all
-    )]
-    fn do_stop(self) {
-        info!("node {}: apply actor stopped now", self.node_id);
+    fn new(
+        cfg: &Config,
+        rsm: RSM,
+        shared_states: GroupStates,
+        request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
+        response_tx: UnboundedSender<ApplyResultMessage>,
+        commit_tx: UnboundedSender<ApplyCommitMessage>,
+    ) -> Self {
+        Self {
+            local_apply_states: HashMap::default(),
+            node_id: cfg.node_id,
+            cfg: cfg.clone(),
+            rx: request_rx,
+            tx: response_tx,
+            shared_states,
+            delegate: ApplyDelegate::new(cfg.node_id, rsm, commit_tx),
+        }
     }
 }
 
@@ -381,18 +327,6 @@ where
     }
 }
 
-struct ApplyContext<W, R, RSM>
-where
-    W: WriteData,
-    R: WriteResponse,
-    RSM: StateMachine<W, R>,
-{
-    rsm: RSM,
-    commit_tx: UnboundedSender<ApplyCommitMessage>,
-    _m1: PhantomData<W>,
-    _m2: PhantomData<R>,
-}
-
 pub struct ApplyDelegate<W, R, RSM>
 where
     W: WriteData,
@@ -401,9 +335,10 @@ where
 {
     node_id: u64,
     pending_senders: PendingSenderQueue<R>,
-    _m1: PhantomData<RSM>,
-    _m2: PhantomData<W>,
-    _m3: PhantomData<R>,
+    rsm: RSM,
+    commit_tx: UnboundedSender<ApplyCommitMessage>,
+    _m1: PhantomData<W>,
+    _m2: PhantomData<R>,
 }
 
 impl<W, R, RSM> ApplyDelegate<W, R, RSM>
@@ -412,13 +347,14 @@ where
     R: WriteResponse,
     RSM: StateMachine<W, R>,
 {
-    fn new(node_id: u64) -> Self {
+    fn new(node_id: u64, rsm: RSM, commit_tx: UnboundedSender<ApplyCommitMessage>) -> Self {
         Self {
             node_id,
             pending_senders: PendingSenderQueue::new(),
+            rsm,
+            commit_tx,
             _m1: PhantomData,
             _m2: PhantomData,
-            _m3: PhantomData,
         }
     }
 
@@ -496,14 +432,10 @@ where
     }
 
     /// Commit memberhsip change to specific raft group.
-    async fn commit_membership_change(
-        &self,
-        ctx: &ApplyContext<W, R, RSM>,
-        commit: CommitMembership,
-    ) -> Result<ConfState, Error> {
+    async fn commit_membership_change(&self, commit: CommitMembership) -> Result<ConfState, Error> {
         let (tx, rx) = oneshot::channel();
 
-        if let Err(_) = ctx
+        if let Err(_) = self
             .commit_tx
             .send(ApplyCommitMessage::Membership((commit, tx)))
         {
@@ -520,12 +452,7 @@ where
         Ok(conf_state)
     }
 
-    async fn handle_conf_change(
-        &mut self,
-        ctx: &ApplyContext<W, R, RSM>,
-        group_id: u64,
-        ent: Entry,
-    ) -> Option<Apply<W, R>> {
+    async fn handle_conf_change(&mut self, group_id: u64, ent: Entry) -> Option<Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
         if ent.data.is_empty() && ent.entry_type() != EntryType::EntryConfChangeV2 {
@@ -560,15 +487,12 @@ where
         // so the user can apply the log later. For oceanraft and raft,
         // we make the commit an idempotent operation (TODO).
         let conf_state = match self
-            .commit_membership_change(
-                ctx,
-                CommitMembership {
-                    index,
-                    term,
-                    conf_change,
-                    change_request: change_request.clone(),
-                },
-            )
+            .commit_membership_change(CommitMembership {
+                index,
+                term,
+                conf_change,
+                change_request: change_request.clone(),
+            })
             .await
         {
             Err(err) => {
@@ -646,7 +570,6 @@ where
 
     async fn handle_apply(
         &mut self,
-        ctx: &ApplyContext<W, R, RSM>,
         mut apply: ApplyData<R>,
         apply_state: &mut LocalApplyState,
         shared_state: &GroupState,
@@ -675,25 +598,22 @@ where
         // created with a configuration, and its last index and term should be equal to 0. This
         // case can happen when a consensus group is started with a membership change.
         // In this case, we give up continue check and then catch up leader state.
-        if apply_state.applied_index != 0 && apply.entries[0].index != apply_state.applied_index + 1
-        {
+        if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
             panic!(
                 "node {}: group {} apply entries index does not match, expect {}, but got {}",
-                self.node_id,
-                group_id,
-                apply_state.applied_index + 1,
-                apply.entries[0].index
+                self.node_id, group_id, prev_applied_index, apply.entries[0].index
             );
         }
 
         self.push_pending_proposals(std::mem::take(&mut apply.proposals));
-
+        let last_index = apply.entries.last().expect("unreachable").index;
+        let last_term = apply.entries.last().expect("unreachable").term;
         let mut applys = vec![];
         for ent in apply.entries.into_iter() {
             let apply = match ent.entry_type() {
                 EntryType::EntryNormal => self.handle_normal(group_id, ent),
                 EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    self.handle_conf_change(ctx, group_id, ent).await
+                    self.handle_conf_change(group_id, ent).await
                 }
             };
 
@@ -712,22 +632,11 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        let last_applied_index = applys.last().unwrap().get_index();
-        let last_applied_term = applys.last().unwrap().get_term();
-        ctx.rsm.apply(group_id, shared_state, applys).await;
-        apply_state.applied_index = last_applied_index;
-        apply_state.applied_term = last_applied_term;
-        // (apply_state.applied_index, apply_state.applied_term) =
-        //     iter.next()
-        //         .map_or((apply.commit_index, apply.commit_term), |next| {
-        //             let index = next.get_index();
-        //             assert_ne!(index, 0);
-        //             if index == 1 {
-        //                 (0, 0)
-        //             } else {
-        //                 (index - 1, 0 /* TODO: load term from stored entries*/)
-        //             }
-        //         });
+        self.rsm.apply(group_id, shared_state, applys).await;
+        apply_state.applied_index = last_index;
+        apply_state.applied_term = last_term;
+        shared_state.set_applied_index(last_index);
+        shared_state.set_applied_index(last_term);
     }
 
     async fn handle_applys(
@@ -736,18 +645,10 @@ where
         applys: Vec<ApplyData<R>>,
         apply_state: &mut LocalApplyState,
         shared_state: &GroupState,
-        ctx: &ApplyContext<W, R, RSM>,
-    ) -> Result<ApplyResultMessage, Error> {
+    ) {
         for apply in applys {
-            self.handle_apply(ctx, apply, apply_state, shared_state)
-                .await;
+            self.handle_apply(apply, apply_state, shared_state).await;
         }
-
-        Ok(ApplyResultMessage {
-            group_id,
-            applied_index: apply_state.applied_index,
-            applied_term: apply_state.applied_term,
-        })
     }
 }
 
@@ -777,46 +678,6 @@ fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipChangeData)
         }
     }
 }
-
-// fn commit_membership_change_cb<'r, RS, MRS>(result: MembershipChangeRequest) -> MultiRaftAsyncCb<'r, RS, MRS>
-// where
-//     MRS: MultiRaftStorage<RS>,
-//     RS: Storage,
-// {
-//     let cb = move |ctx: &'r mut MultiRaftActorContext<RS, MRS>| -> Pin<Box<dyn Future<Output = Result<(), Error>> + 'r >> {
-//         let local_fut = async move {
-//             for change in result.changes.iter() {
-//             match change.change_type() {
-//                 ConfChangeType::AddNode => {
-//                     // TODO: this call need transfer to user call, and if user call return errored,
-//                     // the membership change should failed and user need to retry.
-//                     // we need a channel to provider user notify actor it need call these code.
-//                     // and we recv the notify can executing these code, if executed failed, we
-//                     // response to user and membership change is failed.
-//                     let replica_metadata = ReplicaDesc {
-//                         node_id: change.node_id,
-//                         replica_id: change.replica_id,
-//                     };
-//                     ctx.node_manager.add_node(change.node_id, change.group_id);
-//                     ctx.replica_cache
-//                         .cache_replica_desc(change.group_id, replica_metadata, ctx.sync_replica_cache)
-//                         .await
-//                         .unwrap();
-//                 }
-//                 ConfChangeType::RemoveNode => unimplemented!(),
-//                 ConfChangeType::AddLearnerNode => unimplemented!(),
-//             }
-//         }
-
-//         Ok(())
-//         };
-//         Box::pin(local_fut)
-
-//         // pin!(local_fut)
-//     };
-
-//     Box::new(cb)
-// }
 
 #[cfg(test)]
 mod test {
@@ -982,11 +843,11 @@ mod test {
             ],
         )];
 
-        for case in cases {
+        for mut case in cases {
             let mut worker = new_worker(true, 400);
-            worker.batch_requests(case.0);
+            let pending_applys = worker.batch_msgs(case.0.drain(..));
             for expect in case.1 {
-                let pending_applys = worker.pending_applys.get(&expect.group_id).unwrap();
+                let pending_applys = pending_applys.get(&expect.group_id).unwrap();
                 assert_eq!(pending_applys.len(), expect.pending_apply_len);
 
                 for (i, pending_apply) in pending_applys.iter().enumerate() {
