@@ -14,6 +14,7 @@ use tracing::info;
 use tracing::trace;
 use tracing::warn;
 use tracing::Level;
+use uuid::Uuid;
 
 use crate::multiraft::WriteResponse;
 use crate::prelude::ConfChange;
@@ -334,7 +335,7 @@ where
     fn on_reads_ready(&mut self, rss: Vec<ReadState>) {
         self.read_index_queue.advance_reads(rss);
         while let Some(p) = self.read_index_queue.pop_front() {
-            p.tx.map(|tx| tx.send(Ok(())));
+            p.tx.map(|tx| tx.send(Ok(p.context.map_or(None, |mut ctx| ctx.context.take()))));
         }
     }
 
@@ -471,7 +472,7 @@ where
         }
 
         let mut light_ready = self.raft_group.advance_append(ready);
-        
+
         if let Some(commit) = light_ready.commit_index() {
             debug!("node {}: set commit = {}", node_id, commit);
             self.commit_index = commit;
@@ -590,19 +591,11 @@ where
     }
 
     pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
-        // let uuid = Uuid::new_v4();
-        let mut ctx = Vec::new();
-        // TODO: give up abomonatin.
-        // Safety: This method is unsafe because it is unsafe to
-        // transmute typed allocations to binary. Furthermore, Rust currently
-        // indicates that it is undefined behavior to observe padding bytes,
-        // which will happen when we memmcpy structs which contain padding bytes.
-        unsafe { abomonation::encode(&data.context, &mut ctx).unwrap() };
-
-        self.raft_group.read_index(ctx);
+        let mut flexs = flexbuffer_serialize(&data.context).expect("invalid ReadIndexContext type");
+        self.raft_group.read_index(flexs.take_buffer());
 
         let proposal = ReadIndexProposal {
-            uuid: data.context.uuid,
+            uuid: Uuid::from_bytes(data.context.uuid),
             read_index: None,
             context: None,
             tx: Some(data.tx),

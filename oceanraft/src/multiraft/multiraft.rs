@@ -309,7 +309,7 @@ where
         group_id: u64,
         context: Option<Vec<u8>>,
         duration: Duration,
-    ) -> Result<(), Error> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         let rx = self.read_index_non_block(group_id, context)?;
         match timeout(duration, rx).await {
             Err(_) => Err(Error::Timeout(
@@ -323,7 +323,11 @@ where
         }
     }
 
-    pub async fn read_index(&self, group_id: u64, context: Option<Vec<u8>>) -> Result<(), Error> {
+    pub async fn read_index(
+        &self,
+        group_id: u64,
+        context: Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, Error> {
         let rx = self.read_index_non_block(group_id, context)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -332,7 +336,11 @@ where
         })?
     }
 
-    pub fn read_index_block(&self, group_id: u64, context: Option<Vec<u8>>) -> Result<(), Error> {
+    pub fn read_index_block(
+        &self,
+        group_id: u64,
+        context: Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, Error> {
         let rx = self.read_index_non_block(group_id, context)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -345,7 +353,7 @@ where
         &self,
         group_id: u64,
         context: Option<Vec<u8>>,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+    ) -> Result<oneshot::Receiver<Result<Option<Vec<u8>>, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
         match self
             .actor
@@ -353,10 +361,10 @@ where
             .try_send(ProposeMessage::ReadIndexData(ReadIndexData {
                 group_id,
                 context: ReadIndexContext {
-                    uuid: Uuid::new_v4(),
+                    uuid: Uuid::new_v4().into_bytes(),
                     context,
                 },
-                tx: tx,
+                tx,
             })) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for read_index".to_owned(),
