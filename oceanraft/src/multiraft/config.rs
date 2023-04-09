@@ -11,13 +11,6 @@ pub struct Config {
     pub heartbeat_tick: usize,
     pub tick_interval: u64, // ms
 
-    /// Batchs apply msg if not equal `1`. It provides msg buf for
-    /// batch apply, default is `1`.
-    ///
-    /// # Panics
-    /// If the value is `0`.
-    pub max_batch_apply_msgs: usize,
-
     /// Whenever `ReplicaDesc` is cached, if true will be written to disk
     /// at the same time (fsync).
     pub replica_sync: bool,
@@ -60,7 +53,6 @@ impl Default for Config {
             election_tick: 1,
             heartbeat_tick: 3,
             tick_interval: 10,
-            max_batch_apply_msgs: 1,
             max_size_per_msg: 1024 * 1024,
             max_inflight_msgs: 256,
             batch_append: false,
@@ -95,13 +87,6 @@ impl Config {
                 "tick interval must be greater than 0".to_owned(),
             ));
         }
-
-        if self.max_batch_apply_msgs == 0 {
-            return Err(Error::ConfigInvalid(
-                "max batch apply msgs must be greater than 0".to_owned(),
-            ));
-        }
-
         if self.max_inflight_msgs == 0 {
             return Err(Error::ConfigInvalid(
                 "max inflight messages must be greater than 0".to_owned(),

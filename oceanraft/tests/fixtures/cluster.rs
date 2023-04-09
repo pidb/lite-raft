@@ -371,7 +371,6 @@ where
                 max_size_per_msg: 0,
                 max_inflight_msgs: 256,
                 tick_interval: 10, // hour ms
-                max_batch_apply_msgs: 1,
                 batch_apply: false,
                 batch_size: 0,
                 proposal_queue_size: 1000,
