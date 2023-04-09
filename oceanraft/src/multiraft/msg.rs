@@ -2,13 +2,13 @@ extern crate raft_proto;
 
 use std::collections::HashMap;
 
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
 use crate::multiraft::WriteResponse;
-
-use crate::prelude::ConfState;
 use crate::prelude::ConfChangeV2;
+use crate::prelude::ConfState;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
@@ -30,20 +30,18 @@ where
     pub tx: oneshot::Sender<Result<RES, Error>>,
 }
 
-#[derive(abomonation_derive::Abomonation, Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ReadIndexContext {
-    #[unsafe_abomonate_ignore]
-    pub uuid: Uuid,
+    pub uuid: [u8; 16],
 
     /// context for user
-    #[unsafe_abomonate_ignore]
     pub context: Option<Vec<u8>>,
 }
 
 pub struct ReadIndexData {
     pub group_id: u64,
     pub context: ReadIndexContext,
-    pub tx: oneshot::Sender<Result<(), Error>>,
+    pub tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
 }
 
 pub enum ProposeMessage<WD, RES>
