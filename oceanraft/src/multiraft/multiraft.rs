@@ -269,14 +269,14 @@ where
         }
     }
 
-    pub async fn membership_change(
+    pub async fn membership(
         &self,
         group_id: u64,
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
     ) -> Result<(RES, Option<Vec<u8>>), Error> {
-        let rx = self.membership_change_non_block(group_id, term, context, data)?;
+        let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -284,14 +284,14 @@ where
         })?
     }
 
-    pub fn membership_change_block(
+    pub fn membership_block(
         &self,
         group_id: u64,
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
     ) -> Result<(RES, Option<Vec<u8>>), Error> {
-        let rx = self.membership_change_non_block(group_id, term, context, data)?;
+        let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -299,7 +299,7 @@ where
         })?
     }
 
-    pub fn membership_change_non_block(
+    pub fn membership_non_block(
         &self,
         group_id: u64,
         term: Option<u64>,

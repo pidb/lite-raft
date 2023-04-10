@@ -63,13 +63,11 @@ async fn test_single_step() {
     change.node_id = 2;
     change.replica_id = 2;
     leader
-        .membership_change(
+        .membership(
             group_id,
             None,
             None,
             MembershipChangeData {
-                group_id,
-                term: 0, // not check
                 changes: vec![change],
                 replicas: vec![],
                 transition: 0,
@@ -91,13 +89,11 @@ async fn test_single_step() {
                 change.node_id = i;
                 change.replica_id = i;
                 leader
-                    .membership_change(
+                    .membership(
                         group_id,
                         None,
                         None,
                         MembershipChangeData {
-                            group_id,
-                            term: 0, // not check
                             changes: vec![change],
                             replicas: vec![],
                             transition: 0,
@@ -189,13 +185,11 @@ async fn test_initial_joint_consensus() {
     }
     let mut change = MembershipChangeData::default();
     change.set_transition(ConfChangeTransition::Explicit);
-    change.set_group_id(group_id);
     change.set_changes(changes);
-    change.set_term(0);
     change.set_replicas(vec![]);
 
     let _ = leader
-        .membership_change(group_id, None, None, change)
+        .membership(group_id, None, None, change)
         .await
         .unwrap();
 
@@ -243,12 +237,10 @@ async fn test_initial_joint_consensus() {
 
     // leave joint consensus use no-op changes and wait it applied for all replicas.
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
     let _ = leader
-        .membership_change(group_id, None, None, change)
+        .membership(group_id, None, None, change)
         .await
         .unwrap();
     for _ in 0..10 {
@@ -364,13 +356,11 @@ async fn test_joint_consensus() {
     }
     let mut change = MembershipChangeData::default();
     change.set_transition(ConfChangeTransition::Explicit);
-    change.set_group_id(group_id);
     change.set_changes(changes);
-    change.set_term(0);
     change.set_replicas(vec![]);
 
     let _ = leader
-        .membership_change(group_id, None, None, change)
+        .membership(group_id, None, None, change)
         .await
         .unwrap();
 
@@ -492,12 +482,10 @@ async fn test_joint_consensus() {
     };
 
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
     let _ = leader
-        .membership_change(group_id, None, None, change)
+        .membership(group_id, None, None, change)
         .await
         .unwrap();
     for _ in 0..10 {
@@ -591,15 +579,13 @@ async fn test_remove() {
         changes.push(change);
     }
     let mut req = MembershipChangeData {
-        group_id,
         changes,
-        term: 0, // no check term
         replicas: vec![],
         transition: 0,
     };
     req.set_transition(ConfChangeTransition::Explicit);
     let _ = leader
-        .membership_change(group_id, None, None, req.clone())
+        .membership(group_id, None, None, req.clone())
         .await
         .unwrap();
 
@@ -646,12 +632,10 @@ async fn test_remove() {
     }
 
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
     let _ = leader
-        .membership_change(group_id, None, None, change)
+        .membership(group_id, None, None, change)
         .await
         .unwrap();
     for _ in 0..10 {
