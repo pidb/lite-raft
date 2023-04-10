@@ -49,7 +49,7 @@ async fn test_group_write() {
 
     for event in events {
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     for rx in recvs {
@@ -72,7 +72,8 @@ async fn test_multigroup_write() {
 
     let mut rockstore_env = RockStoreEnv::new(nodes);
 
-    let (_, mut cluster) = quickstart_rockstore_multi_groups(&mut rockstore_env, nodes, groups).await;
+    let (_, mut cluster) =
+        quickstart_rockstore_multi_groups(&mut rockstore_env, nodes, groups).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
@@ -104,7 +105,7 @@ async fn test_multigroup_write() {
 
     for event in events {
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     for rx in recvs {

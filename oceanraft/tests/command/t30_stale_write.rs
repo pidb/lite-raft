@@ -6,9 +6,8 @@ use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_rockstore_group;
 use crate::fixtures::rand_string;
 use crate::fixtures::FixtureCluster;
-use crate::fixtures::WriteChecker;
 use crate::fixtures::RockStoreEnv;
-
+use crate::fixtures::WriteChecker;
 
 /// Testing pending proposals after removing the leader of
 /// a single consensus group should return an error。
@@ -32,12 +31,10 @@ async fn test_group_stale_write() {
     let command_size = 10;
     let mut stale_recvs = vec![];
     for _ in 1..command_size + 1 {
-         let data = StoreData {
+        let data = StoreData {
             key: rand_string(4),
             value: rand_string(8).as_bytes().to_vec(),
         };
-
-
 
         let rx = cluster.write_command(1, group_id, data.clone());
         stale_recvs.push(rx);
@@ -80,17 +77,14 @@ async fn test_group_stale_write() {
     }
 
     // check normal
-    let apply_events = cluster.wait_for_commands_apply(
-        2,
-        command_size,
-        Duration::from_millis(1000),
-    )
-    .await
-    .unwrap();
+    let apply_events = cluster
+        .wait_for_commands_apply(2, command_size, Duration::from_millis(1000))
+        .await
+        .unwrap();
     write_checker.check(&apply_events);
     for event in apply_events {
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     for rx in recvs {

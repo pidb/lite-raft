@@ -12,14 +12,14 @@ mod rsm;
 mod state;
 pub mod storage;
 pub mod transport;
-mod types;
 mod util;
 
 pub use config::Config;
-pub use error::{Error, MultiRaftStorageError, RaftCoreError, RaftGroupError, ProposeError};
+pub use error::{Error, MultiRaftStorageError, ProposeError, RaftCoreError, RaftGroupError};
 pub use event::{Event, LeaderElectionEvent};
 pub use multiraft::{MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl};
 pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
 pub use state::GroupState;
-pub use types::{WriteData, WriteResponse};
 pub use util::{ManualTick, Ticker};
+
+pub use multiraft::{ProposeData, ProposeResponse};

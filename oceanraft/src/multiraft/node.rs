@@ -23,7 +23,7 @@ use tracing::Level;
 use tracing::Span;
 
 use crate::multiraft::multiraft::NO_LEADER;
-use crate::multiraft::WriteResponse;
+use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
@@ -64,8 +64,8 @@ use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport::Transport;
-use super::types::WriteData;
 use super::util::Ticker;
+use super::ProposeData;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -204,8 +204,8 @@ impl NodeManager {
 
 pub struct NodeActor<W, R>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
 {
     // TODO: queue should have one per-group.
     pub propose_tx: Sender<ProposeMessage<W, R>>,
@@ -222,8 +222,8 @@ where
 
 impl<W, R> NodeActor<W, R>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
 {
     pub fn spawn<TR, RS, MRS, RSM, TK>(
         cfg: &Config,
@@ -299,8 +299,8 @@ where
     TR: Transport,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
 {
     cfg: Config,
     node_id: u64,
@@ -331,8 +331,8 @@ where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    WD: WriteData,
-    RES: WriteResponse,
+    WD: ProposeData,
+    RES: ProposeResponse,
 {
     fn new(
         cfg: &Config,
@@ -855,7 +855,7 @@ where
                     }
                 }
             }
-            ProposeMessage::MembershipData(request, tx) => {
+            ProposeMessage::Membership(request) => {
                 let group_id = request.group_id;
                 match self.groups.get_mut(&group_id) {
                     None => {
@@ -864,13 +864,13 @@ where
                             self.node_id, group_id,
                         );
                         return Some(ResponseCallbackQueue::new_error_callback(
-                            tx,
+                            request.tx,
                             Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
                         ));
                     }
                     Some(group) => {
                         self.active_groups.insert(group_id);
-                        group.propose_membership_change(request, tx)
+                        group.propose_membership_change(request)
                     }
                 }
             }
@@ -1232,7 +1232,7 @@ where
             view.conf_change.changes.len()
         );
 
-        let group_id = view.change_request.group_id;
+        let group_id = view.group_id;
 
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,

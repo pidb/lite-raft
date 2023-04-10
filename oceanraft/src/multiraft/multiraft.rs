@@ -1,14 +1,16 @@
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::time::Duration;
 
 use futures::Future;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use uuid::Uuid;
 
-use crate::multiraft::WriteResponse;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
@@ -23,6 +25,7 @@ use super::event::EventReceiver;
 use super::msg::GroupData;
 use super::msg::GroupOp;
 use super::msg::ManageMessage;
+use super::msg::MembershipRequest;
 use super::msg::ProposeMessage;
 use super::msg::QueryGroup;
 use super::msg::ReadIndexContext;
@@ -33,7 +36,6 @@ use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport::Transport;
-use super::types::WriteData;
 use super::util::Ticker;
 use super::RaftGroupError;
 use super::StateMachine;
@@ -41,6 +43,24 @@ use super::StateMachine;
 pub const NO_GORUP: u64 = 0;
 pub const NO_NODE: u64 = 0;
 pub const NO_LEADER: u64 = 0;
+
+/// Propose request can be with custom data types
+/// for which `ProposeRequest` provides trait constraints.
+pub trait ProposeData:
+    Debug + Clone + Send + Sync + Serialize + for<'d> Deserialize<'d> + 'static
+{
+}
+
+impl<T> ProposeData for T where
+    T: Debug + Clone + Send + Sync + Serialize + for<'d> Deserialize<'d> + 'static
+{
+}
+
+/// Propose and membership change requests can be responded with custom types
+/// for which `ProposePropose` provides trait constraints.
+pub trait ProposeResponse: Debug + Clone + Send + Sync + 'static {}
+
+impl<R> ProposeResponse for R where R: Debug + Clone + Send + Sync + 'static {}
 
 /// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///
@@ -90,24 +110,24 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<WD, RES, RSM>
+pub struct MultiRaft<PD, RES, RSM>
 where
-    WD: WriteData,
-    RES: WriteResponse,
+    PD: ProposeData,
+    RES: ProposeResponse,
 {
     node_id: u64,
     task_group: TaskGroup,
-    actor: NodeActor<WD, RES>,
+    actor: NodeActor<PD, RES>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
     _m1: PhantomData<RSM>,
 }
 
-impl<W, R, RSM> MultiRaft<W, R, RSM>
+impl<PD, RES, RSM> MultiRaft<PD, RES, RSM>
 where
-    W: WriteData,
-    R: WriteResponse,
-    RSM: StateMachine<W, R>,
+    PD: ProposeData,
+    RES: ProposeResponse,
+    RSM: StateMachine<PD, RES>,
 {
     pub fn new<TR, RS, MRS, TK>(
         cfg: Config,
@@ -121,7 +141,7 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<W, R>,
+        RSM: StateMachine<PD, RES>,
         TK: Ticker,
     {
         cfg.validate()?;
@@ -148,35 +168,38 @@ where
         })
     }
 
-    pub async fn write_timeout(
-        &self,
-        group_id: u64,
-        term: u64,
-        data: W,
-        context: Option<Vec<u8>>,
-        duration: Duration,
-    ) -> Result<R, Error> {
-        let rx = self.write_non_block(group_id, term, data, context)?;
-        match timeout(duration, rx).await {
-            Err(_) => Err(Error::Timeout(
-                "wait for the write to complete timeout".to_owned(),
-            )),
-            Ok(res) => res.map_err(|_| {
-                Error::Channel(ChannelError::SenderClosed(
-                    "the sender that result the write was dropped".to_owned(),
-                ))
-            })?,
-        }
-    }
-
+    /// `write` the propose data to a specific group in the multiraft system.
+    ///
+    /// It is a blocking interface in an asynchronous environment. It waits until
+    /// the proposal is successfully applied to the state machine  and the `RES and
+    /// `context` are returned through the state machine created. If the proposal
+    /// fails, an error is returned.
+    ///
+    /// ## Parameters
+    /// - `group_id`: The specific consensus group to write to.
+    /// - `term`: The expected term when writing. If the term of the raft log
+    /// during application is less than this term, a "Stale" error is returned.
+    /// - `context`: The context of the proposal. This information is not
+    /// recorded in the raft log, but the context data will go through a
+    /// complete write process.
+    /// - `propose`: The proposed data, which implements the `ProposeData` type.
+    /// This data will be recorded in the raft log.
+    ///
+    /// ## Errors
+    /// Most errors require retries. The following error requires a different
+    /// handling approach:
+    /// - `ProposeError::NotLeader`: The application can refresh the leader and
+    /// retry based on the error information using the route table.
+    ///
+    /// ## Panics
     pub async fn write(
         &self,
         group_id: u64,
         term: u64,
-        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<R, Error> {
-        let rx = self.write_non_block(group_id, term, data, context)?;
+        propose: PD,
+    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        let rx = self.write_non_block(group_id, term, context, propose)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -188,10 +211,10 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<R, Error> {
-        let rx = self.write_non_block(group_id, term, data, context)?;
+        data: PD,
+    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        let rx = self.write_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -220,9 +243,9 @@ where
         &self,
         group_id: u64,
         term: u64,
-        data: W,
         context: Option<Vec<u8>>,
-    ) -> Result<oneshot::Receiver<Result<R, Error>>, Error> {
+        data: PD,
+    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
@@ -246,26 +269,14 @@ where
         }
     }
 
-    pub async fn membership_change_timeout(
+    pub async fn membership_change(
         &self,
-        request: MembershipChangeData,
-        duration: Duration,
-    ) -> Result<R, Error> {
-        let rx = self.membership_change_non_block(request)?;
-        match timeout(duration, rx).await {
-            Err(_) => Err(Error::Timeout(
-                "wait for the membership change to complete timeout".to_owned(),
-            )),
-            Ok(res) => res.map_err(|_| {
-                Error::Channel(ChannelError::SenderClosed(
-                    "the sender that result the membership change was dropped".to_owned(),
-                ))
-            })?,
-        }
-    }
-
-    pub async fn membership_change(&self, request: MembershipChangeData) -> Result<R, Error> {
-        let rx = self.membership_change_non_block(request)?;
+        group_id: u64,
+        term: Option<u64>,
+        context: Option<Vec<u8>>,
+        data: MembershipChangeData,
+    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        let rx = self.membership_change_non_block(group_id, term, context, data)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -273,8 +284,14 @@ where
         })?
     }
 
-    pub fn membership_change_block(&self, request: MembershipChangeData) -> Result<R, Error> {
-        let rx = self.membership_change_non_block(request)?;
+    pub fn membership_change_block(
+        &self,
+        group_id: u64,
+        term: Option<u64>,
+        context: Option<Vec<u8>>,
+        data: MembershipChangeData,
+    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        let rx = self.membership_change_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -284,15 +301,27 @@ where
 
     pub fn membership_change_non_block(
         &self,
-        request: MembershipChangeData,
-    ) -> Result<oneshot::Receiver<Result<R, Error>>, Error> {
-        let _ = self.pre_propose_check(request.group_id)?;
+        group_id: u64,
+        term: Option<u64>,
+        context: Option<Vec<u8>>,
+        data: MembershipChangeData,
+    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
+        let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
+
+        let request = MembershipRequest {
+            group_id,
+            term,
+            context,
+            data,
+            tx,
+        };
+
         match self
             .actor
             .propose_tx
-            .try_send(ProposeMessage::MembershipData(request, tx))
+            .try_send(ProposeMessage::Membership(request))
         {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for memberhsip".to_owned(),
@@ -304,25 +333,32 @@ where
         }
     }
 
-    pub async fn read_index_timeout(
-        &self,
-        group_id: u64,
-        context: Option<Vec<u8>>,
-        duration: Duration,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let rx = self.read_index_non_block(group_id, context)?;
-        match timeout(duration, rx).await {
-            Err(_) => Err(Error::Timeout(
-                "wait for the read index to complete timeout".to_owned(),
-            )),
-            Ok(res) => res.map_err(|_| {
-                Error::Channel(ChannelError::SenderClosed(
-                    "the sender that result the read index was dropped".to_owned(),
-                ))
-            })?,
-        }
-    }
+    /// `read_index` is use **read_index algorithm** to read data
+    /// from a specific group.
+    ///
+    /// `read_index` is a blocking interface in an asynchronous environment,
+    /// and the user should use `.await` to wait for it to complete. If executed
+    /// successfully, it returns the associated `context`, and at this point, the
+    /// caller can **safely** read data from the state machine. If it fails, an
+    /// error is returned.
 
+    /// ## Parameters
+    /// - `group_id`: The specific group to read from.
+    /// - `context`: The context associated with the read. The context goes through
+    /// the context pipeline during the read.
+    ///
+    /// ## Notes
+    /// read_index implements the approach described in the Raft paper where read
+    /// requests do not need to be written to the Raft log, avoiding the cost of
+    /// writing to disk.
+    ///
+    /// ## Errors
+    /// Most errors require retries. The following error requires a different
+    /// handling approach:
+    /// - `ProposeError::NotLeader`: The application can refresh the leader and
+    /// retry based on the error information using the route table.
+    ///
+    /// ## Panics
     pub async fn read_index(
         &self,
         group_id: u64,

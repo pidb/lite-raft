@@ -8,7 +8,7 @@ use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::multiraft::WriteResponse;
+use crate::multiraft::ProposeResponse;
 
 use super::error::Error;
 use super::error::ProposeError;
@@ -96,7 +96,7 @@ impl ReadIndexQueue {
 }
 
 #[derive(Debug)]
-pub struct Proposal<RES: WriteResponse> {
+pub struct Proposal<R: ProposeResponse> {
     // index when proposing to raft group
     pub index: u64,
     // current term when proposing to raft group.
@@ -104,16 +104,16 @@ pub struct Proposal<RES: WriteResponse> {
     // true if proposal is conf change type.
     pub is_conf_change: bool,
     // if some, the R is sent to client via tx.
-    pub tx: Option<oneshot::Sender<Result<RES, Error>>>,
+    pub tx: Option<oneshot::Sender<Result<(R, Option<Vec<u8>>), Error>>>,
 }
 
 #[derive(Debug)]
-pub struct ProposalQueue<RES: WriteResponse> {
+pub struct ProposalQueue<RES: ProposeResponse> {
     pub replica_id: u64,
     pub queue: VecDeque<Proposal<RES>>,
 }
 
-impl<RES: WriteResponse> ProposalQueue<RES> {
+impl<RES: ProposeResponse> ProposalQueue<RES> {
     pub fn new(replica_id: u64) -> Self {
         ProposalQueue {
             replica_id,

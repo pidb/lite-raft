@@ -48,7 +48,7 @@ async fn test_group_read_index() {
         applied_kvs.insert(event.data.key.clone(), event.data);
 
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     // write_checker.check(&events);

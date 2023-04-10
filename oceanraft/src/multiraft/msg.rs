@@ -6,7 +6,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::oneshot;
 
-use crate::multiraft::WriteResponse;
+use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
@@ -15,19 +15,29 @@ use crate::prelude::ReplicaDesc;
 
 use super::error::Error;
 use super::proposal::Proposal;
-use super::types::WriteData;
+use super::ProposeData;
 
-pub struct WriteRequest<WD, RES>
+pub struct WriteRequest<REQ, RES>
 where
-    RES: WriteResponse,
-    WD: WriteData,
+    REQ: ProposeData,
+    RES: ProposeResponse,
 {
     pub group_id: u64,
     pub term: u64,
-    // pub data: Vec<u8>,
-    pub data: WD,
+    pub data: REQ,
     pub context: Option<Vec<u8>>,
-    pub tx: oneshot::Sender<Result<RES, Error>>,
+    pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
+}
+
+pub struct MembershipRequest<RES>
+where
+    RES: ProposeResponse,
+{
+    pub group_id: u64,
+    pub term: Option<u64>,
+    pub context: Option<Vec<u8>>,
+    pub data: MembershipChangeData,
+    pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -44,14 +54,14 @@ pub struct ReadIndexData {
     pub tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
 }
 
-pub enum ProposeMessage<WD, RES>
+pub enum ProposeMessage<REQ, RES>
 where
-    WD: WriteData,
-    RES: WriteResponse,
+    REQ: ProposeData,
+    RES: ProposeResponse,
 {
-    Write(WriteRequest<WD, RES>),
+    Write(WriteRequest<REQ, RES>),
+    Membership(MembershipRequest<RES>),
     ReadIndexData(ReadIndexData),
-    MembershipData(MembershipChangeData, oneshot::Sender<Result<RES, Error>>),
 }
 
 pub enum GroupOp {
@@ -76,7 +86,7 @@ pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 #[derive(Debug)]
 pub struct ApplyData<R>
 where
-    R: WriteResponse,
+    R: ProposeResponse,
 {
     pub replica_id: u64,
     pub group_id: u64,
@@ -90,7 +100,7 @@ where
 
 impl<R> ApplyData<R>
 where
-    R: WriteResponse,
+    R: ProposeResponse,
 {
     pub fn try_batch(&mut self, that: &mut ApplyData<R>, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
@@ -113,7 +123,7 @@ where
 
 pub enum ApplyMessage<RES>
 where
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,
@@ -134,6 +144,9 @@ pub struct ApplyResultMessage {
 /// requests, otherwise changes contains only one request.
 #[derive(Debug, Clone)]
 pub struct CommitMembership {
+    /// Specific group.
+    pub group_id: u64,
+
     /// Entry index.
     pub index: u64,
 

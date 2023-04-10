@@ -1,28 +1,26 @@
 use futures::Future;
-use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::storage::StateMachineStore;
 use oceanraft::multiraft::Apply;
+use oceanraft::multiraft::ApplyNormal;
 use oceanraft::multiraft::GroupState;
+use oceanraft::multiraft::ProposeData;
+use oceanraft::multiraft::ProposeResponse;
 use oceanraft::multiraft::StateMachine;
-use oceanraft::multiraft::WriteData;
-use oceanraft::multiraft::WriteResponse;
 use oceanraft::prelude::StoreData;
-use tracing::info;
 use tokio::sync::mpsc::Sender;
+use tracing::info;
 
 #[derive(Clone)]
-pub struct MemStoreStateMachine<W, R>
+pub struct MemStoreStateMachine<W>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
 {
-    tx: Sender<Vec<Apply<W, R>>>,
+    tx: Sender<Vec<Apply<W, ()>>>,
 }
 
-impl<W, R> StateMachine<W, R> for MemStoreStateMachine<W, R>
+impl<W> StateMachine<W, ()> for MemStoreStateMachine<W>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
 {
     type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
@@ -31,7 +29,7 @@ where
         &'life0 self,
         group_id: u64,
         state: &GroupState,
-        mut applys: Vec<Apply<W, R>>,
+        mut applys: Vec<Apply<W, ()>>,
     ) -> Self::ApplyFuture<'life0> {
         let tx = self.tx.clone();
         async move {
@@ -41,7 +39,11 @@ where
                     Apply::Normal(normal) => {}
                     Apply::Membership(membership) => {
                         // TODO: if group is leader, we need save conf state to kv store.
-                        membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        // FIXME: don't use default trait
+                        membership
+                            .tx
+                            .take()
+                            .map(|tx| tx.send(Ok(((), None))));
                     }
                 }
             }
@@ -51,37 +53,30 @@ where
     }
 }
 
-impl<W, R> MemStoreStateMachine<W, R>
+impl<W> MemStoreStateMachine<W>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
 {
-    pub fn new(tx: Sender<Vec<Apply<W, R>>>) -> Self {
+    pub fn new(tx: Sender<Vec<Apply<W, ()>>>) -> Self {
         Self { tx }
     }
 }
 
 #[derive(Clone)]
-pub struct RockStoreStateMachine<R>
-where
-    R: WriteResponse,
+pub struct RockStoreStateMachine
 {
-    kv_store: StateMachineStore<R>,
-    tx: Sender<Vec<Apply<StoreData, R>>>,
+    kv_store: StateMachineStore<()>,
+    tx: Sender<Vec<Apply<StoreData, ()>>>,
 }
 
-impl<R> RockStoreStateMachine<R>
-where
-    R: WriteResponse,
+impl RockStoreStateMachine
 {
-    pub fn new(kv_store: StateMachineStore<R>, tx: Sender<Vec<Apply<StoreData, R>>>) -> Self {
+    pub fn new(kv_store: StateMachineStore<()>, tx: Sender<Vec<Apply<StoreData, ()>>>) -> Self {
         Self { kv_store, tx }
     }
 }
 
-impl<R> StateMachine<StoreData, R> for RockStoreStateMachine<R>
-where
-    R: WriteResponse,
+impl StateMachine<StoreData, ()> for RockStoreStateMachine
 {
     type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
     where
@@ -90,7 +85,7 @@ where
         &'life0 self,
         group_id: u64,
         _state: &GroupState,
-        mut applys: Vec<Apply<StoreData, R>>,
+        mut applys: Vec<Apply<StoreData, ()>>,
     ) -> Self::ApplyFuture<'life0> {
         let tx = self.tx.clone();
         async move {
@@ -121,10 +116,13 @@ where
                 match apply {
                     Apply::NoOp(_) => {}
                     Apply::Normal(normal) => {
-                        normal.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        normal.tx.take().map(|tx| tx.send(Ok(((), None))));
                     }
                     Apply::Membership(membership) => {
-                        membership.tx.take().map(|tx| tx.send(Ok(R::default())));
+                        membership
+                            .tx
+                            .take()
+                            .map(|tx| tx.send(Ok(((), None))));
                     }
                 }
             }
