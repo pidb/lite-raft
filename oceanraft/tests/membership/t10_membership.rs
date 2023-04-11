@@ -1,16 +1,16 @@
 use std::mem::take;
 use std::time::Duration;
 
-use oceanraft::multiraft::storage::MultiRaftStorage;
-use oceanraft::multiraft::storage::RaftStorageReader;
-use oceanraft::multiraft::Apply;
+use oceanraft::storage::MultiRaftStorage;
+use oceanraft::storage::RaftStorageReader;
+use oceanraft::Apply;
 use oceanraft::prelude::ConfChangeTransition;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::StoreData;
-use oceanraft::util::TaskGroup;
+use oceanraft::task_group::TaskGroup;
 use tokio::time::sleep;
 
 use crate::fixtures::init_default_ut_tracing;

@@ -13,7 +13,7 @@ use crate::multiraft::ProposeResponse;
 use super::error::Error;
 use super::error::ProposeError;
 use super::msg::ReadIndexContext;
-use super::util::flexbuffer_deserialize;
+use super::utils::flexbuffer_deserialize;
 
 /// Shrink queue if queue capacity more than and len less than
 /// this value.

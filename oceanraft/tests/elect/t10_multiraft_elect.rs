@@ -1,7 +1,7 @@
 use std::mem::take;
 use std::time::Duration;
 
-use oceanraft::util::TaskGroup;
+use oceanraft::task_group::TaskGroup;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 

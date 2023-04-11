@@ -7,7 +7,6 @@ use raft::ReadState;
 use raft::Ready;
 use raft::SoftState;
 use raft::StateRole;
-use tokio::sync::oneshot;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -47,8 +46,8 @@ use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport;
-use super::util;
-use super::util::flexbuffer_serialize;
+use super::utils;
+use super::utils::flexbuffer_serialize;
 use super::Event;
 use super::ProposeData;
 
@@ -315,7 +314,7 @@ where
 
         let entries_size = entries
             .iter()
-            .map(|ent| util::compute_entry_size(ent))
+            .map(|ent| utils::compute_entry_size(ent))
             .sum::<usize>();
         let apply = ApplyData {
             replica_id,

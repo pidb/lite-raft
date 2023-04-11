@@ -22,7 +22,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::multiraft::multiraft::NO_LEADER;
+use crate::multiraft::NO_LEADER;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
@@ -30,8 +30,8 @@ use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
-use crate::util::Stopper;
-use crate::util::TaskGroup;
+use crate::task_group::Stopper;
+use crate::task_group::TaskGroup;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -64,7 +64,7 @@ use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport::Transport;
-use super::util::Ticker;
+use super::tick::Ticker;
 use super::ProposeData;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
@@ -1597,22 +1597,22 @@ mod tests {
     use std::sync::Arc;
 
     use super::NodeWorker;
-    use crate::multiraft::proposal::ProposalQueue;
-    use crate::multiraft::proposal::ReadIndexQueue;
-    use crate::multiraft::storage::MemStorage;
-    use crate::multiraft::storage::MultiRaftMemoryStorage;
+    use crate::proposal::ProposalQueue;
+    use crate::proposal::ReadIndexQueue;
+    use crate::storage::MemStorage;
+    use crate::storage::MultiRaftMemoryStorage;
 
-    use crate::multiraft::group::RaftGroup;
-    use crate::multiraft::group::Status;
+    use crate::group::RaftGroup;
+    use crate::group::Status;
 
-    use crate::multiraft::replica_cache::ReplicaCache;
-    use crate::multiraft::transport::LocalTransport;
-    use crate::multiraft::Error;
-    use crate::multiraft::MultiRaftMessageSenderImpl;
+    use crate::replica_cache::ReplicaCache;
+    use crate::transport::LocalTransport;
+    use crate::Error;
+    use crate::MultiRaftMessageSenderImpl;
     use crate::prelude::ReplicaDesc;
 
     use super::NodeManager;
-    use crate::multiraft::state::GroupState;
+    use crate::state::GroupState;
     type TestMultiRaftActorRuntime = NodeWorker<
         LocalTransport<MultiRaftMessageSenderImpl>,
         MemStorage,

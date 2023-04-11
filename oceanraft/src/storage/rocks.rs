@@ -19,14 +19,14 @@ mod storage {
     use rocksdb::WriteOptions;
     use tracing::error;
 
-    use crate::multiraft::storage::Error;
-    use crate::multiraft::storage::MultiRaftStorage;
-    use crate::multiraft::storage::RaftSnapshotReader;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::RaftStorage;
-    use crate::multiraft::storage::RaftStorageReader;
-    use crate::multiraft::storage::RaftStorageWriter;
-    use crate::multiraft::storage::Result;
+    use crate::storage::Error;
+    use crate::storage::MultiRaftStorage;
+    use crate::storage::RaftSnapshotReader;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::RaftStorage;
+    use crate::storage::RaftStorageReader;
+    use crate::storage::RaftStorageWriter;
+    use crate::storage::Result;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::HardState;
@@ -1388,11 +1388,11 @@ mod state_machine {
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
 
-    use crate::multiraft::storage::Error;
-    use crate::multiraft::storage::RaftSnapshotReader;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::Result as StorageResult;
-    use crate::multiraft::ProposeResponse;
+    use crate::storage::Error;
+    use crate::storage::RaftSnapshotReader;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::Result as StorageResult;
+    use crate::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::StoreData;
 
@@ -2164,11 +2164,11 @@ mod tests {
     use super::StateMachineStore;
     // use super::KVStateMachine;
     use super::RockStore;
-    use crate::multiraft::storage::MultiRaftStorage;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::RaftStorageWriter;
-    use crate::multiraft::Apply;
-    use crate::multiraft::ApplyNormal;
+    use crate::storage::MultiRaftStorage;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::RaftStorageWriter;
+    use crate::Apply;
+    use crate::ApplyNormal;
     use crate::multiraft::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;

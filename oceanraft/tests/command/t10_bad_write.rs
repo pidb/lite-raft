@@ -1,9 +1,9 @@
 use std::mem::take;
 
-use oceanraft::multiraft::Error;
-use oceanraft::multiraft::ProposeError;
+use oceanraft::Error;
+use oceanraft::ProposeError;
 use oceanraft::prelude::StoreData;
-use oceanraft::util::TaskGroup;
+use oceanraft::task_group::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::ClusterBuilder;

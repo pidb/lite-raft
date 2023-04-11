@@ -8,13 +8,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use oceanraft::multiraft::storage::MemStorage;
-use oceanraft::multiraft::storage::MultiRaftMemoryStorage;
-use oceanraft::multiraft::storage::RockStoreCore;
-use oceanraft::multiraft::storage::StateMachineStore;
-use oceanraft::multiraft::ProposeData;
-use oceanraft::multiraft::StateMachine;
 use oceanraft::prelude::StoreData;
+use oceanraft::storage::MemStorage;
+use oceanraft::storage::MultiRaftMemoryStorage;
+use oceanraft::storage::RockStoreCore;
+use oceanraft::storage::StateMachineStore;
+use oceanraft::ProposeData;
+use oceanraft::StateMachine;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use tokio::sync::mpsc::channel;
@@ -23,25 +23,25 @@ use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 
-use oceanraft::multiraft::storage::MultiRaftStorage;
-use oceanraft::multiraft::storage::RaftStorage;
-use oceanraft::multiraft::storage::RockStore;
-use oceanraft::multiraft::transport::LocalTransport;
-use oceanraft::multiraft::Apply;
-use oceanraft::multiraft::ApplyMembership;
-use oceanraft::multiraft::ApplyNormal;
-use oceanraft::multiraft::Config;
-use oceanraft::multiraft::Error;
-use oceanraft::multiraft::Event;
-use oceanraft::multiraft::LeaderElectionEvent;
-use oceanraft::multiraft::ManualTick;
-use oceanraft::multiraft::MultiRaftMessageSenderImpl;
-use oceanraft::multiraft::ProposeResponse;
 use oceanraft::prelude::ConfState;
-use oceanraft::prelude::MultiRaft;
+use oceanraft::MultiRaft;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
-use oceanraft::util::TaskGroup;
+use oceanraft::storage::MultiRaftStorage;
+use oceanraft::storage::RaftStorage;
+use oceanraft::storage::RockStore;
+use oceanraft::transport::LocalTransport;
+use oceanraft::task_group::TaskGroup;
+use oceanraft::Apply;
+use oceanraft::ApplyMembership;
+use oceanraft::ApplyNormal;
+use oceanraft::Config;
+use oceanraft::Error;
+use oceanraft::Event;
+use oceanraft::LeaderElectionEvent;
+use oceanraft::tick::ManualTick;
+use oceanraft::MultiRaftMessageSenderImpl;
+use oceanraft::ProposeResponse;
 
 use super::rsm::MemStoreStateMachine;
 use super::rsm::RockStoreStateMachine;
@@ -166,8 +166,7 @@ where
 }
 
 /// Provides a rocksdb storage and state machine environment for cluster.
-pub struct RockStoreEnv
-{
+pub struct RockStoreEnv {
     pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
     pub storages: Vec<RockStore<StateMachineStore<()>, StateMachineStore<()>>>,
     pub rock_kv_stores: Vec<StateMachineStore<()>>,
@@ -176,8 +175,7 @@ pub struct RockStoreEnv
     pub state_machine_paths: Vec<PathBuf>,
 }
 
-impl RockStoreEnv
-{
+impl RockStoreEnv {
     /// Create environments of nodes size, including
     /// - rxs (apply receivers),
     /// - storages (multi-raft storage with rocksdb),
@@ -782,7 +780,7 @@ where
         group_id: u64,
         write_data: W,
     ) -> Result<oneshot::Receiver<Result<(R, Option<Vec<u8>>), Error>>, Error> {
-        self.nodes[to_index(node_id)].write_non_block(group_id, 0,  None, write_data)
+        self.nodes[to_index(node_id)].write_non_block(group_id, 0, None, write_data)
     }
 
     // Wait normal apply.

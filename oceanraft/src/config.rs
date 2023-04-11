@@ -1,4 +1,4 @@
-use super::error::Error;
+use crate::Error;
 
 /// A constant represents invalid node id of oceanraft node.
 pub const INVALID_NODE_ID: u64 = 0;

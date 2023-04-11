@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 use futures::Future;
 use serde::Deserialize;
@@ -8,14 +7,13 @@ use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
 use uuid::Uuid;
 
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
-use crate::util::TaskGroup;
+use crate::task_group::TaskGroup;
 
 use super::config::Config;
 use super::error::ChannelError;
@@ -35,8 +33,8 @@ use super::node::NodeActor;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
+use super::tick::Ticker;
 use super::transport::Transport;
-use super::util::Ticker;
 use super::RaftGroupError;
 use super::StateMachine;
 

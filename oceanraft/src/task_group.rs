@@ -17,7 +17,7 @@ use tokio::sync::futures::Notified;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use crate::util::macros::defer;
+use crate::utils::defer;
 
 struct TaskSharedState {
     num_tasks: AtomicU32,
@@ -269,7 +269,7 @@ mod tests {
     use tokio::time::sleep;
     use tokio::time::Duration;
 
-    use crate::util::task_group::TaskGroup;
+    use crate::task_group::TaskGroup;
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_group_stopper() {

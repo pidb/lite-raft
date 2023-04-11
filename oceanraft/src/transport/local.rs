@@ -13,12 +13,12 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::multiraft::transport::Transport;
-use crate::multiraft::Error;
+use crate::transport::Transport;
+use crate::Error;
 use crate::multiraft::MultiRaftMessageSender;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-use crate::util::TaskGroup;
+use crate::task_group::TaskGroup;
 
 struct LocalServer<M: MultiRaftMessageSender> {
     tx: Sender<(

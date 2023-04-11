@@ -14,34 +14,35 @@ use tracing::info;
 use tracing::trace;
 use tracing::Span;
 
-use crate::multiraft::util::flexbuffer_deserialize;
-use crate::multiraft::ProposeResponse;
+use crate::Apply;
+use crate::ApplyMembership;
+use crate::ApplyNoOp;
+use crate::ApplyNormal;
+use crate::Config;
+use crate::Error;
+use crate::GroupState;
+use crate::GroupStates;
+use crate::ProposeData;
+use crate::ProposeError;
+use crate::ProposeResponse;
+use crate::StateMachine;
+
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
 use crate::protos::MembershipChangeData;
-use crate::util::Stopper;
-use crate::util::TaskGroup;
+use crate::task_group::Stopper;
+use crate::task_group::TaskGroup;
+use crate::utils::flexbuffer_deserialize;
 
-use super::config::Config;
 use super::error::ChannelError;
 use super::error::DeserializationError;
-use super::error::Error;
-use super::error::ProposeError;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
 use super::proposal::Proposal;
-use super::state::GroupStates;
-use super::Apply;
-use super::ApplyMembership;
-use super::ApplyNoOp;
-use super::ApplyNormal;
-use super::GroupState;
-use super::ProposeData;
-use super::StateMachine;
 
 struct LocalApplyState {
     applied_term: u64,
@@ -690,14 +691,15 @@ mod test {
     use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::multiraft::state::GroupState;
-    use crate::multiraft::state::GroupStates;
-    use crate::multiraft::util::compute_entry_size;
-    use crate::multiraft::Config;
+    use crate::state::GroupState;
+    use crate::state::GroupStates;
+    use crate::utils::compute_entry_size;
+    use crate::Config;
     // use crate::multiraft::MultiStateMachine;
-    use crate::multiraft::StateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
+    use crate::Apply;
+    use crate::StateMachine;
 
     use super::ApplyData;
     use super::ApplyMessage;
@@ -708,12 +710,7 @@ mod test {
         type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn apply(
-            &self,
-            _: u64,
-            _: &GroupState,
-            _: Vec<crate::multiraft::Apply<(), ()>>,
-        ) -> Self::ApplyFuture<'_> {
+        fn apply(&self, _: u64, _: &GroupState, _: Vec<Apply<(), ()>>) -> Self::ApplyFuture<'_> {
             async move {}
         }
     }
