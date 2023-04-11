@@ -101,7 +101,6 @@ pub enum SerializationError {
     Flexbuffer(#[from] flexbuffers::SerializationError),
 }
 
-
 /// Wrap deserialization errors that occurred for specific types
 #[derive(thiserror::Error, Debug)]
 pub enum DeserializationError {
@@ -122,9 +121,6 @@ pub enum Error {
 
     #[error("{0}")]
     BadParameter(String),
-
-    #[error("{0}")]
-    Timeout(String),
 
     #[error("{0}")]
     Channel(#[from] ChannelError),

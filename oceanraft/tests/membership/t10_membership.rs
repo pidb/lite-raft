@@ -30,7 +30,7 @@ async fn test_single_step() {
 
     // start five nodes
     let nodes = 5;
-    let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
@@ -63,13 +63,16 @@ async fn test_single_step() {
     change.node_id = 2;
     change.replica_id = 2;
     leader
-        .membership_change(MembershipChangeData {
+        .membership(
             group_id,
-            term: 0, // not check
-            changes: vec![change],
-            replicas: vec![],
-            transition: 0,
-        })
+            None,
+            None,
+            MembershipChangeData {
+                changes: vec![change],
+                replicas: vec![],
+                transition: 0,
+            },
+        )
         .await
         .unwrap();
 
@@ -86,13 +89,16 @@ async fn test_single_step() {
                 change.node_id = i;
                 change.replica_id = i;
                 leader
-                    .membership_change(MembershipChangeData {
+                    .membership(
                         group_id,
-                        term: 0, // not check
-                        changes: vec![change],
-                        replicas: vec![],
-                        transition: 0,
-                    })
+                        None,
+                        None,
+                        MembershipChangeData {
+                            changes: vec![change],
+                            replicas: vec![],
+                            transition: 0,
+                        },
+                    )
                     .await
                     .unwrap();
                 break;
@@ -142,7 +148,7 @@ async fn test_initial_joint_consensus() {
 
     // start five nodes.
     let nodes = 5;
-    let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
@@ -179,12 +185,13 @@ async fn test_initial_joint_consensus() {
     }
     let mut change = MembershipChangeData::default();
     change.set_transition(ConfChangeTransition::Explicit);
-    change.set_group_id(group_id);
     change.set_changes(changes);
-    change.set_term(0);
     change.set_replicas(vec![]);
 
-    let _ = leader.membership_change(change).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, change)
+        .await
+        .unwrap();
 
     let expected = ConfState {
         voters: vec![1, 2, 3, 4, 5],
@@ -230,11 +237,12 @@ async fn test_initial_joint_consensus() {
 
     // leave joint consensus use no-op changes and wait it applied for all replicas.
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
-    let _ = leader.membership_change(change).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, change)
+        .await
+        .unwrap();
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }
@@ -292,7 +300,7 @@ async fn test_joint_consensus() {
 
     // start five nodes.
     let nodes = 5;
-    let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
@@ -323,11 +331,11 @@ async fn test_joint_consensus() {
             .write(
                 group_id,
                 0,
+                None,
                 StoreData {
                     key: rand_string(4),
                     value: rand_string(8).into(),
                 },
-                None,
             )
             .await
             .unwrap();
@@ -348,12 +356,13 @@ async fn test_joint_consensus() {
     }
     let mut change = MembershipChangeData::default();
     change.set_transition(ConfChangeTransition::Explicit);
-    change.set_group_id(group_id);
     change.set_changes(changes);
-    change.set_term(0);
     change.set_replicas(vec![]);
 
-    let _ = leader.membership_change(change).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, change)
+        .await
+        .unwrap();
 
     // wait all replicas apply membership change.
     for _ in 0..10 {
@@ -407,7 +416,7 @@ async fn test_joint_consensus() {
         key: format!("command",),
         value: format!("data").into(),
     };
-    let _ = leader.write(group_id, 0, data.clone(), None).await.unwrap();
+    let _ = leader.write(group_id, 0, None, data.clone()).await.unwrap();
 
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
@@ -473,11 +482,12 @@ async fn test_joint_consensus() {
     };
 
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
-    let _ = leader.membership_change(change).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, change)
+        .await
+        .unwrap();
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }
@@ -534,7 +544,7 @@ async fn test_remove() {
 
     // start five nodes
     let nodes = 5;
-    let mut rockstore_env = RockStoreEnv::<()>::new(nodes);
+    let mut rockstore_env = RockStoreEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
@@ -569,14 +579,15 @@ async fn test_remove() {
         changes.push(change);
     }
     let mut req = MembershipChangeData {
-        group_id,
         changes,
-        term: 0, // no check term
         replicas: vec![],
         transition: 0,
     };
     req.set_transition(ConfChangeTransition::Explicit);
-    let _ = leader.membership_change(req.clone()).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, req.clone())
+        .await
+        .unwrap();
 
     // wait all nodes apply joint consensus membership change.
     for _ in 0..10 {
@@ -621,11 +632,12 @@ async fn test_remove() {
     }
 
     let mut change = MembershipChangeData::default();
-    change.set_group_id(group_id);
     change.set_changes(vec![]);
-    change.set_term(0);
     change.set_replicas(vec![]);
-    let _ = leader.membership_change(change).await.unwrap();
+    let _ = leader
+        .membership(group_id, None, None, change)
+        .await
+        .unwrap();
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }

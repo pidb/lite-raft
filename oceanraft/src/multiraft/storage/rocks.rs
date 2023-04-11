@@ -1392,7 +1392,7 @@ mod state_machine {
     use crate::multiraft::storage::RaftSnapshotReader;
     use crate::multiraft::storage::RaftSnapshotWriter;
     use crate::multiraft::storage::Result as StorageResult;
-    use crate::multiraft::WriteResponse;
+    use crate::multiraft::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::StoreData;
 
@@ -1532,7 +1532,7 @@ mod state_machine {
 
     impl<R> TryFrom<(u64, &StateMachineStore<R>)> for SnapshotDataSerializer
     where
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         type Error = StateMachineStoreError;
 
@@ -1580,7 +1580,7 @@ mod state_machine {
 
     impl<R> RaftSnapshotReader for StateMachineStore<R>
     where
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         fn load_snapshot(&self, group_id: u64, _replica_id: u64) -> StorageResult<Vec<u8>> {
             self.get_snapshot(group_id)
@@ -1590,7 +1590,7 @@ mod state_machine {
 
     impl<R> RaftSnapshotWriter for StateMachineStore<R>
     where
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         fn build_snapshot(
             &self,
@@ -1713,7 +1713,7 @@ mod state_machine {
     /// applied index and term to rocksdb.
     pub struct ApplyWriteBatch<R>
     where
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         db: Arc<DBWithThreadMode<MultiThreaded>>,
         batch: WriteBatch,
@@ -1725,7 +1725,7 @@ mod state_machine {
 
     impl<R> ApplyWriteBatch<R>
     where
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         /// Save the current applied index inside the batch.
         ///
@@ -1781,7 +1781,7 @@ mod state_machine {
     /// length. It uses `StoreData` struct to represent this key-value model
     /// and uses flexbuffer serialization.
     #[derive(Clone)]
-    pub struct StateMachineStore<R: WriteResponse> {
+    pub struct StateMachineStore<R: ProposeResponse> {
         _node_id: u64,
         db: Arc<DBWithThreadMode<MultiThreaded>>,
         _m: PhantomData<R>,
@@ -1805,7 +1805,7 @@ mod state_machine {
     //     }
     // }
 
-    impl<R: WriteResponse> StateMachineStore<R> {
+    impl<R: ProposeResponse> StateMachineStore<R> {
         /// Open a rocksdb using the path provided and open the rocksdb with
         /// the following opts:
         /// - CreateIfMissing
@@ -2169,7 +2169,7 @@ mod tests {
     use crate::multiraft::storage::RaftStorageWriter;
     use crate::multiraft::Apply;
     use crate::multiraft::ApplyNormal;
-    use crate::multiraft::WriteResponse;
+    use crate::multiraft::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::ReplicaDesc;
@@ -2208,7 +2208,7 @@ mod tests {
         e
     }
 
-    fn new_rockdata_apply<R: WriteResponse>(
+    fn new_rockdata_apply<R: ProposeResponse>(
         group_id: u64,
         index: u64,
         term: u64,
@@ -2276,7 +2276,7 @@ mod tests {
         DBWithThreadMode::<MultiThreaded>::destroy(&rocksdb::Options::default(), path).unwrap();
     }
 
-    fn new_state_machine<R: WriteResponse>(path: &Path, node_id: u64) -> StateMachineStore<R> {
+    fn new_state_machine<R: ProposeResponse>(path: &Path, node_id: u64) -> StateMachineStore<R> {
         let state_machine = StateMachineStore::<R>::new(node_id, path);
 
         println!("🐿 create state machine store {}", path.display());
@@ -2284,7 +2284,7 @@ mod tests {
         state_machine
     }
 
-    fn new_rockstore<R: WriteResponse>(
+    fn new_rockstore<R: ProposeResponse>(
         path: &Path,
         node_id: u64,
         state_machine: &StateMachineStore<R>,
@@ -2299,7 +2299,7 @@ mod tests {
     fn db_test_env<F, R>(f: F)
     where
         F: FnOnce(&RockStore<StateMachineStore<R>, StateMachineStore<R>>, &StateMachineStore<R>),
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         let state_machine_temp_dir = rand_temp_dir().join("oceanraft_state_machine");
         let rock_store_temp_dir = rand_temp_dir().join("oceanraft_rock_store");
@@ -2330,7 +2330,7 @@ mod tests {
             &'r RockStore<StateMachineStore<R>, StateMachineStore<R>>,
             &'r StateMachineStore<R>,
         ) -> BoxFuture<'r, ()>,
-        R: WriteResponse,
+        R: ProposeResponse,
     {
         let state_machine_temp_dir = rand_temp_dir().join("oceanraft_state_machine");
         let rock_store_temp_dir = rand_temp_dir().join("oceanraft_rock_store");
@@ -2452,7 +2452,10 @@ mod tests {
             .iter()
             .map(|apply| {
                 let mut s = flexbuffers::FlexbufferSerializer::new();
-                let _ = apply.get_data().serialize(&mut s).unwrap();
+                let _ = match apply {
+                    Apply::Normal(normal) => normal.data.serialize(&mut s).unwrap(),
+                    _ => unreachable!(),
+                };
                 new_rockdata_entry(apply.get_index(), apply.get_term(), &s.take_buffer())
             })
             .collect::<Vec<_>>();

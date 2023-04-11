@@ -15,7 +15,7 @@ use tracing::trace;
 use tracing::Span;
 
 use crate::multiraft::util::flexbuffer_deserialize;
-use crate::multiraft::WriteResponse;
+use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
@@ -40,8 +40,8 @@ use super::ApplyMembership;
 use super::ApplyNoOp;
 use super::ApplyNormal;
 use super::GroupState;
+use super::ProposeData;
 use super::StateMachine;
-use super::WriteData;
 
 struct LocalApplyState {
     applied_term: u64,
@@ -61,8 +61,8 @@ impl ApplyActor {
         task_group: &TaskGroup,
     ) -> Self
     where
-        W: WriteData,
-        R: WriteResponse,
+        W: ProposeData,
+        R: ProposeResponse,
         RSM: StateMachine<W, R>,
     {
         let worker = ApplyWorker::new(cfg, rsm, shared_states, request_rx, response_tx, commit_tx);
@@ -77,8 +77,8 @@ impl ApplyActor {
 
 pub struct ApplyWorker<W, R, RSM>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
     node_id: u64,
@@ -92,8 +92,8 @@ where
 
 impl<W, R, RSM> ApplyWorker<W, R, RSM>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
     #[inline]
@@ -247,25 +247,29 @@ const SHRINK_PENDING_CMD_QUEUE_CAP: usize = 64;
 
 struct PendingSender<RES>
 where
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     index: u64,
     term: u64,
-    tx: Option<oneshot::Sender<Result<RES, Error>>>,
+    tx: Option<oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>>,
 }
 
 impl<RES> PendingSender<RES>
 where
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
-    fn new(index: u64, term: u64, tx: Option<oneshot::Sender<Result<RES, Error>>>) -> Self {
+    fn new(
+        index: u64,
+        term: u64,
+        tx: Option<oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>>,
+    ) -> Self {
         Self { index, term, tx }
     }
 }
 
 struct PendingSenderQueue<RES>
 where
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     normals: VecDeque<PendingSender<RES>>,
     conf_change: Option<PendingSender<RES>>,
@@ -273,7 +277,7 @@ where
 
 impl<RES> PendingSenderQueue<RES>
 where
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     pub fn new() -> Self {
         Self {
@@ -329,8 +333,8 @@ where
 
 pub struct ApplyDelegate<W, R, RSM>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
     node_id: u64,
@@ -343,8 +347,8 @@ where
 
 impl<W, R, RSM> ApplyDelegate<W, R, RSM>
 where
-    W: WriteData,
-    R: WriteResponse,
+    W: ProposeData,
+    R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
     fn new(node_id: u64, rsm: RSM, commit_tx: UnboundedSender<ApplyCommitMessage>) -> Self {
@@ -488,6 +492,7 @@ where
         // we make the commit an idempotent operation (TODO).
         let conf_state = match self
             .commit_membership_change(CommitMembership {
+                group_id,
                 index,
                 term,
                 conf_change,

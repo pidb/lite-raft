@@ -565,36 +565,6 @@ mod protos {
         }
 
         #[inline]
-        pub fn clear_group_id(&mut self) {
-            self.group_id = 0
-        }
-
-        #[inline]
-        pub fn set_group_id(&mut self, v: u64) {
-            self.group_id = v;
-        }
-
-        #[inline]
-        pub fn get_group_id(&self) -> u64 {
-            self.group_id
-        }
-
-        #[inline]
-        pub fn clear_term(&mut self) {
-            self.term = 0
-        }
-
-        #[inline]
-        pub fn set_term(&mut self, v: u64) {
-            self.term = v;
-        }
-
-        #[inline]
-        pub fn get_term(&self) -> u64 {
-            self.term
-        }
-
-        #[inline]
         pub fn clear_changes(&mut self) {
             self.changes.clear();
         }

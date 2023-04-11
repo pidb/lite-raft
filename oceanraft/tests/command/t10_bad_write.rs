@@ -21,7 +21,7 @@ use crate::fixtures::RockStoreEnv;
 async fn test_no_leader() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let mut env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    let mut env = MemStoreEnv::<StoreData>::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
@@ -81,7 +81,7 @@ async fn test_no_leader() {
 async fn test_bad_group() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let env = MemStoreEnv::<StoreData, ()>::new(nodes);
+    let env = MemStoreEnv::<StoreData>::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)

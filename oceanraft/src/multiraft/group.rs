@@ -16,7 +16,7 @@ use tracing::warn;
 use tracing::Level;
 use uuid::Uuid;
 
-use crate::multiraft::WriteResponse;
+use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
 use crate::prelude::ConfChangeV2;
@@ -31,6 +31,7 @@ use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
 use super::msg::ApplyResultMessage;
+use super::msg::MembershipRequest;
 use super::msg::ReadIndexData;
 use super::msg::WriteRequest;
 use super::multiraft::NO_NODE;
@@ -46,10 +47,10 @@ use super::state::GroupState;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::transport;
-use super::types::WriteData;
 use super::util;
 use super::util::flexbuffer_serialize;
 use super::Event;
+use super::ProposeData;
 
 pub enum Status {
     None,
@@ -66,7 +67,7 @@ pub struct RaftGroupWriteRequest {
 pub struct RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     /// Indicates the id of the node where the group resides.
     pub node_id: u64,
@@ -111,7 +112,7 @@ where
 impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     #[inline]
     pub(crate) fn is_leader(&self) -> bool {
@@ -135,7 +136,7 @@ where
 impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: RaftStorage,
-    RES: WriteResponse,
+    RES: ProposeResponse,
 {
     #[tracing::instrument(
         level = Level::TRACE,
@@ -503,7 +504,7 @@ where
         Ok(None)
     }
 
-    fn pre_propose_write<WD: WriteData>(
+    fn pre_propose_write<WD: ProposeData>(
         &mut self,
         write_data: &WriteRequest<WD, RES>,
     ) -> Result<(), Error> {
@@ -531,7 +532,7 @@ where
         Ok(())
     }
 
-    pub fn propose_write<WD: WriteData>(
+    pub fn propose_write<WD: ProposeData>(
         &mut self,
         write_request: WriteRequest<WD, RES>,
     ) -> Option<ResponseCallback> {
@@ -604,14 +605,14 @@ where
         None
     }
 
-    fn pre_propose_membership(&mut self, data: &MembershipChangeData) -> Result<(), Error> {
+    fn pre_propose_membership(&mut self, request: &MembershipRequest<RES>) -> Result<(), Error> {
         if self.raft_group.raft.has_pending_conf() {
             return Err(Error::Propose(
                 super::error::ProposeError::MembershipPending(self.node_id, self.group_id),
             ));
         }
 
-        if data.group_id == 0 {
+        if request.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
             ));
@@ -625,8 +626,11 @@ where
             }));
         }
 
-        if data.term != 0 && self.term() > data.term {
-            return Err(Error::Propose(ProposeError::Stale(data.term, self.term())));
+        if !request.term.is_none() && self.term() > request.term.unwrap() {
+            return Err(Error::Propose(ProposeError::Stale(
+                request.term.unwrap(),
+                self.term(),
+            )));
         }
 
         Ok(())
@@ -634,30 +638,23 @@ where
 
     pub fn propose_membership_change(
         &mut self,
-        data: MembershipChangeData,
-        tx: oneshot::Sender<Result<RES, Error>>,
+        request: MembershipRequest<RES>,
     ) -> Option<ResponseCallback> {
         // TODO: add pre propose check
-
-        if let Err(err) = self.pre_propose_membership(&data) {
-            return Some(ResponseCallbackQueue::new_error_callback(tx, err));
+        if let Err(err) = self.pre_propose_membership(&request) {
+            return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
         }
 
         let term = self.term();
 
-        info!(
-            "node {}: propose membership change: request = {:?}",
-            0, /* TODO: add it*/ data
-        );
-
         let next_index = self.last_index() + 1;
 
-        let res = if data.changes.len() == 1 {
-            let (ctx, cc) = to_cc(&data);
+        let res = if request.data.changes.len() == 1 {
+            let (ctx, cc) = to_cc(&request.data);
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
-            let (ctx, cc) = to_ccv2(&data);
+            let (ctx, cc) = to_ccv2(&request.data);
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         };
@@ -668,7 +665,7 @@ where
                 0, /* TODO: add it*/ err
             );
             return Some(ResponseCallbackQueue::new_error_callback(
-                tx,
+                request.tx,
                 Error::Raft(err),
             ));
         }
@@ -683,7 +680,7 @@ where
             );
 
             return Some(ResponseCallbackQueue::new_error_callback(
-                tx,
+                request.tx,
                 Error::Propose(ProposeError::UnexpectedIndex {
                     node_id: self.node_id,
                     group_id: self.group_id,
@@ -698,7 +695,7 @@ where
             index: next_index,
             term,
             is_conf_change: true,
-            tx: Some(tx),
+            tx: Some(request.tx),
         };
 
         self.proposals.push(proposal);

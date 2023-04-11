@@ -82,7 +82,7 @@ async fn test_log_storeage_unavailable() {
 
     for event in events {
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     for rx in recvs {
@@ -160,7 +160,7 @@ async fn test_multi_storeage_unavailable() {
 
     for event in events {
         // TODO: use done method
-        event.tx.map(|tx| tx.send(Ok(())));
+        event.tx.map(|tx| tx.send(Ok(((), None))));
     }
 
     for rx in recvs {
