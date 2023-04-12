@@ -1,16 +1,16 @@
-use tonic::transport::Server;
+#![feature(type_alias_impl_trait)]
 
 mod server;
-mod storage;
 mod state_machine;
-
-
+mod storage;
 
 pub mod grpc {
     tonic::include_proto!("kv");
 }
 
-fn main() {
-    let _grpc_serv = Server::builder();
-    println!("hello world")
+#[tokio::main]
+async fn main() {
+    let mut server = server::KVServer::new();
+    server.start();
+    server.join().await;
 }

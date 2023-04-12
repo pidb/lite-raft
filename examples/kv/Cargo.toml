@@ -17,3 +17,7 @@ tokio = { version = "1", features = ["full"] }
 [build-dependencies]
 # for proto build
 tonic-build = { version = "0.9.1",features = ["prost"] }
+
+[[bin]]
+name = "cli"
+path = "src/cli.rs"
