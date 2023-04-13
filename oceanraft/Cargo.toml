@@ -26,7 +26,7 @@ console-subscriber = {version = "0.1"}
 bytes = { version = "1" }
 prost = { version = "0.11" }
 smallvec = { version = "1" }
-tonic = { version = "0.8", optional = true }
+tonic = { version = "0.9.1", optional = true }
 flume = { version = "0.10.14" }
 protobuf = {version = "2" }
 rocksdb = {version = "0.20", optional = true }
@@ -45,8 +45,9 @@ rand = { version = "0.8.4" }
 
 [build-dependencies]
 prost-build = { version = "0.11" }
+tonic-build = { version = "0.9.1", features = ["prost"], optional = true }
 
 [features]
-default = ["store-rocksdb"]
-grpc = ["tonic"]
+default = ["store-rocksdb", "grpc"]
+grpc = ["tonic", "tonic-build"]
 store-rocksdb = ["rocksdb"]
