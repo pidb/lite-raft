@@ -60,6 +60,15 @@ pub trait ProposeResponse: Debug + Clone + Send + Sync + 'static {}
 
 impl<R> ProposeResponse for R where R: Debug + Clone + Send + Sync + 'static {}
 
+pub trait MultiRaftTypeSpecialization {
+    type D: ProposeData;
+    type R: ProposeResponse;
+    type M: StateMachine<Self::D, Self::R>;
+    type T: Transport + Clone;
+    type S: RaftStorage;
+    type MS: MultiRaftStorage<Self::S>;
+}
+
 /// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///
 /// When the server receives a `MultiRaftMessage` from another node,
@@ -131,7 +140,7 @@ where
         cfg: Config,
         transport: TR,
         storage: MRS,
-        rsm: RSM,
+        state_machine: RSM,
         task_group: TaskGroup,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
@@ -149,7 +158,7 @@ where
             &cfg,
             &transport,
             &storage,
-            rsm,
+            state_machine,
             &event_bcast,
             &task_group,
             ticker,
