@@ -134,7 +134,7 @@ impl From<Error> for RaftError {
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// RaftStorageReader comes from a re-export of `raft-rs`, and provides an
 /// interface for `raft-rs` to read storage
