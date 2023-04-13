@@ -47,3 +47,7 @@ message MembershipChangeData {
   repeated SingleMembershipChange changes = 4;
   repeated ReplicaDesc replicas = 5;
 }
+
+service MultiRaftService {
+  rpc Send(MultiRaftMessage) returns (MultiRaftMessageResponse) {}
+} 
