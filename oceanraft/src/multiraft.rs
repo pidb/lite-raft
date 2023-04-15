@@ -64,7 +64,6 @@ pub trait MultiRaftTypeSpecialization {
     type D: ProposeData;
     type R: ProposeResponse;
     type M: StateMachine<Self::D, Self::R>;
-    type T: Transport + Clone;
     type S: RaftStorage;
     type MS: MultiRaftStorage<Self::S>;
 }
@@ -117,38 +116,33 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<PD, RES, RSM>
+pub struct MultiRaft<T, TR>
 where
-    PD: ProposeData,
-    RES: ProposeResponse,
+    T: MultiRaftTypeSpecialization,
+    TR: Transport + Clone,
 {
     node_id: u64,
     task_group: TaskGroup,
-    actor: NodeActor<PD, RES>,
+    actor: NodeActor<T::D, T::R>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
-    _m1: PhantomData<RSM>,
+    _m1: PhantomData<TR>,
 }
 
-impl<PD, RES, RSM> MultiRaft<PD, RES, RSM>
+impl<T, TR> MultiRaft<T, TR>
 where
-    PD: ProposeData,
-    RES: ProposeResponse,
-    RSM: StateMachine<PD, RES>,
+    T: MultiRaftTypeSpecialization,
+    TR: Transport + Clone,
 {
-    pub fn new<TR, RS, MRS, TK>(
+    pub fn new<TK>(
         cfg: Config,
         transport: TR,
-        storage: MRS,
-        state_machine: RSM,
+        storage: T::MS,
+        state_machine: T::M,
         task_group: TaskGroup,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
     where
-        TR: Transport + Clone,
-        RS: RaftStorage,
-        MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<PD, RES>,
         TK: Ticker,
     {
         cfg.validate()?;
@@ -204,8 +198,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        propose: PD,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        propose: T::D,
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.write_non_block(group_id, term, context, propose)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -219,8 +213,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        data: PD,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        data: T::D,
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.write_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -251,8 +245,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        data: PD,
-    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
+        data: T::D,
+    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
@@ -282,7 +276,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -297,7 +291,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -312,7 +306,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
+    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();

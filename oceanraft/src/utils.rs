@@ -30,6 +30,49 @@ macro_rules! defer {
     };
 }
 
+/// This macro defines a struct and implements the `MultiRaftTypeSpecialization` trait for it.
+/// It is used to define multiple associated types for the struct.
+///
+/// # Examples
+///
+/// ```rust
+/// use oceanraft::MultiRaftTypeSpecialization;
+/// use oceanraft::define_multiraft;
+/// use oceanraft::storage::RockStoreCore;
+/// use oceanraft::storage::RockStore;
+/// define_multiraft!{
+///     #[derive(Debug)]
+///     pub struct MyMultiRaft:
+///         // Define these associated types using this macro:
+///         D = AppProposeData,
+///         R = AppProposeResponse,
+///         M = AppStateMachine,
+///         S = RockStoreCore<AppSnapshotReader, AppSnapshotWriter>,
+///         MS = RockStore<AppSnapshotReader, AppSnapshotWriter>
+/// }
+/// ```
+#[doc(hidden)]
+#[macro_export]
+macro_rules! define_multiraft {
+    // $type_meta provide comments, dervie and any other possible meta information for the type.
+    // $type_vis provide visibility to the type, such as pub.
+    // $type_name provide name id to the type.
+    // $associated_type_name_def is the associated generic type defined by MultiRaftTypeSpecialization.
+    // $associated_type_name_impl is associated generic type impl.
+    // $associated_type_impl_meta for $type_name  provide comments, dervie and any other possible meta information for the type.
+    ( $(#[$type_meta:meta])* $type_vis:vis $type_name:ident: $($(#[$associated_type_impl_meta:meta])* $associated_type_name_def:ident = $associated_type_name_impl:ty),+ ) => {
+        $(#[$type_meta])*
+        $type_vis struct $type_name {}
+
+        impl $crate::MultiRaftTypeSpecialization for $type_name {
+            $(
+                $(#[$associated_type_impl_meta])*
+                type $associated_type_name_def = $associated_type_name_impl;
+            )+
+        }
+    };
+}
+
 /// Compute the entry size without a length delimiter with proto3.
 #[inline]
 pub fn compute_entry_size(ent: &Entry) -> usize {
