@@ -6,13 +6,14 @@ use tokio::time::timeout_at;
 use tokio::time::Instant;
 
 use crate::fixtures::init_default_ut_tracing;
+use crate::fixtures::Cluster;
 use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
-use crate::fixtures::MemStoreCluster;
 use crate::fixtures::MemStoreEnv;
+use crate::fixtures::MemType;
 
 async fn check_replica_should_elected(
-    cluster: &mut MemStoreCluster,
+    cluster: &mut Cluster<MemType>,
     node_id: u64,
     group_id: u64,
     expected_leaeder_id: u64,

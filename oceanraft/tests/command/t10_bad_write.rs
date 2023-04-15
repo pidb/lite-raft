@@ -10,6 +10,7 @@ use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::MemStoreEnv;
 use crate::fixtures::RockStoreEnv;
+use crate::fixtures::MemType;
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
@@ -21,9 +22,9 @@ use crate::fixtures::RockStoreEnv;
 async fn test_no_leader() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let mut env = MemStoreEnv::<StoreData>::new(nodes);
+    let mut env = MemStoreEnv::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<MemType>::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
         .state_machines(env.state_machines.clone())
@@ -81,9 +82,9 @@ async fn test_no_leader() {
 async fn test_bad_group() {
     let nodes = 3;
     let task_group = TaskGroup::new();
-    let env = MemStoreEnv::<StoreData>::new(nodes);
+    let env = MemStoreEnv::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<MemType>::new(nodes)
         .election_ticks(2)
         .task_group(task_group.clone())
         .state_machines(env.state_machines.clone())
