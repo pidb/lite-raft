@@ -12,6 +12,14 @@ pub struct ServerArgs {
     #[arg(long)]
     pub addr: String,
 
+    /// Log storage path.
+    #[arg(long)]
+    pub log_storage_path: String,
+
+    /// KV storgae path.
+    #[arg(long)]
+    pub kv_storage_path: String,
+
     /// Server should know other nodes.
     #[arg(long)]
     pub nodes: String,

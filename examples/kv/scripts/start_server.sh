@@ -9,6 +9,7 @@ if [[ ! -d "$mydir" ]]; then mydir="$PWD"; fi
 DEFINE_string 'host' '127.0.0.1' 'network host' 'host'
 DEFINE_integer 'server_num' '3' 'Number of servers' 'server_num'
 DEFINE_integer 'port' '50051' "Port of the first server" 'port'
+DEFINE_string 'path' '/tmp' 'runtime path' 'path'
 
 # parse the command-line
 FLAGS "$@" || exit 1
@@ -20,7 +21,19 @@ for ((i=0; i<$FLAGS_server_num; ++i)); do
 done
 
 for ((i=0; i<$FLAGS_server_num; ++i)); do
-    echo $mydir/../../../target/debug/oceanraft-kv-example --addr=${FLAGS_host}:$((${FLAGS_port}+i)) --nodes ${nodes}
-    $mydir/../../../target/debug/oceanraft-kv-example --addr=${FLAGS_host}:$((${FLAGS_port}+i)) --nodes ${nodes} 
+    mkdir -p ${FLAGS_path}/oceanraft_runtime/log_$((i+1))
+    mkdir -p ${FLAGS_path}/oceanraft_runtime/kv_$((i+1))
+    echo $mydir/../../../target/debug/oceanraft-kv-example \
+        --node-id=$((i+1)) \
+        --addr=${FLAGS_host}:$((${FLAGS_port}+i)) \
+        --nodes=${nodes} \
+        --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
+        --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1))
+    $mydir/../../../target/debug/oceanraft-kv-example \
+        --node-id=$((i+1)) \
+        --addr=${FLAGS_host}:$((${FLAGS_port}+i)) \
+        --nodes=${nodes} \
+        --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
+        --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1)) &
 done
 echo $nodes

@@ -20,7 +20,7 @@ async fn main() {
         panic!("{}", reason)
     }
 
-    let mut server = server::KVServer::new(arg);
+    let mut server = server::KVServer::new(arg).await;
     server.start();
     server.join().await;
 }
