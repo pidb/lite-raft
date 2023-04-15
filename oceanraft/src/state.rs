@@ -53,8 +53,8 @@ impl From<(u64, u64, u64, u64, u64, u64, StateRole)> for GroupState {
             replica_id: AtomicU64::new(value.0),
             commit_index: AtomicU64::new(value.1),
             commit_term: AtomicU64::new(value.2),
-            applied_term: AtomicU64::new(value.3),
-            applied_index: AtomicU64::new(value.4),
+            applied_index: AtomicU64::new(value.3),
+            applied_term: AtomicU64::new(value.4),
             leader_id: AtomicU64::new(value.5),
             role: AtomicUsize::new(WrapStateRole::from(&value.6).0),
         }
@@ -67,8 +67,8 @@ impl GroupState {
             replica_id: AtomicU64::new(0),
             commit_index: AtomicU64::new(0),
             commit_term: AtomicU64::new(0),
-            applied_term: AtomicU64::new(0),
             applied_index: AtomicU64::new(0),
+            applied_term: AtomicU64::new(0),
             leader_id: AtomicU64::new(0),
             role: AtomicUsize::new(0),
         }

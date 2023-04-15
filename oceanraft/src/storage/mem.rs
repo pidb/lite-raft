@@ -47,6 +47,9 @@ pub struct MemStorageCore {
     entries: Vec<Entry>,
     // Metadata of the last snapshot received.
     snapshot_metadata: SnapshotMetadata,
+    // Maintenance application applied
+    applied_index: u64,
+    applied_term: u64,
     // If it is true, the next snapshot will return a
     // SnapshotTemporarilyUnavailable error.
     trigger_snap_temp_unavailable: bool,
@@ -280,6 +283,16 @@ impl MemStorageCore {
         Ok(())
     }
 
+    /// Set applied index and term.
+    pub fn set_applied(&mut self, index: u64, term: u64) {
+        self.applied_index = index;
+        self.applied_term = term;
+    }
+
+    pub fn set_commit(&mut self, commit: u64) {
+        self.mut_hard_state().commit = commit;
+    }
+
     /// Trigger a SnapshotTemporarilyUnavailable error.
     pub fn trigger_snap_unavailable(&mut self) {
         self.trigger_snap_temp_unavailable = true;
@@ -504,6 +517,21 @@ impl RaftStorageWriter for MemStorage {
 
     fn set_confstate(&self, cs: ConfState) -> Result<()> {
         self.wl().set_conf_state(cs)
+    }
+
+    fn set_applied(&self, applied_index: u64, appied_term: u64) -> Result<()> {
+        self.wl().set_applied(applied_index, appied_term);
+        Ok(())
+    }
+
+    fn set_commit(&self, commit: u64) -> Result<()> {
+        self.wl().set_commit(commit);
+        Ok(())
+    }
+
+    fn get_applied(&self) -> Result<(u64, u64)> {
+        let rl = self.rl();
+        Ok((rl.applied_index, rl.applied_term))
     }
 }
 

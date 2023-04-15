@@ -159,6 +159,12 @@ pub trait RaftStorageWriter {
     /// Saves the current ConfState
     fn set_confstate(&self, cs: ConfState) -> Result<()>;
 
+    fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()>;
+
+    fn get_applied(&self) -> Result<(u64, u64)>;
+
+    fn set_commit(&self, commit: u64) -> Result<()>;
+
     /// Overwrites the contents of this Storage object with those of the given snapshot.
     ///
     /// # Panics

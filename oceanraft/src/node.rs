@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::collections::hash_map::Iter;
 use std::collections::HashSet;
@@ -22,8 +23,8 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::multiraft::NO_LEADER;
 use crate::multiraft::ProposeResponse;
+use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
@@ -63,8 +64,8 @@ use super::state::GroupState;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
-use super::transport::Transport;
 use super::tick::Ticker;
+use super::transport::Transport;
 use super::ProposeData;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
@@ -255,6 +256,7 @@ where
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
+            storage.clone(),
             states.clone(),
             apply_request_rx,
             apply_response_tx,
@@ -398,7 +400,6 @@ where
         let mut ticks = 0;
         loop {
             self.event_chan.flush();
-
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -1013,6 +1014,7 @@ where
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
+        let (applied_index, applied_term) = group_storage.get_applied()?;
         // if replicas_desc are not empty and are valid data,
         // we know where all replicas of the raft group are located.
         //
@@ -1025,7 +1027,7 @@ where
         // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied: rs.hard_state.commit,
+            applied: applied_index,
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: self.cfg.max_size_per_msg,
@@ -1048,12 +1050,11 @@ where
             replica_id,
             rs.hard_state.commit, /* commit_index */
             rs.hard_state.term,   /* commit_term */
-            rs.hard_state.commit, /* applied_index */
-            rs.hard_state.term,   /* applied_term */
+            applied_index,        /* applied_index */
+            applied_term,         /* applied_term */
             NO_LEADER,
             StateRole::Follower,
         )));
-
         let mut group = RaftGroup {
             node_id: self.cfg.node_id,
             group_id,
@@ -1065,9 +1066,8 @@ where
             status: Status::None,
             read_index_queue: ReadIndexQueue::new(),
             shared_state: shared_state.clone(),
-
-            applied_index: rs.hard_state.commit,
-            applied_term: rs.hard_state.term,
+            applied_index,
+            applied_term,
             commit_index: rs.hard_state.commit,
             commit_term: rs.hard_state.term,
         };
@@ -1605,11 +1605,11 @@ mod tests {
     use crate::group::RaftGroup;
     use crate::group::Status;
 
+    use crate::prelude::ReplicaDesc;
     use crate::replica_cache::ReplicaCache;
     use crate::transport::LocalTransport;
     use crate::Error;
     use crate::MultiRaftMessageSenderImpl;
-    use crate::prelude::ReplicaDesc;
 
     use super::NodeManager;
     use crate::state::GroupState;

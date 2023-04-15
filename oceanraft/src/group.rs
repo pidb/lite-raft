@@ -477,7 +477,9 @@ where
         if let Some(commit) = light_ready.commit_index() {
             debug!("node {}: set commit = {}", node_id, commit);
             self.commit_index = commit;
-        }
+            gs.set_commit(commit)?;
+            self.shared_state.set_commit_index(commit);
+        } 
 
         if !light_ready.messages().is_empty() {
             let messages = light_ready.take_messages();
