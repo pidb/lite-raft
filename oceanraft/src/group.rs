@@ -15,6 +15,7 @@ use tracing::warn;
 use tracing::Level;
 use uuid::Uuid;
 
+use crate::msg::MembershipRequestContext;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -649,11 +650,11 @@ where
         let next_index = self.last_index() + 1;
 
         let res = if request.data.changes.len() == 1 {
-            let (ctx, cc) = to_cc(&request.data);
+            let (ctx, cc) = to_cc(request.data, request.context);
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
-            let (ctx, cc) = to_ccv2(&request.data);
+            let (ctx, cc) = to_ccv2(request.data, request.context);
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         };
@@ -748,16 +749,19 @@ where
     }
 }
 
-fn to_cc(data: &MembershipChangeData) -> (Vec<u8>, ConfChange) {
+fn to_cc(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, ConfChange) {
     assert_eq!(data.changes.len(), 1);
     let mut cc = ConfChange::default();
     cc.set_change_type(data.changes[0].change_type());
-    // TODO: set membership change id
     cc.node_id = data.changes[0].replica_id;
-    (data.encode_to_vec(), cc)
+
+    let ctx = MembershipRequestContext { data, user_ctx };
+
+    let mut ser = flexbuffer_serialize(&ctx).unwrap();
+    (ser.take_buffer(), cc)
 }
 
-fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
+fn to_ccv2(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, ConfChangeV2) {
     let mut cc = ConfChangeV2::default();
     cc.set_transition(data.transition());
     let mut sc = vec![];
@@ -769,5 +773,9 @@ fn to_ccv2(data: &MembershipChangeData) -> (Vec<u8>, ConfChangeV2) {
     }
 
     cc.set_changes(sc);
-    (data.encode_to_vec(), cc)
+
+    let ctx = MembershipRequestContext { data, user_ctx };
+
+    let mut ser = flexbuffer_serialize(&ctx).unwrap();
+    (ser.take_buffer(), cc)
 }

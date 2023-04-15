@@ -29,6 +29,12 @@ where
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct MembershipRequestContext {
+    pub data: MembershipChangeData,
+    pub user_ctx: Option<Vec<u8>>,
+}
+
 pub struct MembershipRequest<RES>
 where
     RES: ProposeResponse,

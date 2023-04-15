@@ -27,6 +27,7 @@ use crate::ProposeError;
 use crate::ProposeResponse;
 use crate::StateMachine;
 
+use crate::msg::MembershipRequestContext;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
@@ -469,7 +470,7 @@ where
         }
 
         let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
-        let (conf_change, change_request) = match parse_conf_change(&ent) {
+        let (conf_change, request_ctx) = match parse_conf_change(&ent) {
             Err(err) => {
                 tx.map(|tx| {
                     if let Err(backed) = tx.send(Err(err)) {
@@ -497,7 +498,7 @@ where
                 index,
                 term,
                 conf_change,
-                change_request: change_request.clone(),
+                change_request: request_ctx.data.clone(),
             })
             .await
         {
@@ -521,7 +522,8 @@ where
             term,
             // conf_change,
             conf_state,
-            change_data: change_request,
+            change_data: request_ctx.data,
+            ctx: request_ctx.user_ctx,
             tx,
         }))
     }
@@ -660,26 +662,27 @@ where
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.
 /// Return Error if serialization error.
-fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipChangeData), Error> {
+fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipRequestContext), Error> {
     match ent.entry_type() {
         EntryType::EntryNormal => unreachable!(),
         EntryType::EntryConfChange => {
             let conf_change = ConfChange::decode(ent.data.as_ref())
                 .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
-            // TODO: use flexbuffer
-            let change_data = MembershipChangeData::decode(ent.context.as_ref())
-                .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
+            let ctx = flexbuffer_deserialize(&ent.context)?;
+            // let change_data = MembershipChangeData::decode(ent.context.as_ref())
+            //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
-            Ok((conf_change.into_v2(), change_data))
+            Ok((conf_change.into_v2(), ctx))
         }
         EntryType::EntryConfChangeV2 => {
             Ok((
                 ConfChangeV2::decode(ent.data.as_ref())
                     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
                 // TODO: use flexbuffer
-                MembershipChangeData::decode(ent.context.as_ref())
-                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                // MembershipChangeData::decode(ent.context.as_ref())
+                //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                flexbuffer_deserialize(&ent.context)?,
             ))
         }
     }

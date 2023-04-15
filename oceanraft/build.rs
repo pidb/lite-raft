@@ -47,7 +47,11 @@ fn main() {
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .message_attribute(
-            "multiraft.MembershipChangData",
+            "multiraft.ReplicaDesc",
+            "#[derive(serde::Serialize, serde::Deserialize)]",
+        )
+        .message_attribute(
+            "multiraft.MembershipChangeData",
             "#[derive(serde::Serialize, serde::Deserialize)]",
         )
         .message_attribute(
