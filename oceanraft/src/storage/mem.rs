@@ -28,9 +28,9 @@ use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
 use super::RaftSnapshotWriter;
 use super::RaftStorage;
-use super::RaftStorageReader;
-use super::RaftStorageWriter;
 use super::Result;
+use super::Storage;
+use super::StorageExt;
 
 #[derive(Default)]
 struct TriggerSlow {
@@ -395,7 +395,7 @@ impl MemStorage {
     }
 }
 
-impl RaftStorageReader for MemStorage {
+impl Storage for MemStorage {
     /// Implements the Storage trait.
     fn initial_state(&self) -> RaftResult<RaftState> {
         let core = self.rl();
@@ -502,7 +502,7 @@ impl RaftStorageReader for MemStorage {
     }
 }
 
-impl RaftStorageWriter for MemStorage {
+impl StorageExt for MemStorage {
     fn append(&self, ents: &[Entry]) -> Result<()> {
         self.wl().append(ents).map_err(|err| err.into())
     }

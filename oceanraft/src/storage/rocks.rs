@@ -30,9 +30,9 @@ mod storage {
     use crate::storage::RaftSnapshotReader;
     use crate::storage::RaftSnapshotWriter;
     use crate::storage::RaftStorage;
-    use crate::storage::RaftStorageReader;
-    use crate::storage::RaftStorageWriter;
     use crate::storage::Result;
+    use crate::storage::Storage;
+    use crate::storage::StorageExt;
     use crate::utils::flexbuffer_deserialize;
     use crate::utils::flexbuffer_serialize;
 
@@ -683,7 +683,7 @@ mod storage {
         }
     }
 
-    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageReader for RockStoreCore<SR, SW> {
+    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> Storage for RockStoreCore<SR, SW> {
         fn initial_state(&self) -> RaftResult<RaftState> {
             let cf = DBEnv::get_metadata_cf(&self.db);
 
@@ -924,7 +924,7 @@ mod storage {
         }
     }
 
-    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageWriter for RockStoreCore<SR, SW> {
+    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> StorageExt for RockStoreCore<SR, SW> {
         fn set_hardstate(&self, hs: HardState) -> Result<()> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
@@ -2231,7 +2231,7 @@ mod tests {
     use crate::protos::StoreData;
     use crate::storage::MultiRaftStorage;
     use crate::storage::RaftSnapshotWriter;
-    use crate::storage::RaftStorageWriter;
+    use crate::storage::StorageExt;
     use crate::Apply;
     use crate::ApplyNormal;
 

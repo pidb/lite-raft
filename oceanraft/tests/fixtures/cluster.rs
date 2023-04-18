@@ -30,7 +30,7 @@ use oceanraft::prelude::ConfState;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::RaftStorageWriter;
+use oceanraft::storage::StorageExt;
 use oceanraft::storage::RockStore;
 use oceanraft::task_group::TaskGroup;
 use oceanraft::tick::ManualTick;

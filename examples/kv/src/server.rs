@@ -4,7 +4,7 @@ use std::sync::Arc;
 use oceanraft::prelude::RaftState;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::RaftStorageWriter;
+use oceanraft::storage::StorageExt;
 use oceanraft::storage::RaftStorageReader;
 use oceanraft::storage::RockStore;
 use oceanraft::storage::RockStoreCore;
