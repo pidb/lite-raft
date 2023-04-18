@@ -92,15 +92,6 @@ where
     /// should be greater than or equal to `raft_group`
     pub commit_term: u64,
 
-    /// Represents the index applied to the current group apply,
-    /// updated when apply returns results    
-    pub applied_index: u64,
-
-    /// Represents the term applied to the current group apply,
-    /// updated when apply returns results    
-    pub applied_term: u64,
-
-    // pub state: RaftGroupState,
     pub status: Status,
     pub read_index_queue: ReadIndexQueue,
     pub shared_state: Arc<GroupState>,
@@ -477,9 +468,9 @@ where
         if let Some(commit) = light_ready.commit_index() {
             debug!("node {}: set commit = {}", node_id, commit);
             self.commit_index = commit;
-            gs.set_commit(commit)?;
+            gs.set_hardstate_commit(commit)?;
             self.shared_state.set_commit_index(commit);
-        } 
+        }
 
         if !light_ready.messages().is_empty() {
             let messages = light_ready.take_messages();
@@ -742,12 +733,12 @@ where
         self.raft_group.advance_apply_to(result.applied_index);
 
         // update local apply state
-        self.applied_index = result.applied_index;
-        self.applied_term = result.applied_term;
+        // self.applied_index = result.applied_index;
+        // self.applied_term = result.applied_term;
 
         // update shared state for apply
-        self.shared_state.set_applied_index(result.applied_index);
-        self.shared_state.set_applied_term(result.applied_term);
+        // self.shared_state.set_applied_index(result.applied_index);
+        // self.shared_state.set_applied_term(result.applied_term);
     }
 }
 

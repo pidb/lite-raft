@@ -22,6 +22,11 @@ impl StateMachine<KVData, KVResponse> for KVStateMachine {
         state: &oceanraft::GroupState,
         applys: Vec<Apply<KVData, KVResponse>>,
     ) -> Self::ApplyFuture<'life0> {
-        async move {  }
+        async move {
+
+            for apply in applys {
+                println!("apply index = {}", apply.get_index());
+            }
+          }
     }
 }

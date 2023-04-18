@@ -283,12 +283,6 @@ impl MemStorageCore {
         Ok(())
     }
 
-    /// Set applied index and term.
-    pub fn set_applied(&mut self, index: u64, term: u64) {
-        self.applied_index = index;
-        self.applied_term = term;
-    }
-
     pub fn set_commit(&mut self, commit: u64) {
         self.mut_hard_state().commit = commit;
     }
@@ -519,19 +513,9 @@ impl StorageExt for MemStorage {
         self.wl().set_conf_state(cs)
     }
 
-    fn set_applied(&self, applied_index: u64, appied_term: u64) -> Result<()> {
-        self.wl().set_applied(applied_index, appied_term);
-        Ok(())
-    }
-
-    fn set_commit(&self, commit: u64) -> Result<()> {
+    fn set_hardstate_commit(&self, commit: u64) -> Result<()> {
         self.wl().set_commit(commit);
         Ok(())
-    }
-
-    fn get_applied(&self) -> Result<(u64, u64)> {
-        let rl = self.rl();
-        Ok((rl.applied_index, rl.applied_term))
     }
 }
 

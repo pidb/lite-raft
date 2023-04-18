@@ -989,6 +989,7 @@ where
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
+        /* TODO: applied, hit skip */
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroup(RaftGroupError::Exists(
@@ -1014,7 +1015,7 @@ where
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
-        let (applied_index, applied_term) = group_storage.get_applied()?;
+        // let (applied_index, applied_term) = group_storage.get_applied()?;
         // if replicas_desc are not empty and are valid data,
         // we know where all replicas of the raft group are located.
         //
@@ -1027,7 +1028,7 @@ where
         // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied: applied_index,
+            applied: 0, // TODO: support hint skip
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: self.cfg.max_size_per_msg,
@@ -1050,8 +1051,6 @@ where
             replica_id,
             rs.hard_state.commit, /* commit_index */
             rs.hard_state.term,   /* commit_term */
-            applied_index,        /* applied_index */
-            applied_term,         /* applied_term */
             NO_LEADER,
             StateRole::Follower,
         )));
@@ -1066,8 +1065,8 @@ where
             status: Status::None,
             read_index_queue: ReadIndexQueue::new(),
             shared_state: shared_state.clone(),
-            applied_index,
-            applied_term,
+            // applied_index: 0,
+            // applied_term: 0,
             commit_index: rs.hard_state.commit,
             commit_term: rs.hard_state.term,
         };
@@ -1648,8 +1647,8 @@ mod tests {
 
             commit_term: 0, // TODO: init committed term from storage
             commit_index: 0,
-            applied_index: 0,
-            applied_term: 0,
+            // applied_index: 0,
+            // applied_term: 0,
         })
     }
 

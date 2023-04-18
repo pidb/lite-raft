@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use oceanraft::prelude::RaftState;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::StorageExt;
-use oceanraft::storage::RaftStorageReader;
 use oceanraft::storage::RockStore;
 use oceanraft::storage::RockStoreCore;
+use oceanraft::storage::Storage;
+use oceanraft::storage::StorageExt;
 use oceanraft::task_group::TaskGroup;
 use oceanraft::transport::MultiRaftServiceImpl;
 use oceanraft::transport::MultiRaftServiceServer;
@@ -96,7 +95,7 @@ impl KVServer {
         );
 
         let gs = rock_storage.group_storage(1, 1).await.unwrap();
-        if !gs.initial_state().unwrap().initialized(){
+        if !gs.initial_state().unwrap().initialized() {
             println!("not snapshot..");
             let mut snap = Snapshot::default();
             snap.mut_metadata().mut_conf_state().voters = vec![1];

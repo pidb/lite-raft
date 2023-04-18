@@ -2,7 +2,7 @@ use std::mem::take;
 use std::time::Duration;
 
 use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::RaftStorageReader;
+use oceanraft::storage::Storage;
 use oceanraft::Apply;
 use oceanraft::prelude::ConfChangeTransition;
 use oceanraft::prelude::ConfChangeType;

@@ -943,7 +943,7 @@ mod storage {
                 })
         }
 
-        fn set_commit(&self, commit: u64) -> Result<()> {
+        fn set_hardstate_commit(&self, commit: u64) -> Result<()> {
             let mut hs = self.get_hard_state().unwrap();
             hs.commit = commit;
             self.set_hardstate(hs)
@@ -967,41 +967,41 @@ mod storage {
                 })
         }
 
-        fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()> {
-            let applied = Applied {
-                index: applied_index,
-                term: applied_term,
-            };
+        // fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()> {
+        //     let applied = Applied {
+        //         index: applied_index,
+        //         term: applied_term,
+        //     };
 
-            let metacf = DBEnv::get_metadata_cf(&self.db);
-            let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-            let mut ser = flexbuffer_serialize(&applied).unwrap(); // FIXME: handle err
-            let mut writeopts = WriteOptions::default();
-            writeopts.set_sync(true);
-            self.db
-                .put_cf_opt(&metacf, &key, ser.take_buffer(), &writeopts)
-                .map_err(|err| {
-                    self.to_write_err(
-                        err,
-                        true,
-                        false,
-                        format!("set_applied_index: applied_index = {:?}", applied),
-                    )
-                })
-        }
+        //     let metacf = DBEnv::get_metadata_cf(&self.db);
+        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
+        //     let mut ser = flexbuffer_serialize(&applied).unwrap(); // FIXME: handle err
+        //     let mut writeopts = WriteOptions::default();
+        //     writeopts.set_sync(true);
+        //     self.db
+        //         .put_cf_opt(&metacf, &key, ser.take_buffer(), &writeopts)
+        //         .map_err(|err| {
+        //             self.to_write_err(
+        //                 err,
+        //                 true,
+        //                 false,
+        //                 format!("set_applied_index: applied_index = {:?}", applied),
+        //             )
+        //         })
+        // }
 
-        fn get_applied(&self) -> Result<(u64, u64)> {
-            let metacf = DBEnv::get_metadata_cf(&self.db);
-            let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-            let readopts = ReadOptions::default();
-            self.db
-                .get_cf_opt(&metacf, &key, &readopts)
-                .map_err(|err| self.to_write_err(err, true, false, format!("get_applied_index")))?
-                .map_or(Ok((0, 0)), |data| {
-                    let applied = flexbuffer_deserialize::<Applied>(&data).unwrap();
-                    Ok((applied.index, applied.term))
-                })
-        }
+        // fn get_applied(&self) -> Result<(u64, u64)> {
+        //     let metacf = DBEnv::get_metadata_cf(&self.db);
+        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
+        //     let readopts = ReadOptions::default();
+        //     self.db
+        //         .get_cf_opt(&metacf, &key, &readopts)
+        //         .map_err(|err| self.to_write_err(err, true, false, format!("get_applied_index")))?
+        //         .map_or(Ok((0, 0)), |data| {
+        //             let applied = flexbuffer_deserialize::<Applied>(&data).unwrap();
+        //             Ok((applied.index, applied.term))
+        //         })
+        // }
 
         fn append(&self, ents: &[Entry]) -> Result<()> {
             if ents.is_empty() {

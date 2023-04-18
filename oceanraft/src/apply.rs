@@ -31,7 +31,6 @@ use crate::msg::MembershipRequestContext;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
-use crate::protos::MembershipChangeData;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
 use crate::task_group::Stopper;
@@ -47,7 +46,7 @@ use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
 use super::proposal::Proposal;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct LocalApplyState {
     applied_term: u64,
     applied_index: u64,
@@ -206,28 +205,20 @@ where
                 .await
                 .unwrap();
 
-            if !self.local_apply_states.contains_key(&group_id) {
-                let (index, term) = gs.get_applied().unwrap();
-                self.local_apply_states.insert(
-                    group_id,
-                    LocalApplyState {
-                        applied_index: index,
-                        applied_term: term,
-                    },
-                );
-            }
-
-            let local_apply_state = self.local_apply_states.get_mut(&group_id).unwrap();
+            let apply_state = self
+                .local_apply_states
+                .entry(group_id)
+                .or_insert(LocalApplyState::default());
 
             let _ = self
                 .delegate
-                .handle_applys(group_id, replica_id, applys, local_apply_state, &gs)
+                .handle_applys(group_id, replica_id, applys, apply_state, &gs)
                 .await;
 
             let res = ApplyResultMessage {
                 group_id,
-                applied_index: local_apply_state.applied_index,
-                applied_term: local_apply_state.applied_term,
+                applied_index: apply_state.applied_index,
+                applied_term: apply_state.applied_term,
             };
 
             if let Err(_) = self.tx.send(res) {
@@ -623,12 +614,11 @@ where
     async fn handle_apply<S: RaftStorage>(
         &mut self,
         mut apply: ApplyData<R>,
-        local_apply_state: &mut LocalApplyState,
+        state: &mut LocalApplyState,
         gs: &S,
     ) {
         let group_id = apply.group_id;
-        let (prev_applied_index, prev_applied_term) =
-            (local_apply_state.applied_index, local_apply_state.applied_term);
+        let (prev_applied_index, prev_applied_term) = (state.applied_index, state.applied_term);
         let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
         // check if the state machine is backword
         if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
@@ -650,15 +640,15 @@ where
         // created with a configuration, and its last index and term should be equal to 0. This
         // case can happen when a consensus group is started with a membership change.
         // In this case, we give up continue check and then catch up leader state.
-        if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
-            panic!(
-                "node {}: group {} apply entries index does not match, expect {}, but got {}",
-                self.node_id,
-                group_id,
-                prev_applied_index + 1,
-                apply.entries[0].index
-            );
-        }
+        // if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
+        //     panic!(
+        //         "node {}: group {} apply entries index does not match, expect {}, but got {}",
+        //         self.node_id,
+        //         group_id,
+        //         prev_applied_index + 1,
+        //         apply.entries[0].index
+        //     );
+        // }
 
         self.push_pending_proposals(std::mem::take(&mut apply.proposals));
         let last_index = apply.entries.last().expect("unreachable").index;
@@ -687,12 +677,12 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        self.rsm.apply(group_id, &GroupState::default(), applys).await;
-        gs.set_applied(last_index, last_term).unwrap();
-        local_apply_state.applied_index = last_index;
-        local_apply_state.applied_term = last_term;
-        // shared_state.set_applied_index(last_index);
-        // shared_state.set_applied_index(last_term);
+        self.rsm
+            .apply(group_id, &GroupState::default(), applys)
+            .await;
+        // gs.set_applied(last_index, last_term).unwrap();
+        state.applied_index = last_index;
+        state.applied_term = last_term;
     }
 
     async fn handle_applys<S: RaftStorage>(
@@ -700,11 +690,11 @@ where
         group_id: u64,
         replica_id: u64,
         applys: Vec<ApplyData<R>>,
-        local_apply_state: &mut LocalApplyState,
+        apply_state: &mut LocalApplyState,
         gs: &S,
     ) {
         for apply in applys {
-            self.handle_apply(apply, local_apply_state, gs).await;
+            self.handle_apply(apply, apply_state, gs).await;
         }
     }
 }
@@ -914,7 +904,9 @@ mod test {
             let mut worker = new_worker(true, 400);
             let pending_applys = worker.batch_msgs(case.0.drain(..));
             for expect in case.1 {
-                let pending_applys = pending_applys.get(&(expect.group_id, expect.replica_id)).unwrap();
+                let pending_applys = pending_applys
+                    .get(&(expect.group_id, expect.replica_id))
+                    .unwrap();
                 assert_eq!(pending_applys.len(), expect.pending_apply_len);
 
                 for (i, pending_apply) in pending_applys.iter().enumerate() {

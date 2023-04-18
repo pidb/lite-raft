@@ -159,18 +159,8 @@ pub trait StorageExt {
     /// Saves the current ConfState
     fn set_confstate(&self, cs: ConfState) -> Result<()>;
 
-    /// Saves the (index, term) of the most recently applied entry in the state machine.
-    ///
-    /// # Notes
-    /// When the Raft group is initialized, the stored `applied_index` can be used
-    /// to skip over already applied entries.
-    fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()>;
-
     /// Saves the commit index to hardstate.
-    fn set_commit(&self, commit: u64) -> Result<()>;
-
-    /// Get saved applied (index, term).
-    fn get_applied(&self) -> Result<(u64, u64)>;
+    fn set_hardstate_commit(&self, commit: u64) -> Result<()>;
 
     /// Overwrites the contents of this Storage object with those of the given snapshot.
     ///

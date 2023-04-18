@@ -35,8 +35,6 @@ pub struct GroupState {
     replica_id: AtomicU64,
     commit_index: AtomicU64,
     commit_term: AtomicU64,
-    applied_term: AtomicU64,
-    applied_index: AtomicU64,
     leader_id: AtomicU64,
     role: AtomicUsize,
 }
@@ -47,16 +45,14 @@ impl Default for GroupState {
     }
 }
 
-impl From<(u64, u64, u64, u64, u64, u64, StateRole)> for GroupState {
-    fn from(value: (u64, u64, u64, u64, u64, u64, StateRole)) -> Self {
+impl From<(u64, u64, u64, u64, StateRole)> for GroupState {
+    fn from(value: (u64, u64, u64, u64, StateRole)) -> Self {
         Self {
             replica_id: AtomicU64::new(value.0),
             commit_index: AtomicU64::new(value.1),
             commit_term: AtomicU64::new(value.2),
-            applied_index: AtomicU64::new(value.3),
-            applied_term: AtomicU64::new(value.4),
-            leader_id: AtomicU64::new(value.5),
-            role: AtomicUsize::new(WrapStateRole::from(&value.6).0),
+            leader_id: AtomicU64::new(value.3),
+            role: AtomicUsize::new(WrapStateRole::from(&value.4).0),
         }
     }
 }
@@ -67,8 +63,6 @@ impl GroupState {
             replica_id: AtomicU64::new(0),
             commit_index: AtomicU64::new(0),
             commit_term: AtomicU64::new(0),
-            applied_index: AtomicU64::new(0),
-            applied_term: AtomicU64::new(0),
             leader_id: AtomicU64::new(0),
             role: AtomicUsize::new(0),
         }
@@ -106,29 +100,6 @@ impl GroupState {
     #[inline]
     pub fn set_commit_term(&self, val: u64) {
         self.commit_term.store(val, Ordering::SeqCst)
-    }
-
-    #[inline]
-    #[allow(unused)]
-    pub fn get_applied_term(&self) -> u64 {
-        self.applied_term.load(Ordering::SeqCst)
-    }
-
-    #[inline]
-    pub fn set_applied_term(&self, val: u64) {
-        self.applied_term.store(val, Ordering::SeqCst)
-    }
-
-    #[inline]
-    #[allow(unused)]
-    pub fn get_applied_index(&self) -> u64 {
-        self.applied_index.load(Ordering::SeqCst)
-    }
-
-    #[inline]
-    #[allow(unused)]
-    pub fn set_applied_index(&self, val: u64) {
-        self.applied_index.store(val, Ordering::SeqCst)
     }
 
     #[inline]
