@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use oceanraft::prelude::CreateGroupRequest;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::RockStore;
@@ -114,7 +115,15 @@ impl KVServer {
         )
         .unwrap();
 
-        multiraft.create_group(1, 1, None).await.unwrap();
+        multiraft
+            .create_group(CreateGroupRequest {
+                group_id: 1,
+                replica_id: 1,
+                replicas: vec![],
+                applied_hint: 0,
+            })
+            .await
+            .unwrap();
 
         Self {
             arg,

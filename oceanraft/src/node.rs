@@ -49,8 +49,6 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
-use super::msg::GroupData;
-use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
 use super::msg::QueryGroup;
@@ -550,7 +548,7 @@ where
             // because the heartbeats msg always hajacked and fanouted, so the msg.commit
             // always meanless.
             let _ = self
-                .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
+                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, 0)
                 .await
                 .map_err(|err| {
                     error!(
@@ -930,30 +928,22 @@ where
     async fn handle_manage_message(&mut self, msg: ManageMessage) -> Option<ResponseCallback> {
         match msg {
             // handle raft group management request
-            ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
-        }
-    }
-
-    #[tracing::instrument(
-        name = "MultiRaftActorRuntime::raft_group_management",
-        level = Level::TRACE,
-        skip_all
-    )]
-    async fn handle_group_manage(&mut self, data: GroupData) -> Option<ResponseCallback> {
-        let tx = data.tx;
-        let res = match data.op {
-            GroupOp::Create => {
-                self.active_groups.insert(data.group_id);
-                self.create_raft_group(
-                    data.group_id,
-                    data.replica_id,
-                    data.replicas.map_or(vec![], |rs| rs),
-                )
-                .await
+            // ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
+            ManageMessage::CreateGroup(request, tx) => {
+                self.active_groups.insert(request.group_id);
+                let res = self
+                    .create_raft_group(
+                        request.group_id,
+                        request.replica_id,
+                        request.replicas,
+                        request.applied_hint,
+                    )
+                    .await;
+                return Some(ResponseCallbackQueue::new_callback(tx, res));
             }
-            GroupOp::Remove => {
+            ManageMessage::RemoveGroup(request, tx) => {
                 // marke delete
-                let group_id = data.group_id;
+                let group_id = request.group_id;
                 let group = match self.groups.get_mut(&group_id) {
                     None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
                     Some(group) => group,
@@ -971,13 +961,56 @@ where
                 group.status = Status::Delete;
 
                 // TODO: impl broadcast
-
-                Ok(())
+                return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
             }
-        };
-
-        return Some(ResponseCallbackQueue::new_callback(tx, res));
+        }
     }
+
+    // #[tracing::instrument(
+    //     name = "MultiRaftActorRuntime::raft_group_management",
+    //     level = Level::TRACE,
+    //     skip_all
+    // )]
+    // async fn handle_group_manage(&mut self, data: GroupData) -> Option<ResponseCallback> {
+    //     let tx = data.tx;
+    //     let res = match data.op {
+    //         GroupOp::Create => {
+    //             self.active_groups.insert(data.group_id);
+    //             self.create_raft_group(
+    //                 data.group_id,
+    //                 data.replica_id,
+    //                 data.replicas.map_or(vec![], |rs| rs),
+    //                 0,
+    //             )
+    //             .await
+    //         }
+    //         GroupOp::Remove => {
+    //             // marke delete
+    //             let group_id = data.group_id;
+    //             let group = match self.groups.get_mut(&group_id) {
+    //                 None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
+    //                 Some(group) => group,
+    //             };
+
+    //             for proposal in group.proposals.drain(..) {
+    //                 proposal.tx.map(|tx| {
+    //                     tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+    //                         self.node_id,
+    //                         group_id,
+    //                     ))))
+    //                 });
+    //             }
+
+    //             group.status = Status::Delete;
+
+    //             // TODO: impl broadcast
+
+    //             Ok(())
+    //         }
+    //     };
+
+    //     return Some(ResponseCallbackQueue::new_callback(tx, res));
+    // }
 
     // #[tracing::instrument(
     //     name = "MultiRaftActorRuntime::create_raft_group",
@@ -989,6 +1022,7 @@ where
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
+        applied: u64,
         /* TODO: applied, hit skip */
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {

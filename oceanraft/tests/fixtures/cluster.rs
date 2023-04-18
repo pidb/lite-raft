@@ -1,54 +1,37 @@
 use std::collections::HashMap;
 use std::env::temp_dir;
-use std::fs::remove_dir_all;
-use std::marker::PhantomData;
-use std::mem::take;
+
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use oceanraft::prelude::StoreData;
-use oceanraft::storage::MemStorage;
-use oceanraft::storage::MultiRaftMemoryStorage;
-use oceanraft::storage::RaftStorage;
-use oceanraft::storage::RockStoreCore;
-use oceanraft::storage::StateMachineStore;
+use oceanraft::prelude::CreateGroupRequest;
+
 use oceanraft::MultiRaftTypeSpecialization;
-use oceanraft::ProposeData;
-use oceanraft::StateMachine;
+
 use rand::distributions::Alphanumeric;
 use rand::Rng;
-use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::oneshot;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 
-use oceanraft::define_multiraft;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::StorageExt;
-use oceanraft::storage::RockStore;
-use oceanraft::task_group::TaskGroup;
 use oceanraft::tick::ManualTick;
 use oceanraft::transport::LocalTransport;
 use oceanraft::Apply;
 use oceanraft::ApplyMembership;
 use oceanraft::ApplyNormal;
-use oceanraft::Config;
 use oceanraft::Error;
 use oceanraft::Event;
 use oceanraft::LeaderElectionEvent;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftMessageSenderImpl;
-use oceanraft::ProposeResponse;
-
-use super::builder::ClusterBuilder;
-use super::rsm::MemStoreStateMachine;
-use super::rsm::RockStoreStateMachine;
 
 /// Generates a random string of n size
 pub fn rand_string(n: usize) -> String {
@@ -190,8 +173,17 @@ where
             let node = &self.nodes[place_node_index];
 
             // create admin message for create raft grop
+            // let _ = node
+            //     .create_group(plan.group_id, replica_id, Some(replicas.clone()))
+            //     .await?;
+
             let _ = node
-                .create_group(plan.group_id, replica_id, Some(replicas.clone()))
+                .create_group(CreateGroupRequest {
+                    group_id: plan.group_id,
+                    replica_id,
+                    replicas: replicas.clone(),
+                    applied_hint: 0,
+                })
                 .await?;
 
             match self.groups.get_mut(&plan.group_id) {

@@ -9,10 +9,11 @@ use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::prelude::CreateGroupRequest;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-use crate::prelude::ReplicaDesc;
+use crate::protos::RemoveGroupRequest;
 use crate::task_group::TaskGroup;
 
 use super::config::Config;
@@ -20,8 +21,6 @@ use super::error::ChannelError;
 use super::error::Error;
 use super::event::EventChannel;
 use super::event::EventReceiver;
-use super::msg::GroupData;
-use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::MembershipRequest;
 use super::msg::ProposeMessage;
@@ -442,107 +441,35 @@ where
         rx
     }
 
-    pub async fn create_group(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
-        rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    pub fn create_group_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
-        rx.blocking_recv().map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    #[inline]
-    pub fn create_group_non_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
-        self.group_operation(group_id, replica_id, replicas, GroupOp::Create)
-    }
-
-    pub async fn remove_group(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
-        rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    pub fn remove_group_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
-        rx.blocking_recv().map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    #[inline]
-    pub fn remove_group_non_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
-        self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)
-    }
-
-    fn group_operation(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-        op: GroupOp,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+    pub async fn create_group(&self, request: CreateGroupRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        match self
-            .actor
-            .manage_tx
-            .try_send(ManageMessage::GroupData(GroupData {
-                group_id,
-                replica_id,
-                replicas,
-                op,
-                tx,
-            })) {
+        self.management_request(ManageMessage::CreateGroup(request, tx))?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    pub async fn remove_group(&self, request: RemoveGroupRequest) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.management_request(ManageMessage::RemoveGroup(request, tx))?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    fn management_request(&self, msg: ManageMessage) -> Result<(), Error> {
+        match self.actor.manage_tx.try_send(msg) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for group management".to_owned(),
             ))),
             Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::SenderClosed(
                 "channel closed for group management".to_owned(),
             ))),
-            Ok(_) => Ok(rx),
+            Ok(_) => Ok(()),
         }
     }
 
