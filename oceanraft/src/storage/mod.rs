@@ -217,11 +217,11 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     type ScanGroupMetadataFuture<'life0>: Send + Future<Output = Result<Vec<GroupMetadata>>>
     where
         Self: 'life0;
-    /// List groups metadatas from storage.
+    /// Scan groups metadatas from storage.
     ///
     /// # Notes
     /// If the number of groups is very large, which may cause a high memory usage,
-    /// should consider using group_iter (todo).
+    /// should consider using group_metadata_iter (todo).
     fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_>;
 
     /// GAT trait for `get_group_metadata`.
