@@ -28,9 +28,9 @@ use super::MultiRaftStorage;
 use super::RaftSnapshotReader;
 use super::RaftSnapshotWriter;
 use super::RaftStorage;
-use super::RaftStorageReader;
-use super::RaftStorageWriter;
 use super::Result;
+use super::Storage;
+use super::StorageExt;
 
 #[derive(Default)]
 struct TriggerSlow {
@@ -47,6 +47,9 @@ pub struct MemStorageCore {
     entries: Vec<Entry>,
     // Metadata of the last snapshot received.
     snapshot_metadata: SnapshotMetadata,
+    // Maintenance application applied
+    applied_index: u64,
+    applied_term: u64,
     // If it is true, the next snapshot will return a
     // SnapshotTemporarilyUnavailable error.
     trigger_snap_temp_unavailable: bool,
@@ -280,6 +283,10 @@ impl MemStorageCore {
         Ok(())
     }
 
+    pub fn set_commit(&mut self, commit: u64) {
+        self.mut_hard_state().commit = commit;
+    }
+
     /// Trigger a SnapshotTemporarilyUnavailable error.
     pub fn trigger_snap_unavailable(&mut self) {
         self.trigger_snap_temp_unavailable = true;
@@ -382,7 +389,7 @@ impl MemStorage {
     }
 }
 
-impl RaftStorageReader for MemStorage {
+impl Storage for MemStorage {
     /// Implements the Storage trait.
     fn initial_state(&self) -> RaftResult<RaftState> {
         let core = self.rl();
@@ -489,7 +496,7 @@ impl RaftStorageReader for MemStorage {
     }
 }
 
-impl RaftStorageWriter for MemStorage {
+impl StorageExt for MemStorage {
     fn append(&self, ents: &[Entry]) -> Result<()> {
         self.wl().append(ents).map_err(|err| err.into())
     }
@@ -504,6 +511,11 @@ impl RaftStorageWriter for MemStorage {
 
     fn set_confstate(&self, cs: ConfState) -> Result<()> {
         self.wl().set_conf_state(cs)
+    }
+
+    fn set_hardstate_commit(&self, commit: u64) -> Result<()> {
+        self.wl().set_commit(commit);
+        Ok(())
     }
 }
 

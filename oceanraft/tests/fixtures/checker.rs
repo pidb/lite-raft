@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use oceanraft::multiraft::ApplyNormal;
+use oceanraft::ApplyNormal;
 use oceanraft::prelude::StoreData;
 
 // use super::cluster::FixtureWriteData;

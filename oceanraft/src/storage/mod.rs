@@ -134,17 +134,17 @@ impl From<Error> for RaftError {
     }
 }
 
-type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 /// RaftStorageReader comes from a re-export of `raft-rs`, and provides an
 /// interface for `raft-rs` to read storage
-pub use raft::Storage as RaftStorageReader;
+pub use raft::Storage;
 
 /// RaftStorageWriter provides writes all the information about the current Raft implementation,
 /// including Raft Log, commit index, the leader to vote for, etc.
 ///
 /// If any Storage method returns an error, the raft instance will become inoperable and refuse to participate in elections; the application is responsible for cleanup and recovery in this case.
-pub trait RaftStorageWriter {
+pub trait StorageExt {
     /// Append the new entries to storage.
     ///
     /// # Panics
@@ -158,6 +158,9 @@ pub trait RaftStorageWriter {
 
     /// Saves the current ConfState
     fn set_confstate(&self, cs: ConfState) -> Result<()>;
+
+    /// Saves the commit index to hardstate.
+    fn set_hardstate_commit(&self, commit: u64) -> Result<()>;
 
     /// Overwrites the contents of this Storage object with those of the given snapshot.
     ///
@@ -191,9 +194,7 @@ pub trait RaftSnapshotWriter: Clone + Send + Sync + 'static {
 ///
 /// If any Storage method returns an error, the raft instance will become inoperable and refuse
 /// to participate in elections; the application is responsible for cleanup and recovery in this case.
-pub trait RaftStorage:
-    RaftStorageReader + RaftStorageWriter + Clone + Send + Sync + 'static
-{
+pub trait RaftStorage: Storage + StorageExt + Clone + Send + Sync + 'static {
     type SnapshotWriter: RaftSnapshotWriter;
     type SnapshotReader: RaftSnapshotReader;
 }

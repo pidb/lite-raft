@@ -1,7 +1,9 @@
-use super::error::Error;
+use crate::Error;
 
 /// A constant represents invalid node id of oceanraft node.
 pub const INVALID_NODE_ID: u64 = 0;
+
+const HEARTBEAT_TICK: usize = 2;
 
 #[derive(Clone, Debug)]
 /// RaftGroup configuration in physical node.
@@ -57,8 +59,8 @@ impl Default for Config {
         Config {
             node_id: 0,
             event_capacity: 1,
-            election_tick: 1,
-            heartbeat_tick: 3,
+            election_tick: HEARTBEAT_TICK * 10,
+            heartbeat_tick: HEARTBEAT_TICK,
             tick_interval: 10,
             max_batch_apply_msgs: 1,
             max_size_per_msg: 1024 * 1024,

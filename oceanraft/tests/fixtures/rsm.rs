@@ -1,12 +1,12 @@
 use futures::Future;
-use oceanraft::multiraft::storage::StateMachineStore;
-use oceanraft::multiraft::Apply;
-use oceanraft::multiraft::ApplyNormal;
-use oceanraft::multiraft::GroupState;
-use oceanraft::multiraft::ProposeData;
-use oceanraft::multiraft::ProposeResponse;
-use oceanraft::multiraft::StateMachine;
 use oceanraft::prelude::StoreData;
+use oceanraft::storage::StateMachineStore;
+use oceanraft::Apply;
+use oceanraft::ApplyNormal;
+use oceanraft::GroupState;
+use oceanraft::ProposeData;
+use oceanraft::ProposeResponse;
+use oceanraft::StateMachine;
 use tokio::sync::mpsc::Sender;
 use tracing::info;
 
@@ -43,7 +43,7 @@ where
                         membership
                             .tx
                             .take()
-                            .map(|tx| tx.send(Ok(((), None))));
+                            .map(|tx| tx.send(Ok(((), membership.ctx.take()))));
                     }
                 }
             }
@@ -63,21 +63,18 @@ where
 }
 
 #[derive(Clone)]
-pub struct RockStoreStateMachine
-{
+pub struct RockStoreStateMachine {
     kv_store: StateMachineStore<()>,
     tx: Sender<Vec<Apply<StoreData, ()>>>,
 }
 
-impl RockStoreStateMachine
-{
+impl RockStoreStateMachine {
     pub fn new(kv_store: StateMachineStore<()>, tx: Sender<Vec<Apply<StoreData, ()>>>) -> Self {
         Self { kv_store, tx }
     }
 }
 
-impl StateMachine<StoreData, ()> for RockStoreStateMachine
-{
+impl StateMachine<StoreData, ()> for RockStoreStateMachine {
     type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
     where
         Self: 'life0;
@@ -122,7 +119,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine
                         membership
                             .tx
                             .take()
-                            .map(|tx| tx.send(Ok(((), None))));
+                            .map(|tx| tx.send(Ok(((), membership.ctx.take()))));
                     }
                 }
             }

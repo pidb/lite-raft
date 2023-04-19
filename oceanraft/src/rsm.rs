@@ -41,6 +41,7 @@ pub struct ApplyMembership<RES: ProposeResponse> {
     pub term: u64,
     // pub conf_change: ConfChangeV2,
     pub change_data: MembershipChangeData,
+    pub ctx: Option<Vec<u8>>,
     pub conf_state: ConfState,
     pub tx: Option<oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>>,
 }
@@ -61,7 +62,7 @@ where
     W: ProposeData,
     R: ProposeResponse,
 {
-    pub(crate) fn get_index(&self) -> u64 {
+    pub fn get_index(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.index,
             Self::Normal(normal) => normal.index,
@@ -70,7 +71,7 @@ where
     }
 
     #[allow(unused)]
-    pub(crate) fn get_term(&self) -> u64 {
+    pub fn get_term(&self) -> u64 {
         match self {
             Self::NoOp(noop) => noop.term,
             Self::Normal(normal) => normal.term,

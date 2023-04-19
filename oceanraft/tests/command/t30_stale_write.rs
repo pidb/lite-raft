@@ -5,7 +5,7 @@ use oceanraft::prelude::StoreData;
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_rockstore_group;
 use crate::fixtures::rand_string;
-use crate::fixtures::FixtureCluster;
+use crate::fixtures::Cluster;
 use crate::fixtures::RockStoreEnv;
 use crate::fixtures::WriteChecker;
 
@@ -43,7 +43,7 @@ async fn test_group_stale_write() {
 
     cluster.campaign_group(2, group_id).await;
     for i in 1..3 {
-        let el = FixtureCluster::wait_leader_elect_event(&mut cluster, i + 1)
+        let el = Cluster::wait_leader_elect_event(&mut cluster, i + 1)
             .await
             .unwrap();
         assert_eq!(el.leader_id, 2);

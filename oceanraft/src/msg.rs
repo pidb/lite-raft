@@ -9,9 +9,10 @@ use tokio::sync::oneshot;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::ConfState;
+use crate::prelude::CreateGroupRequest;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
-use crate::prelude::ReplicaDesc;
+use crate::prelude::RemoveGroupRequest;
 
 use super::error::Error;
 use super::proposal::Proposal;
@@ -27,6 +28,12 @@ where
     pub data: REQ,
     pub context: Option<Vec<u8>>,
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct MembershipRequestContext {
+    pub data: MembershipChangeData,
+    pub user_ctx: Option<Vec<u8>>,
 }
 
 pub struct MembershipRequest<RES>
@@ -63,21 +70,9 @@ where
     Membership(MembershipRequest<RES>),
     ReadIndexData(ReadIndexData),
 }
-
-pub enum GroupOp {
-    Create,
-    Remove,
-}
-
-pub struct GroupData {
-    pub group_id: u64,
-    pub replica_id: u64,
-    pub replicas: Option<Vec<ReplicaDesc>>,
-    pub op: GroupOp,
-    pub tx: oneshot::Sender<Result<(), Error>>,
-}
 pub enum ManageMessage {
-    GroupData(GroupData),
+    CreateGroup(CreateGroupRequest, oneshot::Sender<Result<(), Error>>),
+    RemoveGroup(RemoveGroupRequest, oneshot::Sender<Result<(), Error>>),
 }
 
 #[allow(unused)]

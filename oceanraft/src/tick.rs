@@ -1,13 +1,7 @@
 use std::sync::Arc;
-#[allow(unused)]
 use std::time::Duration;
 
-use flexbuffers::FlexbufferSerializer;
-use flexbuffers::Reader;
 use futures::future::BoxFuture;
-use prost::Message;
-use serde::de::DeserializeOwned;
-use serde::ser::Serialize;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -17,44 +11,6 @@ use tokio::time::interval_at;
 #[allow(unused)]
 use tokio::time::Instant;
 use tokio::time::Interval;
-
-use crate::prelude::Entry;
-
-use super::error::DeserializationError;
-use super::error::SerializationError;
-use super::Error;
-
-#[inline]
-pub fn compute_entry_size(ent: &Entry) -> usize {
-    Message::encoded_len(ent)
-}
-
-/// Zero copy serialization using flexbuffer, data needs to implement `Serialize` trait.
-/// If Ok, `FlexbufferSerializer` is returned and the user can call `take_buffer` to get
-/// the data.
-#[inline]
-pub fn flexbuffer_serialize<S>(data: &S) -> Result<FlexbufferSerializer, Error>
-where
-    S: Serialize,
-{
-    let mut ser = FlexbufferSerializer::new();
-    data.serialize(&mut ser)
-        .map_err(|err| Error::Serialization(SerializationError::Flexbuffer(err)))?;
-    Ok(ser)
-}
-
-/// Zero copy deserialization using flexbuffer. if Ok, `D` of implementation `DeserializeOwned`
-/// is returned.
-#[inline]
-pub fn flexbuffer_deserialize<D>(data: &[u8]) -> Result<D, Error>
-where
-    D: DeserializeOwned,
-{
-    let reader = Reader::get_root(data).unwrap(); // TODO: add erro to Other
-
-    D::deserialize(reader)
-        .map_err(|err| Error::Deserialization(DeserializationError::Flexbuffer(err)))
-}
 
 /// Ticker periodically sends tick and provides recv future.
 /// Ticker doesn't care how the tick is sent.

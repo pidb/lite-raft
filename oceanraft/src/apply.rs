@@ -14,35 +14,39 @@ use tracing::info;
 use tracing::trace;
 use tracing::Span;
 
-use crate::multiraft::util::flexbuffer_deserialize;
-use crate::multiraft::ProposeResponse;
+use crate::Apply;
+use crate::ApplyMembership;
+use crate::ApplyNoOp;
+use crate::ApplyNormal;
+use crate::Config;
+use crate::Error;
+use crate::GroupState;
+use crate::GroupStates;
+use crate::ProposeData;
+use crate::ProposeError;
+use crate::ProposeResponse;
+use crate::StateMachine;
+
+use crate::msg::MembershipRequestContext;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
-use crate::protos::MembershipChangeData;
-use crate::util::Stopper;
-use crate::util::TaskGroup;
+use crate::storage::MultiRaftStorage;
+use crate::storage::RaftStorage;
+use crate::task_group::Stopper;
+use crate::task_group::TaskGroup;
+use crate::utils::flexbuffer_deserialize;
 
-use super::config::Config;
 use super::error::ChannelError;
 use super::error::DeserializationError;
-use super::error::Error;
-use super::error::ProposeError;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
 use super::proposal::Proposal;
-use super::state::GroupStates;
-use super::Apply;
-use super::ApplyMembership;
-use super::ApplyNoOp;
-use super::ApplyNormal;
-use super::GroupState;
-use super::ProposeData;
-use super::StateMachine;
 
+#[derive(Debug, Default)]
 struct LocalApplyState {
     applied_term: u64,
     applied_index: u64,
@@ -51,9 +55,10 @@ struct LocalApplyState {
 pub struct ApplyActor;
 
 impl ApplyActor {
-    pub(crate) fn spawn<W, R, RSM>(
+    pub(crate) fn spawn<W, R, RSM, S, MS>(
         cfg: &Config,
         rsm: RSM,
+        storage: MS,
         shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
         response_tx: UnboundedSender<ApplyResultMessage>,
@@ -64,8 +69,18 @@ impl ApplyActor {
         W: ProposeData,
         R: ProposeResponse,
         RSM: StateMachine<W, R>,
+        S: RaftStorage,
+        MS: MultiRaftStorage<S>,
     {
-        let worker = ApplyWorker::new(cfg, rsm, shared_states, request_rx, response_tx, commit_tx);
+        let worker = ApplyWorker::new(
+            cfg,
+            rsm,
+            storage,
+            shared_states,
+            request_rx,
+            response_tx,
+            commit_tx,
+        );
         let stopper = task_group.stopper();
         task_group.spawn(async move {
             worker.main_loop(stopper).await;
@@ -75,11 +90,13 @@ impl ApplyActor {
     }
 }
 
-pub struct ApplyWorker<W, R, RSM>
+pub struct ApplyWorker<W, R, RSM, S, MS>
 where
     W: ProposeData,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
+    S: RaftStorage,
+    MS: MultiRaftStorage<S>,
 {
     node_id: u64,
     cfg: Config,
@@ -88,24 +105,29 @@ where
     delegate: ApplyDelegate<W, R, RSM>,
     local_apply_states: HashMap<u64, LocalApplyState>,
     shared_states: GroupStates,
+    storage: MS,
+    _m: PhantomData<S>,
 }
 
-impl<W, R, RSM> ApplyWorker<W, R, RSM>
+impl<W, R, RSM, S, MS> ApplyWorker<W, R, RSM, S, MS>
 where
     W: ProposeData,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
+    S: RaftStorage,
+    MS: MultiRaftStorage<S>,
 {
     #[inline]
     fn insert_pending_apply(
-        applys: &mut HashMap<u64, Vec<ApplyData<R>>>,
+        applys: &mut HashMap<(u64, u64), Vec<ApplyData<R>>>,
         group_id: u64,
+        replica_id: u64,
         apply: ApplyData<R>,
     ) {
-        match applys.get_mut(&group_id) {
+        match applys.get_mut(&(group_id, replica_id)) {
             Some(applys) => applys.push(apply),
             None => {
-                applys.insert(group_id, vec![apply]);
+                applys.insert((group_id, replica_id), vec![apply]);
             }
         };
     }
@@ -118,8 +140,8 @@ where
     fn batch_msgs(
         &mut self,
         msgs: std::vec::Drain<'_, ApplyMessage<R>>,
-    ) -> HashMap<u64, Vec<ApplyData<R>>> {
-        let mut pending_applys = HashMap::<u64, Vec<ApplyData<R>>>::new();
+    ) -> HashMap<(u64, u64), Vec<ApplyData<R>>> {
+        let mut pending_applys = HashMap::new();
         let mut batch_applys: HashMap<u64, Option<ApplyData<R>>> = HashMap::new();
 
         for msg in msgs {
@@ -127,7 +149,12 @@ where
                 ApplyMessage::Apply { applys } => {
                     for (group_id, mut apply) in applys.into_iter() {
                         if !self.cfg.batch_apply {
-                            Self::insert_pending_apply(&mut pending_applys, group_id, apply);
+                            Self::insert_pending_apply(
+                                &mut pending_applys,
+                                group_id,
+                                apply.replica_id,
+                                apply,
+                            );
                         } else {
                             match batch_applys.get_mut(&group_id) {
                                 Some(batch_apply) => {
@@ -138,6 +165,7 @@ where
                                             Self::insert_pending_apply(
                                                 &mut pending_applys,
                                                 group_id,
+                                                apply.replica_id,
                                                 batch_apply.take().expect("unreachable"),
                                             );
                                         }
@@ -156,7 +184,12 @@ where
 
         for (group_id, batch_apply) in batch_applys {
             if let Some(batch_apply) = batch_apply {
-                Self::insert_pending_apply(&mut pending_applys, group_id, batch_apply);
+                Self::insert_pending_apply(
+                    &mut pending_applys,
+                    group_id,
+                    batch_apply.replica_id,
+                    batch_apply,
+                );
             }
         }
 
@@ -165,20 +198,21 @@ where
 
     async fn handle_msgs(&mut self, msgs: std::vec::Drain<'_, ApplyMessage<R>>) {
         let pending_applys = self.batch_msgs(msgs);
-        for (group_id, applys) in pending_applys {
-            // FIXME: don't unwrap.
-            let shared_state = self.shared_states.get(group_id).unwrap();
+        for ((group_id, replica_id), applys) in pending_applys {
+            let gs = self
+                .storage
+                .group_storage(group_id, replica_id)
+                .await
+                .unwrap();
+
             let apply_state = self
                 .local_apply_states
                 .entry(group_id)
-                .or_insert(LocalApplyState {
-                    applied_index: shared_state.get_applied_index(),
-                    applied_term: shared_state.get_applied_term(),
-                });
+                .or_insert(LocalApplyState::default());
 
             let _ = self
                 .delegate
-                .handle_applys(group_id, applys, apply_state, shared_state.as_ref())
+                .handle_applys(group_id, replica_id, applys, apply_state, &gs)
                 .await;
 
             let res = ApplyResultMessage {
@@ -224,6 +258,7 @@ where
     fn new(
         cfg: &Config,
         rsm: RSM,
+        storage: MS,
         shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
         response_tx: UnboundedSender<ApplyResultMessage>,
@@ -236,7 +271,9 @@ where
             rx: request_rx,
             tx: response_tx,
             shared_states,
+            storage,
             delegate: ApplyDelegate::new(cfg.node_id, rsm, commit_tx),
+            _m: PhantomData,
         }
     }
 }
@@ -468,7 +505,7 @@ where
         }
 
         let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
-        let (conf_change, change_request) = match parse_conf_change(&ent) {
+        let (conf_change, request_ctx) = match parse_conf_change(&ent) {
             Err(err) => {
                 tx.map(|tx| {
                     if let Err(backed) = tx.send(Err(err)) {
@@ -496,7 +533,7 @@ where
                 index,
                 term,
                 conf_change,
-                change_request: change_request.clone(),
+                change_request: request_ctx.data.clone(),
             })
             .await
         {
@@ -520,7 +557,8 @@ where
             term,
             // conf_change,
             conf_state,
-            change_data: change_request,
+            change_data: request_ctx.data,
+            ctx: request_ctx.user_ctx,
             tx,
         }))
     }
@@ -573,15 +611,14 @@ where
         }))
     }
 
-    async fn handle_apply(
+    async fn handle_apply<S: RaftStorage>(
         &mut self,
         mut apply: ApplyData<R>,
-        apply_state: &mut LocalApplyState,
-        shared_state: &GroupState,
+        state: &mut LocalApplyState,
+        gs: &S,
     ) {
         let group_id = apply.group_id;
-        let (prev_applied_index, prev_applied_term) =
-            (apply_state.applied_index, apply_state.applied_term);
+        let (prev_applied_index, prev_applied_term) = (state.applied_index, state.applied_term);
         let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
         // check if the state machine is backword
         if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
@@ -603,12 +640,15 @@ where
         // created with a configuration, and its last index and term should be equal to 0. This
         // case can happen when a consensus group is started with a membership change.
         // In this case, we give up continue check and then catch up leader state.
-        if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
-            panic!(
-                "node {}: group {} apply entries index does not match, expect {}, but got {}",
-                self.node_id, group_id, prev_applied_index, apply.entries[0].index
-            );
-        }
+        // if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
+        //     panic!(
+        //         "node {}: group {} apply entries index does not match, expect {}, but got {}",
+        //         self.node_id,
+        //         group_id,
+        //         prev_applied_index + 1,
+        //         apply.entries[0].index
+        //     );
+        // }
 
         self.push_pending_proposals(std::mem::take(&mut apply.proposals));
         let last_index = apply.entries.last().expect("unreachable").index;
@@ -637,48 +677,51 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        self.rsm.apply(group_id, shared_state, applys).await;
-        apply_state.applied_index = last_index;
-        apply_state.applied_term = last_term;
-        shared_state.set_applied_index(last_index);
-        shared_state.set_applied_index(last_term);
+        self.rsm
+            .apply(group_id, &GroupState::default(), applys)
+            .await;
+        // gs.set_applied(last_index, last_term).unwrap();
+        state.applied_index = last_index;
+        state.applied_term = last_term;
     }
 
-    async fn handle_applys(
+    async fn handle_applys<S: RaftStorage>(
         &mut self,
         group_id: u64,
+        replica_id: u64,
         applys: Vec<ApplyData<R>>,
         apply_state: &mut LocalApplyState,
-        shared_state: &GroupState,
+        gs: &S,
     ) {
         for apply in applys {
-            self.handle_apply(apply, apply_state, shared_state).await;
+            self.handle_apply(apply, apply_state, gs).await;
         }
     }
 }
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.
 /// Return Error if serialization error.
-fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipChangeData), Error> {
+fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipRequestContext), Error> {
     match ent.entry_type() {
         EntryType::EntryNormal => unreachable!(),
         EntryType::EntryConfChange => {
             let conf_change = ConfChange::decode(ent.data.as_ref())
                 .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
-            // TODO: use flexbuffer
-            let change_data = MembershipChangeData::decode(ent.context.as_ref())
-                .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
+            let ctx = flexbuffer_deserialize(&ent.context)?;
+            // let change_data = MembershipChangeData::decode(ent.context.as_ref())
+            //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
-            Ok((conf_change.into_v2(), change_data))
+            Ok((conf_change.into_v2(), ctx))
         }
         EntryType::EntryConfChangeV2 => {
             Ok((
                 ConfChangeV2::decode(ent.data.as_ref())
                     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
                 // TODO: use flexbuffer
-                MembershipChangeData::decode(ent.context.as_ref())
-                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                // MembershipChangeData::decode(ent.context.as_ref())
+                //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                flexbuffer_deserialize(&ent.context)?,
             ))
         }
     }
@@ -690,14 +733,17 @@ mod test {
     use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::multiraft::state::GroupState;
-    use crate::multiraft::state::GroupStates;
-    use crate::multiraft::util::compute_entry_size;
-    use crate::multiraft::Config;
+    use crate::state::GroupState;
+    use crate::state::GroupStates;
+    use crate::storage::MemStorage;
+    use crate::storage::MultiRaftMemoryStorage;
+    use crate::utils::compute_entry_size;
+    use crate::Config;
     // use crate::multiraft::MultiStateMachine;
-    use crate::multiraft::StateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
+    use crate::Apply;
+    use crate::StateMachine;
 
     use super::ApplyData;
     use super::ApplyMessage;
@@ -708,12 +754,7 @@ mod test {
         type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn apply(
-            &self,
-            _: u64,
-            _: &GroupState,
-            _: Vec<crate::multiraft::Apply<(), ()>>,
-        ) -> Self::ApplyFuture<'_> {
+        fn apply(&self, _: u64, _: &GroupState, _: Vec<Apply<(), ()>>) -> Self::ApplyFuture<'_> {
             async move {}
         }
     }
@@ -755,7 +796,10 @@ mod test {
         }
     }
 
-    fn new_worker(batch_apply: bool, batch_size: usize) -> ApplyWorker<(), (), NoOpStateMachine> {
+    fn new_worker(
+        batch_apply: bool,
+        batch_size: usize,
+    ) -> ApplyWorker<(), (), NoOpStateMachine, MemStorage, MultiRaftMemoryStorage> {
         let (_request_tx, request_rx) = unbounded_channel();
         let (response_tx, _response_rx) = unbounded_channel();
         let (callback_tx, _callback_rx) = unbounded_channel();
@@ -765,11 +809,13 @@ mod test {
             ..Default::default()
         };
 
+        let storage = MultiRaftMemoryStorage::new(1);
         let rsm = NoOpStateMachine {};
         let shared_states = GroupStates::new();
         ApplyWorker::new(
             &cfg,
             rsm,
+            storage,
             shared_states,
             request_rx,
             response_tx,
@@ -780,6 +826,7 @@ mod test {
     fn test_batch_pendings() {
         struct Expect {
             group_id: u64,
+            replica_id: u64,
             pending_apply_len: usize,
             ent_index_ranges: Vec<(u64, u64)>,
         }
@@ -822,26 +869,31 @@ mod test {
             vec![
                 Expect {
                     group_id: 1,
+                    replica_id: 1,
                     pending_apply_len: 1,
                     ent_index_ranges: vec![(1, 7)],
                 },
                 Expect {
                     group_id: 2,
+                    replica_id: 1,
                     pending_apply_len: 1,
                     ent_index_ranges: vec![(1, 7)],
                 },
                 Expect {
                     group_id: 3,
+                    replica_id: 1,
                     pending_apply_len: 1,
                     ent_index_ranges: vec![(1, 7)],
                 },
                 Expect {
                     group_id: 4,
+                    replica_id: 1,
                     pending_apply_len: 2,
                     ent_index_ranges: vec![(1, 1), (2, 4)],
                 },
                 Expect {
                     group_id: 5,
+                    replica_id: 1,
                     pending_apply_len: 2,
                     ent_index_ranges: vec![(1, 1), (2, 4)],
                 },
@@ -852,7 +904,9 @@ mod test {
             let mut worker = new_worker(true, 400);
             let pending_applys = worker.batch_msgs(case.0.drain(..));
             for expect in case.1 {
-                let pending_applys = pending_applys.get(&expect.group_id).unwrap();
+                let pending_applys = pending_applys
+                    .get(&(expect.group_id, expect.replica_id))
+                    .unwrap();
                 assert_eq!(pending_applys.len(), expect.pending_apply_len);
 
                 for (i, pending_apply) in pending_applys.iter().enumerate() {

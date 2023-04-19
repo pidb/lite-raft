@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::time::Duration;
 
 use futures::Future;
 use serde::Deserialize;
@@ -8,22 +7,20 @@ use serde::Serialize;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
-use tokio::time::timeout;
 use uuid::Uuid;
 
+use crate::prelude::CreateGroupRequest;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-use crate::prelude::ReplicaDesc;
-use crate::util::TaskGroup;
+use crate::protos::RemoveGroupRequest;
+use crate::task_group::TaskGroup;
 
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
 use super::event::EventChannel;
 use super::event::EventReceiver;
-use super::msg::GroupData;
-use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::MembershipRequest;
 use super::msg::ProposeMessage;
@@ -35,8 +32,8 @@ use super::node::NodeActor;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
+use super::tick::Ticker;
 use super::transport::Transport;
-use super::util::Ticker;
 use super::RaftGroupError;
 use super::StateMachine;
 
@@ -61,6 +58,14 @@ impl<T> ProposeData for T where
 pub trait ProposeResponse: Debug + Clone + Send + Sync + 'static {}
 
 impl<R> ProposeResponse for R where R: Debug + Clone + Send + Sync + 'static {}
+
+pub trait MultiRaftTypeSpecialization {
+    type D: ProposeData;
+    type R: ProposeResponse;
+    type M: StateMachine<Self::D, Self::R>;
+    type S: RaftStorage;
+    type MS: MultiRaftStorage<Self::S>;
+}
 
 /// Send `MultiRaftMessage` to `MuiltiRaft`.
 ///
@@ -110,38 +115,33 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
 }
 
 /// MultiRaft represents a group of raft replicas
-pub struct MultiRaft<PD, RES, RSM>
+pub struct MultiRaft<T, TR>
 where
-    PD: ProposeData,
-    RES: ProposeResponse,
+    T: MultiRaftTypeSpecialization,
+    TR: Transport + Clone,
 {
     node_id: u64,
     task_group: TaskGroup,
-    actor: NodeActor<PD, RES>,
+    actor: NodeActor<T::D, T::R>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
-    _m1: PhantomData<RSM>,
+    _m1: PhantomData<TR>,
 }
 
-impl<PD, RES, RSM> MultiRaft<PD, RES, RSM>
+impl<T, TR> MultiRaft<T, TR>
 where
-    PD: ProposeData,
-    RES: ProposeResponse,
-    RSM: StateMachine<PD, RES>,
+    T: MultiRaftTypeSpecialization,
+    TR: Transport + Clone,
 {
-    pub fn new<TR, RS, MRS, TK>(
+    pub fn new<TK>(
         cfg: Config,
         transport: TR,
-        storage: MRS,
-        rsm: RSM,
+        storage: T::MS,
+        state_machine: T::M,
         task_group: TaskGroup,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
     where
-        TR: Transport + Clone,
-        RS: RaftStorage,
-        MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<PD, RES>,
         TK: Ticker,
     {
         cfg.validate()?;
@@ -151,7 +151,7 @@ where
             &cfg,
             &transport,
             &storage,
-            rsm,
+            state_machine,
             &event_bcast,
             &task_group,
             ticker,
@@ -197,8 +197,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        propose: PD,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        propose: T::D,
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.write_non_block(group_id, term, context, propose)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -212,8 +212,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        data: PD,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+        data: T::D,
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.write_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -244,8 +244,8 @@ where
         group_id: u64,
         term: u64,
         context: Option<Vec<u8>>,
-        data: PD,
-    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
+        data: T::D,
+    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
@@ -275,7 +275,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -290,7 +290,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<(RES, Option<Vec<u8>>), Error> {
+    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
         let rx = self.membership_non_block(group_id, term, context, data)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
@@ -305,7 +305,7 @@ where
         term: Option<u64>,
         context: Option<Vec<u8>>,
         data: MembershipChangeData,
-    ) -> Result<oneshot::Receiver<Result<(RES, Option<Vec<u8>>), Error>>, Error> {
+    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
@@ -441,107 +441,35 @@ where
         rx
     }
 
-    pub async fn create_group(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
-        rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    pub fn create_group_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Create)?;
-        rx.blocking_recv().map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    #[inline]
-    pub fn create_group_non_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
-        self.group_operation(group_id, replica_id, replicas, GroupOp::Create)
-    }
-
-    pub async fn remove_group(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
-        rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    pub fn remove_group_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<(), Error> {
-        let rx = self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)?;
-        rx.blocking_recv().map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed(
-                "the sender that result the group_manager change was dropped".to_owned(),
-            ))
-        })?
-    }
-
-    #[inline]
-    pub fn remove_group_non_block(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
-        self.group_operation(group_id, replica_id, replicas, GroupOp::Remove)
-    }
-
-    fn group_operation(
-        &self,
-        group_id: u64,
-        replica_id: u64,
-        replicas: Option<Vec<ReplicaDesc>>,
-        op: GroupOp,
-    ) -> Result<oneshot::Receiver<Result<(), Error>>, Error> {
+    pub async fn create_group(&self, request: CreateGroupRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        match self
-            .actor
-            .manage_tx
-            .try_send(ManageMessage::GroupData(GroupData {
-                group_id,
-                replica_id,
-                replicas,
-                op,
-                tx,
-            })) {
+        self.management_request(ManageMessage::CreateGroup(request, tx))?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    pub async fn remove_group(&self, request: RemoveGroupRequest) -> Result<(), Error> {
+        let (tx, rx) = oneshot::channel();
+        self.management_request(ManageMessage::RemoveGroup(request, tx))?;
+        rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed(
+                "the sender that result the group_manager change was dropped".to_owned(),
+            ))
+        })?
+    }
+
+    fn management_request(&self, msg: ManageMessage) -> Result<(), Error> {
+        match self.actor.manage_tx.try_send(msg) {
             Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no available capacity for group management".to_owned(),
             ))),
             Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::SenderClosed(
                 "channel closed for group management".to_owned(),
             ))),
-            Ok(_) => Ok(rx),
+            Ok(_) => Ok(()),
         }
     }
 

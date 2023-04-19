@@ -47,3 +47,30 @@ message MembershipChangeData {
   repeated SingleMembershipChange changes = 4;
   repeated ReplicaDesc replicas = 5;
 }
+
+service MultiRaftService {
+  rpc Send(MultiRaftMessage) returns (MultiRaftMessageResponse) {}
+} 
+
+// Creates a new Raft consensus group with the given ·replica_id as the initial leader. 
+// 
+// # Notes
+// - If the group already exists, this request is equivalent to re-starting it. 
+// - If the group is already started, this request is a no-op.
+message CreateGroupRequest {
+  uint64 group_id = 1;
+  uint64 replica_id = 2;
+  repeated ReplicaDesc replicas = 3;
+  // If it is not `0`, the raft group will skip the logs before `applied_hint` when it starts.
+  // 
+  // # Panic 
+  // If `applied_hint > min(committed, persisted) 
+  uint64 applied_hint = 4;
+}
+
+message RemoveGroupRequest {
+  uint64 group_id = 1;
+  uint64 replica_id = 2;
+  repeated ReplicaDesc replicas = 3;
+}
+

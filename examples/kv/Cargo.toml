@@ -1,0 +1,27 @@
+[package]
+name = "oceanraft-kv-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+oceanraft = { path = "../../oceanraft", features = ["grpc", "store-rocksdb"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1" }
+sled = { version = "0.34" }
+# for grpc service
+tonic = { version = "0.9.1" } 
+prost = { version = "0.11" }
+# async runtime
+tokio = { version = "1", features = ["full"] }
+# for command args parser
+clap = { version = "4", features = ["derive"] }
+# for cli
+console = { version = "0.15.5" }
+
+[build-dependencies]
+# for proto build
+tonic-build = { version = "0.9.1",features = ["prost"] }
+
+[[bin]]
+name = "cli"
+path = "src/cli.rs"

@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use oceanraft::multiraft::storage::MultiRaftStorage;
+use oceanraft::storage::MultiRaftStorage;
 use oceanraft::prelude::StoreData;
 
 use crate::fixtures::init_default_ut_tracing;

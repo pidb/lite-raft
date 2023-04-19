@@ -13,6 +13,7 @@ use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 
 pub trait Transport: Send + Sync + 'static {
+    // TODO: should define associated error insted of Error.
     fn send(&self, msg: MultiRaftMessage) -> Result<(), Error>;
 }
 
@@ -156,7 +157,10 @@ async fn send_message<TR, RS, MRS>(
     }
 }
 
+#[cfg(feature = "grpc")]
+mod grpc;
 mod local;
 
+#[cfg(feature = "grpc")]
+pub use grpc::{MultiRaftServiceClient, MultiRaftServiceImpl, MultiRaftServiceServer};
 pub use local::LocalTransport;
-

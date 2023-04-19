@@ -19,20 +19,22 @@ mod storage {
     use rocksdb::WriteOptions;
     use tracing::error;
 
-    use crate::multiraft::storage::Error;
-    use crate::multiraft::storage::MultiRaftStorage;
-    use crate::multiraft::storage::RaftSnapshotReader;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::RaftStorage;
-    use crate::multiraft::storage::RaftStorageReader;
-    use crate::multiraft::storage::RaftStorageWriter;
-    use crate::multiraft::storage::Result;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::HardState;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
     use crate::prelude::SnapshotMetadata;
+    use crate::storage::Error;
+    use crate::storage::MultiRaftStorage;
+    use crate::storage::RaftSnapshotReader;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::RaftStorage;
+    use crate::storage::Result;
+    use crate::storage::Storage;
+    use crate::storage::StorageExt;
+    use crate::utils::flexbuffer_deserialize;
+    use crate::utils::flexbuffer_serialize;
 
     /// Save rocksdb error context.
     #[derive(Clone)]
@@ -238,6 +240,9 @@ mod storage {
     /// Constant prerfix for confstate and store in meta column family.
     const CONF_STATE_PREFIX: &'static str = "cs";
 
+    /// Constant prerfix for applied and store in meta column family.
+    const APPLIED_INDEX_PREFIX: &'static str = "applied_index";
+
     /// Constant prerfix for snapshot metadata and store in meta column family.
     const LOG_SNAP_META_PREFIX: &'static str = "snap_meta";
 
@@ -276,6 +281,12 @@ mod storage {
         #[inline]
         fn format_confstate_key(group_id: u64, replica_id: u64) -> String {
             format!("{}_{}_{}", group_id, replica_id, CONF_STATE_PREFIX)
+        }
+
+        /// Format applied_index  key with mode `{group_id}_{replica_id}_applied_index`.
+        #[inline]
+        fn format_applied_key(group_id: u64, replica_id: u64) -> String {
+            format!("{}_{}_{}", group_id, replica_id, APPLIED_INDEX_PREFIX)
         }
 
         /// Format log empty flag with mode `empty_{group_id}_{replica_id}`.
@@ -333,6 +344,12 @@ mod storage {
         fn format_replica_desc_seek_key(group_id: u64) -> String {
             format!("{}_{}_", REPLICA_DESC_PREFIX, group_id)
         }
+    }
+
+    #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+    struct Applied {
+        index: u64,
+        term: u64,
     }
 
     /// Stored in the `log_cf` column family, representing the
@@ -666,7 +683,7 @@ mod storage {
         }
     }
 
-    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageReader for RockStoreCore<SR, SW> {
+    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> Storage for RockStoreCore<SR, SW> {
         fn initial_state(&self) -> RaftResult<RaftState> {
             let cf = DBEnv::get_metadata_cf(&self.db);
 
@@ -907,7 +924,7 @@ mod storage {
         }
     }
 
-    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> RaftStorageWriter for RockStoreCore<SR, SW> {
+    impl<SR: RaftSnapshotReader, SW: RaftSnapshotWriter> StorageExt for RockStoreCore<SR, SW> {
         fn set_hardstate(&self, hs: HardState) -> Result<()> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
             let key = DBEnv::format_hardstate_key(self.group_id, self.replica_id);
@@ -924,6 +941,12 @@ mod storage {
                         format!("set_hard_state: hard_state = {:?}", hs),
                     )
                 })
+        }
+
+        fn set_hardstate_commit(&self, commit: u64) -> Result<()> {
+            let mut hs = self.get_hard_state().unwrap();
+            hs.commit = commit;
+            self.set_hardstate(hs)
         }
 
         fn set_confstate(&self, cs: ConfState) -> Result<()> {
@@ -943,6 +966,42 @@ mod storage {
                     )
                 })
         }
+
+        // fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()> {
+        //     let applied = Applied {
+        //         index: applied_index,
+        //         term: applied_term,
+        //     };
+
+        //     let metacf = DBEnv::get_metadata_cf(&self.db);
+        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
+        //     let mut ser = flexbuffer_serialize(&applied).unwrap(); // FIXME: handle err
+        //     let mut writeopts = WriteOptions::default();
+        //     writeopts.set_sync(true);
+        //     self.db
+        //         .put_cf_opt(&metacf, &key, ser.take_buffer(), &writeopts)
+        //         .map_err(|err| {
+        //             self.to_write_err(
+        //                 err,
+        //                 true,
+        //                 false,
+        //                 format!("set_applied_index: applied_index = {:?}", applied),
+        //             )
+        //         })
+        // }
+
+        // fn get_applied(&self) -> Result<(u64, u64)> {
+        //     let metacf = DBEnv::get_metadata_cf(&self.db);
+        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
+        //     let readopts = ReadOptions::default();
+        //     self.db
+        //         .get_cf_opt(&metacf, &key, &readopts)
+        //         .map_err(|err| self.to_write_err(err, true, false, format!("get_applied_index")))?
+        //         .map_or(Ok((0, 0)), |data| {
+        //             let applied = flexbuffer_deserialize::<Applied>(&data).unwrap();
+        //             Ok((applied.index, applied.term))
+        //         })
+        // }
 
         fn append(&self, ents: &[Entry]) -> Result<()> {
             if ents.is_empty() {
@@ -1388,13 +1447,13 @@ mod state_machine {
     use rocksdb::WriteBatch;
     use rocksdb::WriteOptions;
 
-    use crate::multiraft::storage::Error;
-    use crate::multiraft::storage::RaftSnapshotReader;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::Result as StorageResult;
-    use crate::multiraft::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::StoreData;
+    use crate::storage::Error;
+    use crate::storage::RaftSnapshotReader;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::Result as StorageResult;
+    use crate::ProposeResponse;
 
     type Result<T> = std::result::Result<T, StateMachineStoreError>;
 
@@ -2164,17 +2223,17 @@ mod tests {
     use super::StateMachineStore;
     // use super::KVStateMachine;
     use super::RockStore;
-    use crate::multiraft::storage::MultiRaftStorage;
-    use crate::multiraft::storage::RaftSnapshotWriter;
-    use crate::multiraft::storage::RaftStorageWriter;
-    use crate::multiraft::Apply;
-    use crate::multiraft::ApplyNormal;
     use crate::multiraft::ProposeResponse;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
     use crate::protos::StoreData;
+    use crate::storage::MultiRaftStorage;
+    use crate::storage::RaftSnapshotWriter;
+    use crate::storage::StorageExt;
+    use crate::Apply;
+    use crate::ApplyNormal;
 
     fn rand_temp_dir() -> PathBuf {
         let rand_str: String = rand::thread_rng()

@@ -1,22 +1,23 @@
 use std::mem::take;
 use std::time::Duration;
 
-use oceanraft::multiraft::storage::MultiRaftStorage;
-use oceanraft::multiraft::storage::RaftStorageReader;
-use oceanraft::multiraft::Apply;
+use oceanraft::storage::MultiRaftStorage;
+use oceanraft::storage::Storage;
+use oceanraft::Apply;
 use oceanraft::prelude::ConfChangeTransition;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::StoreData;
-use oceanraft::util::TaskGroup;
+use oceanraft::task_group::TaskGroup;
 use tokio::time::sleep;
 
+use crate::fixtures::RockType;
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::rand_string;
 use crate::fixtures::ClusterBuilder;
-use crate::fixtures::FixtureCluster;
+use crate::fixtures::Cluster;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::RockStoreEnv;
 
@@ -31,7 +32,7 @@ async fn test_single_step() {
     // start five nodes
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<RockType>::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
@@ -51,7 +52,7 @@ async fn test_single_step() {
 
     // triger group to leader election.
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
+    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 
@@ -149,7 +150,7 @@ async fn test_initial_joint_consensus() {
     // start five nodes.
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<RockType>::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
@@ -168,7 +169,7 @@ async fn test_initial_joint_consensus() {
     };
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
+    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 
@@ -301,7 +302,7 @@ async fn test_joint_consensus() {
     // start five nodes.
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<RockType>::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
@@ -320,7 +321,7 @@ async fn test_joint_consensus() {
     };
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
+    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
     let leader = &cluster.nodes[0];
@@ -545,7 +546,7 @@ async fn test_remove() {
     // start five nodes
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let mut cluster = ClusterBuilder::new(nodes)
+    let mut cluster = ClusterBuilder::<RockType>::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
@@ -564,7 +565,7 @@ async fn test_remove() {
     };
     let _ = cluster.make_group(&plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = FixtureCluster::wait_leader_elect_event(&mut cluster, node_id)
+    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
         .await
         .unwrap();
 

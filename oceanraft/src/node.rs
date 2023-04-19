@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::collections::hash_map::Iter;
 use std::collections::HashSet;
@@ -22,16 +23,16 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use crate::multiraft::multiraft::NO_LEADER;
 use crate::multiraft::ProposeResponse;
+use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
-use crate::util::Stopper;
-use crate::util::TaskGroup;
+use crate::task_group::Stopper;
+use crate::task_group::TaskGroup;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -48,8 +49,6 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
-use super::msg::GroupData;
-use super::msg::GroupOp;
 use super::msg::ManageMessage;
 use super::msg::ProposeMessage;
 use super::msg::QueryGroup;
@@ -63,8 +62,8 @@ use super::state::GroupState;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
+use super::tick::Ticker;
 use super::transport::Transport;
-use super::util::Ticker;
 use super::ProposeData;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
@@ -255,6 +254,7 @@ where
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
+            storage.clone(),
             states.clone(),
             apply_request_rx,
             apply_response_tx,
@@ -398,7 +398,6 @@ where
         let mut ticks = 0;
         loop {
             self.event_chan.flush();
-
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -549,7 +548,7 @@ where
             // because the heartbeats msg always hajacked and fanouted, so the msg.commit
             // always meanless.
             let _ = self
-                .create_raft_group(group_id, to_replica.replica_id, msg.replicas)
+                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, 0)
                 .await
                 .map_err(|err| {
                     error!(
@@ -929,30 +928,22 @@ where
     async fn handle_manage_message(&mut self, msg: ManageMessage) -> Option<ResponseCallback> {
         match msg {
             // handle raft group management request
-            ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
-        }
-    }
-
-    #[tracing::instrument(
-        name = "MultiRaftActorRuntime::raft_group_management",
-        level = Level::TRACE,
-        skip_all
-    )]
-    async fn handle_group_manage(&mut self, data: GroupData) -> Option<ResponseCallback> {
-        let tx = data.tx;
-        let res = match data.op {
-            GroupOp::Create => {
-                self.active_groups.insert(data.group_id);
-                self.create_raft_group(
-                    data.group_id,
-                    data.replica_id,
-                    data.replicas.map_or(vec![], |rs| rs),
-                )
-                .await
+            // ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
+            ManageMessage::CreateGroup(request, tx) => {
+                self.active_groups.insert(request.group_id);
+                let res = self
+                    .create_raft_group(
+                        request.group_id,
+                        request.replica_id,
+                        request.replicas,
+                        request.applied_hint,
+                    )
+                    .await;
+                return Some(ResponseCallbackQueue::new_callback(tx, res));
             }
-            GroupOp::Remove => {
+            ManageMessage::RemoveGroup(request, tx) => {
                 // marke delete
-                let group_id = data.group_id;
+                let group_id = request.group_id;
                 let group = match self.groups.get_mut(&group_id) {
                     None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
                     Some(group) => group,
@@ -970,13 +961,56 @@ where
                 group.status = Status::Delete;
 
                 // TODO: impl broadcast
-
-                Ok(())
+                return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
             }
-        };
-
-        return Some(ResponseCallbackQueue::new_callback(tx, res));
+        }
     }
+
+    // #[tracing::instrument(
+    //     name = "MultiRaftActorRuntime::raft_group_management",
+    //     level = Level::TRACE,
+    //     skip_all
+    // )]
+    // async fn handle_group_manage(&mut self, data: GroupData) -> Option<ResponseCallback> {
+    //     let tx = data.tx;
+    //     let res = match data.op {
+    //         GroupOp::Create => {
+    //             self.active_groups.insert(data.group_id);
+    //             self.create_raft_group(
+    //                 data.group_id,
+    //                 data.replica_id,
+    //                 data.replicas.map_or(vec![], |rs| rs),
+    //                 0,
+    //             )
+    //             .await
+    //         }
+    //         GroupOp::Remove => {
+    //             // marke delete
+    //             let group_id = data.group_id;
+    //             let group = match self.groups.get_mut(&group_id) {
+    //                 None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
+    //                 Some(group) => group,
+    //             };
+
+    //             for proposal in group.proposals.drain(..) {
+    //                 proposal.tx.map(|tx| {
+    //                     tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+    //                         self.node_id,
+    //                         group_id,
+    //                     ))))
+    //                 });
+    //             }
+
+    //             group.status = Status::Delete;
+
+    //             // TODO: impl broadcast
+
+    //             Ok(())
+    //         }
+    //     };
+
+    //     return Some(ResponseCallbackQueue::new_callback(tx, res));
+    // }
 
     // #[tracing::instrument(
     //     name = "MultiRaftActorRuntime::create_raft_group",
@@ -988,6 +1022,8 @@ where
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
+        applied: u64,
+        /* TODO: applied, hit skip */
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroup(RaftGroupError::Exists(
@@ -1013,6 +1049,7 @@ where
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
+        // let (applied_index, applied_term) = group_storage.get_applied()?;
         // if replicas_desc are not empty and are valid data,
         // we know where all replicas of the raft group are located.
         //
@@ -1025,7 +1062,7 @@ where
         // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied: rs.hard_state.commit,
+            applied: 0, // TODO: support hint skip
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: self.cfg.max_size_per_msg,
@@ -1048,12 +1085,9 @@ where
             replica_id,
             rs.hard_state.commit, /* commit_index */
             rs.hard_state.term,   /* commit_term */
-            rs.hard_state.commit, /* applied_index */
-            rs.hard_state.term,   /* applied_term */
             NO_LEADER,
             StateRole::Follower,
         )));
-
         let mut group = RaftGroup {
             node_id: self.cfg.node_id,
             group_id,
@@ -1065,9 +1099,8 @@ where
             status: Status::None,
             read_index_queue: ReadIndexQueue::new(),
             shared_state: shared_state.clone(),
-
-            applied_index: rs.hard_state.commit,
-            applied_term: rs.hard_state.term,
+            // applied_index: 0,
+            // applied_term: 0,
             commit_index: rs.hard_state.commit,
             commit_term: rs.hard_state.term,
         };
@@ -1597,22 +1630,22 @@ mod tests {
     use std::sync::Arc;
 
     use super::NodeWorker;
-    use crate::multiraft::proposal::ProposalQueue;
-    use crate::multiraft::proposal::ReadIndexQueue;
-    use crate::multiraft::storage::MemStorage;
-    use crate::multiraft::storage::MultiRaftMemoryStorage;
+    use crate::proposal::ProposalQueue;
+    use crate::proposal::ReadIndexQueue;
+    use crate::storage::MemStorage;
+    use crate::storage::MultiRaftMemoryStorage;
 
-    use crate::multiraft::group::RaftGroup;
-    use crate::multiraft::group::Status;
+    use crate::group::RaftGroup;
+    use crate::group::Status;
 
-    use crate::multiraft::replica_cache::ReplicaCache;
-    use crate::multiraft::transport::LocalTransport;
-    use crate::multiraft::Error;
-    use crate::multiraft::MultiRaftMessageSenderImpl;
     use crate::prelude::ReplicaDesc;
+    use crate::replica_cache::ReplicaCache;
+    use crate::transport::LocalTransport;
+    use crate::Error;
+    use crate::MultiRaftMessageSenderImpl;
 
     use super::NodeManager;
-    use crate::multiraft::state::GroupState;
+    use crate::state::GroupState;
     type TestMultiRaftActorRuntime = NodeWorker<
         LocalTransport<MultiRaftMessageSenderImpl>,
         MemStorage,
@@ -1648,8 +1681,8 @@ mod tests {
 
             commit_term: 0, // TODO: init committed term from storage
             commit_index: 0,
-            applied_index: 0,
-            applied_term: 0,
+            // applied_index: 0,
+            // applied_term: 0,
         })
     }
 
