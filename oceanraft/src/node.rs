@@ -26,6 +26,7 @@ use tracing::Span;
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
+use crate::prelude::GroupMetadata;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
@@ -262,7 +263,7 @@ where
             task_group,
         );
 
-        let worker = NodeWorker::<TR, RS, MRS, W, R>::new(
+        let mut worker = NodeWorker::<TR, RS, MRS, W, R>::new(
             cfg,
             transport,
             storage,
@@ -280,6 +281,7 @@ where
 
         let stopper = task_group.stopper();
         task_group.spawn(async move {
+            worker.restore().await;
             worker.main_loop(stopper, ticker).await;
         });
 
@@ -377,7 +379,20 @@ where
 
     /// Restore the node from storage.
     async fn restore(&mut self) {
-        todo!()
+        // TODO: use group_iter
+        let metadatas = self.storage.scan_group_metadata().await.unwrap();
+        for metadata in metadatas.iter() {
+            // TODO: check group metadta status to detect whether deleted.
+            if metadata.deleted {
+                continue;
+            }
+
+            // TODO: should modify group_storage impl, don't default create
+            // TODO: consider add list_replicas for storage
+            self.create_raft_group(metadata.group_id, metadata.replica_id, vec![], 0)
+                .await
+                .unwrap();
+        }
     }
 
     #[tracing::instrument(
@@ -964,6 +979,33 @@ where
                 }
 
                 group.status = Status::Delete;
+
+                let replica_id = group.replica_id;
+                match self
+                    .storage
+                    .get_group_metadata(group_id, replica_id)
+                    .await
+                    .unwrap()
+                {
+                    None => {
+                        self.storage
+                            .set_group_metadata(GroupMetadata {
+                                group_id,
+                                replica_id,
+                                node_id: self.node_id,
+                                create_timestamp: 0,
+                                deleted: true,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Some(mut meta) => {
+                        if !meta.deleted {
+                            meta.deleted = true;
+                            self.storage.set_group_metadata(meta).await.unwrap();
+                        }
+                    }
+                }
 
                 // TODO: impl broadcast
                 return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));

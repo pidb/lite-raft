@@ -214,7 +214,7 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
 
     /// GAT trait for `groups`.
-    type GroupsFuture<'life0>: Send + Future<Output = Result<Vec<GroupMetadata>>>
+    type ScanGroupMetadataFuture<'life0>: Send + Future<Output = Result<Vec<GroupMetadata>>>
     where
         Self: 'life0;
     /// List groups metadatas from storage.
@@ -222,7 +222,25 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     /// # Notes
     /// If the number of groups is very large, which may cause a high memory usage,
     /// should consider using group_iter (todo).
-    fn groups(&self) -> Self::GroupsFuture<'_>;
+    fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_>;
+
+    /// GAT trait for `get_group_metadata`.
+    type GetGroupMetadataFuture<'life0>: Send + Future<Output = Result<Option<GroupMetadata>>>
+    where
+        Self: 'life0;
+    /// Get group metadata.
+    fn get_group_metadata(
+        &self,
+        group_id: u64,
+        replica_id: u64,
+    ) -> Self::GetGroupMetadataFuture<'_>;
+
+    /// GAT trait for `set_group_metadata`.
+    type SetGroupMetadataFuture<'life0>: Send + Future<Output = Result<()>>
+    where
+        Self: 'life0;
+    /// Save group metadata.
+    fn set_group_metadata(&self, meta: GroupMetadata) -> Self::SetGroupMetadataFuture<'_>;
 
     /// GAT trait for `replica_desc`.
     type ReplicaDescFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>

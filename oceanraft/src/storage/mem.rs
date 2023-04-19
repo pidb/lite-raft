@@ -557,9 +557,11 @@ impl RaftStorage for MemStorage {
 
 #[derive(Clone)]
 pub struct MultiRaftMemoryStorage {
+    #[allow(unused)]
     node_id: u64,
     trigger_storage_temp_unavailable: Arc<AsyncRwLock<bool>>,
-    groups: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
+    group_storages: Arc<AsyncRwLock<HashMap<u64, MemStorage>>>,
+    group_metadatas: Arc<AsyncRwLock<HashMap<u64, GroupMetadata>>>,
     replicas: Arc<AsyncRwLock<HashMap<u64, Vec<ReplicaDesc>>>>,
 }
 
@@ -568,7 +570,8 @@ impl MultiRaftMemoryStorage {
         Self {
             node_id,
             trigger_storage_temp_unavailable: Default::default(),
-            groups: Default::default(),
+            group_storages: Default::default(),
+            group_metadatas: Default::default(),
             replicas: Default::default(),
         }
     }
@@ -593,11 +596,23 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
                 return Err(Error::StorageTemporarilyUnavailable);
             }
 
-            let mut wl = self.groups.write().await;
+            let mut wl = self.group_storages.write().await;
             match wl.get_mut(&group_id) {
                 None => {
                     let storage = MemStorage::new();
                     wl.insert(group_id, storage.clone());
+                    let mut group_metadatas = self.group_metadatas.write().await;
+                    let group_metadata = GroupMetadata {
+                        group_id,
+                        replica_id,
+                        node_id: self.node_id,
+                        create_timestamp: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_secs(),
+                        deleted: false,
+                    };
+                    group_metadatas.insert(group_id, group_metadata);
                     Ok(storage)
                 }
                 Some(store) => Ok(store.clone()),
@@ -605,11 +620,40 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         }
     }
 
-    type GroupsFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
+    type ScanGroupMetadataFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
         where
             Self: 'life0;
-    fn groups(&self) -> Self::GroupsFuture<'_> {
-        async move { todo!() }
+    fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_> {
+        async move {
+            let rl = self.group_metadatas.read().await;
+            Ok(rl.iter().map(|(_, meta)| meta.clone()).collect())
+        }
+    }
+
+    type GetGroupMetadataFuture<'life0> = impl Future<Output = Result<Option<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+    fn get_group_metadata(
+        &self,
+        group_id: u64,
+        _replica_id: u64,
+    ) -> Self::GetGroupMetadataFuture<'_> {
+        async move {
+            let rl = self.group_metadatas.read().await;
+            rl.get(&group_id)
+                .map_or(Ok(None), |meta| Ok(Some(meta.clone())))
+        }
+    }
+
+    type SetGroupMetadataFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+        where
+            Self: 'life0;
+    fn set_group_metadata(&self, meta: GroupMetadata) -> Self::SetGroupMetadataFuture<'_> {
+        async move {
+            let mut wl = self.group_metadatas.write().await;
+            wl.insert(meta.group_id, meta);
+            Ok(())
+        }
     }
 
     type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0

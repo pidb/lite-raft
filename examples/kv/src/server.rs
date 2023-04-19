@@ -115,7 +115,7 @@ impl KVServer {
         )
         .unwrap();
 
-        multiraft
+        if let Err(err) = multiraft
             .create_group(CreateGroupRequest {
                 group_id: 1,
                 replica_id: 1,
@@ -123,7 +123,9 @@ impl KVServer {
                 applied_hint: 0,
             })
             .await
-            .unwrap();
+        {
+            println!("{}", err)
+        }
 
         Self {
             arg,

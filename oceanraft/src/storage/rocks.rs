@@ -1,5 +1,8 @@
 mod storage {
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use futures::Future;
     use prost::Message;
@@ -1253,11 +1256,22 @@ mod storage {
                     &self.wsnap,
                 )
                 .and_then(|core| {
+                    let metadata = GroupMetadata {
+                        group_id,
+                        replica_id,
+                        node_id: self.node_id,
+                        create_timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::default())
+                            .as_secs(),
+                        deleted: false,
+                    };
+
                     let mut writeopts = WriteOptions::default();
                     writeopts.set_sync(true);
-                    // TODO: add added timestamp as data
+                    let val = metadata.encode_to_vec();
                     self.db
-                        .put_cf_opt(&meta_cf, key, b"".to_vec(), &writeopts)?;
+                        .put_cf_opt(&meta_cf, key, val.to_vec(), &writeopts)?;
                     Ok(core)
                 }),
             }
@@ -1289,6 +1303,31 @@ mod storage {
                 }
             }
             Ok(groups)
+        }
+
+        fn get_group_metadata(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> std::result::Result<Option<GroupMetadata>, RocksdbError> {
+            let meta_cf = DBEnv::get_metadata_cf(&self.db);
+            let key = self.group_store_key(group_id, replica_id);
+            let readopt = ReadOptions::default();
+            self.db
+                .get_cf_opt(&meta_cf, key, &readopt)?
+                .map_or(Ok(None), |data| {
+                    let meta = GroupMetadata::decode(data.as_ref()).unwrap();
+                    Ok(Some(meta))
+                })
+        }
+
+        fn set_group_metadata(&self, meta: GroupMetadata) -> std::result::Result<(), RocksdbError> {
+            let meta_cf = DBEnv::get_metadata_cf(&self.db);
+            let key = self.group_store_key(meta.group_id, meta.replica_id);
+            let mut writeopt = WriteOptions::default();
+            writeopt.set_sync(true);
+            let value = meta.encode_to_vec();
+            return self.db.put_cf_opt(&meta_cf, key, value, &writeopt);
         }
 
         fn get_replica_desc(
@@ -1385,11 +1424,43 @@ mod storage {
             }
         }
 
-        type GroupsFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
+        type ScanGroupMetadataFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
         where
             Self: 'life0;
-        fn groups(&self) -> Self::GroupsFuture<'_> {
-            async move { todo!() }
+        fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_> {
+            async move {
+                self.scan_groups()
+                    .map_err(|err| self.to_storage_err(0, 0, err, "groups".into()))
+            }
+        }
+
+        type GetGroupMetadataFuture<'life0> = impl Future<Output = Result<Option<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+        fn get_group_metadata(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> Self::GetGroupMetadataFuture<'_> {
+            async move {
+                self.get_group_metadata(group_id, replica_id)
+                    .map_err(|err| {
+                        self.to_storage_err(group_id, replica_id, err, "get_group_metadata".into())
+                    })
+            }
+        }
+
+        type SetGroupMetadataFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+        where
+            Self: 'life0;
+        fn set_group_metadata(&self, meta: GroupMetadata) -> Self::SetGroupMetadataFuture<'_> {
+            async move {
+                let group_id = meta.group_id;
+                let replica_id = meta.replica_id;
+                self.set_group_metadata(meta).map_err(|err| {
+                    self.to_storage_err(group_id, replica_id, err, "set_group_metadata".into())
+                })
+            }
         }
 
         type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
