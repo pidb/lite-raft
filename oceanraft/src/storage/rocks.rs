@@ -21,6 +21,7 @@ mod storage {
 
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
+    use crate::prelude::GroupMetadata;
     use crate::prelude::HardState;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
@@ -281,12 +282,6 @@ mod storage {
         #[inline]
         fn format_confstate_key(group_id: u64, replica_id: u64) -> String {
             format!("{}_{}_{}", group_id, replica_id, CONF_STATE_PREFIX)
-        }
-
-        /// Format applied_index  key with mode `{group_id}_{replica_id}_applied_index`.
-        #[inline]
-        fn format_applied_key(group_id: u64, replica_id: u64) -> String {
-            format!("{}_{}_{}", group_id, replica_id, APPLIED_INDEX_PREFIX)
         }
 
         /// Format log empty flag with mode `empty_{group_id}_{replica_id}`.
@@ -1268,6 +1263,34 @@ mod storage {
             }
         }
 
+        /// Scan groups by using `group_` prefix.
+        fn scan_groups(&self) -> std::result::Result<Vec<GroupMetadata>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let prefix = format!("{}_", GROUP_STORE_PREFIX);
+
+            let mut groups = vec![];
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+
+            for item in iter {
+                let (key, val) = item?;
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => break, /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&prefix) {
+                    true => {
+                        let meta = GroupMetadata::decode(val.as_ref()).unwrap();
+                        groups.push(meta);
+                    }
+                    false => break, /* prefix is no longer matched */
+                }
+            }
+            Ok(groups)
+        }
+
         fn get_replica_desc(
             &self,
             group_id: u64,
@@ -1360,6 +1383,13 @@ mod storage {
                         self.to_storage_err(group_id, replica_id, err, "group_storage".into())
                     })
             }
+        }
+
+        type GroupsFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+        fn groups(&self) -> Self::GroupsFuture<'_> {
+            async move { todo!() }
         }
 
         type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0

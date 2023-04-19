@@ -5,6 +5,7 @@ use raft::StorageError;
 
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
+use crate::prelude::GroupMetadata;
 use crate::prelude::HardState;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
@@ -211,6 +212,17 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     /// Get the `RaftStorage` impl by `group_id` and `replica_id`. if not exists create a
     /// new one.
     fn group_storage(&self, group_id: u64, replica_id: u64) -> Self::GroupStorageFuture<'_>;
+
+    /// GAT trait for `groups`.
+    type GroupsFuture<'life0>: Send + Future<Output = Result<Vec<GroupMetadata>>>
+    where
+        Self: 'life0;
+    /// List groups metadatas from storage.
+    ///
+    /// # Notes
+    /// If the number of groups is very large, which may cause a high memory usage,
+    /// should consider using group_iter (todo).
+    fn groups(&self) -> Self::GroupsFuture<'_>;
 
     /// GAT trait for `replica_desc`.
     type ReplicaDescFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>

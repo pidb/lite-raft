@@ -3,6 +3,12 @@ package multiraft;
 
 import "eraftpb.proto";
 
+message GroupMetadata {
+    uint64 group_id = 1;
+    uint64 node_id = 2;
+    uint64 create_timestamp = 3;
+  }
+
 message ReplicaDesc {
   uint64 node_id = 1;
   uint64 group_id = 2;

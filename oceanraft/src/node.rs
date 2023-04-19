@@ -357,7 +357,7 @@ where
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
-            propose_rx: propose_rx,
+            propose_rx,
             campaign_rx,
             multiraft_message_rx: raft_message_rx,
             manage_rx,
@@ -373,6 +373,11 @@ where
             shared_states,
             query_group_rx: group_query_rx,
         }
+    }
+
+    /// Restore the node from storage.
+    async fn restore(&mut self) {
+        todo!()
     }
 
     #[tracing::instrument(

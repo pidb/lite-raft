@@ -17,6 +17,7 @@ use tokio::sync::RwLock as AsyncRwLock;
 
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
+use crate::prelude::GroupMetadata;
 use crate::prelude::HardState;
 use crate::prelude::RaftState;
 use crate::prelude::ReplicaDesc;
@@ -602,6 +603,13 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
                 Some(store) => Ok(store.clone()),
             }
         }
+    }
+
+    type GroupsFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+    fn groups(&self) -> Self::GroupsFuture<'_> {
+        async move { todo!() }
     }
 
     type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
