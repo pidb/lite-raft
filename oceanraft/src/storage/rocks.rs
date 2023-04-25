@@ -319,6 +319,11 @@ mod storage {
         }
 
         #[inline]
+        fn format_applied_key(group_id: u64) -> String {
+            format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
+        }
+
+        #[inline]
         fn format_entry_key_prefix(group_id: u64) -> String {
             format!("ent_{}_", group_id)
         }
@@ -965,41 +970,35 @@ mod storage {
                 })
         }
 
-        // fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()> {
-        //     let applied = Applied {
-        //         index: applied_index,
-        //         term: applied_term,
-        //     };
+        fn set_applied(&self, index: u64) -> Result<()> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let key = DBEnv::format_applied_key(self.group_id);
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(&metacf, &key, index.to_be_bytes(), &writeopts)
+                .map_err(|err| {
+                    self.to_write_err(
+                        err,
+                        true,
+                        false,
+                        format!("set_applied: applied_index = {:?}", index),
+                    )
+                })
+        }
 
-        //     let metacf = DBEnv::get_metadata_cf(&self.db);
-        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-        //     let mut ser = flexbuffer_serialize(&applied).unwrap(); // FIXME: handle err
-        //     let mut writeopts = WriteOptions::default();
-        //     writeopts.set_sync(true);
-        //     self.db
-        //         .put_cf_opt(&metacf, &key, ser.take_buffer(), &writeopts)
-        //         .map_err(|err| {
-        //             self.to_write_err(
-        //                 err,
-        //                 true,
-        //                 false,
-        //                 format!("set_applied_index: applied_index = {:?}", applied),
-        //             )
-        //         })
-        // }
-
-        // fn get_applied(&self) -> Result<(u64, u64)> {
-        //     let metacf = DBEnv::get_metadata_cf(&self.db);
-        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-        //     let readopts = ReadOptions::default();
-        //     self.db
-        //         .get_cf_opt(&metacf, &key, &readopts)
-        //         .map_err(|err| self.to_write_err(err, true, false, format!("get_applied_index")))?
-        //         .map_or(Ok((0, 0)), |data| {
-        //             let applied = flexbuffer_deserialize::<Applied>(&data).unwrap();
-        //             Ok((applied.index, applied.term))
-        //         })
-        // }
+        fn get_applied(&self) -> Result<u64> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let key = DBEnv::format_applied_key(self.group_id);
+            let readopts = ReadOptions::default();
+            self.db
+                .get_cf_opt(&metacf, &key, &readopts)
+                .map_err(|err| self.to_write_err(err, true, false, format!("get_applied")))?
+                .map_or(Ok(0), |data| {
+                    let index = u64::from_be_bytes(data.try_into().unwrap());
+                    Ok(index)
+                })
+        }
 
         fn append(&self, ents: &[Entry]) -> Result<()> {
             if ents.is_empty() {
@@ -1373,6 +1372,37 @@ mod storage {
             self.db.delete_cf_opt(&metacf, &key, &writeopts)
         }
 
+        fn scan_replica_desc(
+            &self,
+            group_id: u64,
+        ) -> std::result::Result<Vec<ReplicaDesc>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let prefix = format!("{}_{}", REPLICA_DESC_PREFIX, group_id);
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+
+            let mut replicas = vec![];
+            for item in iter {
+                let (key, value) = item?;
+
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => break, /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&prefix) {
+                    true => {
+                        let replica_desc = ReplicaDesc::decode(value.as_ref()).unwrap();
+                        replicas.push(replica_desc);
+                    }
+                    false => break, /* prefix is no longer matched */
+                }
+            }
+
+            Ok(replicas)
+        }
+
         fn search_replica_desc_on_node(
             &self,
             group_id: u64,
@@ -1430,7 +1460,7 @@ mod storage {
         fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_> {
             async move {
                 self.scan_groups()
-                    .map_err(|err| self.to_storage_err(0, 0, err, "groups".into()))
+                    .map_err(|err| self.to_storage_err(0, 0, err, "scan_group_metadata".into()))
             }
         }
 
@@ -1511,10 +1541,20 @@ mod storage {
             }
         }
 
-        type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
-    where
-        Self: 'life0;
+        type ScanReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
+        where
+            Self: 'life0;
+        fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_> {
+            async move {
+                self.scan_replica_desc(group_id).map_err(|err| {
+                    self.to_storage_err(group_id, 0, err, "scan_replica_desc".into())
+                })
+            }
+        }
 
+        type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
+        where
+            Self: 'life0;
         fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
             async move {
                 self.search_replica_desc_on_node(group_id, node_id)
@@ -2069,7 +2109,7 @@ mod state_machine {
                 .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
-        /// Save current tuple (applied_index, applied_term) to data column of rocksdb.
+        /// Save current applied to meta column of rocksdb.
         pub fn set_applied(
             &self,
             group_id: u64,

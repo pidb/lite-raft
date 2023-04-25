@@ -518,6 +518,15 @@ impl StorageExt for MemStorage {
         self.wl().set_commit(commit);
         Ok(())
     }
+
+    fn get_applied(&self) -> Result<u64> {
+        Ok(self.rl().applied_index)
+    }
+
+    fn set_applied(&self, index: u64) -> Result<()> {
+        self.wl().applied_index = index;
+        Ok(())
+    }
 }
 
 impl RaftSnapshotWriter for MemStorage {
@@ -740,6 +749,25 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
                 }
                 None => Ok(()),
             };
+        }
+    }
+
+    type ScanReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
+        where
+            Self: 'life0;
+    fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_> {
+        async move {
+            let trigger_storage_temp_unavailable =
+                self.trigger_storage_temp_unavailable.read().await;
+            if *trigger_storage_temp_unavailable {
+                return Err(Error::StorageTemporarilyUnavailable);
+            }
+
+            let rl = self.replicas.read().await;
+            match rl.get(&group_id) {
+                Some(replicas) => Ok(replicas.clone()),
+                None => Ok(vec![]),
+            }
         }
     }
 

@@ -169,6 +169,10 @@ pub trait StorageExt {
     ///
     /// Panics if the snapshot index is less than the storage’s first index.
     fn install_snapshot(&self, snapshot: Snapshot) -> Result<()>;
+
+    fn get_applied(&self) -> Result<u64>;
+
+    fn set_applied(&self, index: u64) -> Result<()>;
 }
 
 pub trait RaftSnapshotReader: Clone + Send + Sync + 'static {
@@ -270,6 +274,16 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
         group_id: u64,
         replica_id: u64,
     ) -> Self::RemoveReplicaDescFuture<'_>;
+
+    /// GAT trait for `set_replica_desc`.
+    type ScanReplicaDescFuture<'life0>: Send
+        + Future<Output = Result<Vec<ReplicaDesc>>>
+        + Send
+        + 'life0
+    where
+        Self: 'life0;
+    /// Scan the `ReplicaDesc` with prefix.
+    fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_>;
 
     /// GAT trait for `replica_for_node`.
     type ReplicaForNodeFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>

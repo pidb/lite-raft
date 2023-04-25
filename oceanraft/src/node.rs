@@ -388,8 +388,12 @@ where
             }
 
             // TODO: should modify group_storage impl, don't default create
-            // TODO: consider add list_replicas for storage
-            self.create_raft_group(metadata.group_id, metadata.replica_id, vec![], 0)
+            let replica_descs = self
+                .storage
+                .scan_replica_desc(metadata.group_id)
+                .await
+                .unwrap();
+            self.create_raft_group(metadata.group_id, metadata.replica_id, replica_descs, 0)
                 .await
                 .unwrap();
         }
@@ -1092,6 +1096,7 @@ where
         }
 
         let group_storage = self.storage.group_storage(group_id, replica_id).await?;
+        let applied = cmp::max(group_storage.get_applied().unwrap(), applied);
         let rs = group_storage
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
@@ -1109,7 +1114,7 @@ where
         // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied: 0, // TODO: support hint skip
+            applied, // TODO: support hint skip
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: self.cfg.max_size_per_msg,
