@@ -1,5 +1,7 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use futures::Future;
 use serde::Deserialize;
@@ -14,7 +16,6 @@ use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::protos::RemoveGroupRequest;
-use crate::task_group::TaskGroup;
 
 use super::config::Config;
 use super::error::ChannelError;
@@ -121,7 +122,7 @@ where
     TR: Transport + Clone,
 {
     node_id: u64,
-    task_group: TaskGroup,
+    stopped: Arc<AtomicBool>,
     actor: NodeActor<T::D, T::R>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
@@ -138,7 +139,6 @@ where
         transport: TR,
         storage: T::MS,
         state_machine: T::M,
-        task_group: TaskGroup,
         ticker: Option<TK>,
     ) -> Result<Self, Error>
     where
@@ -147,23 +147,24 @@ where
         cfg.validate()?;
         let states = GroupStates::new();
         let event_bcast = EventChannel::new(cfg.event_capacity);
+        let stopped = Arc::new(AtomicBool::new(false));
         let actor = NodeActor::spawn(
             &cfg,
             &transport,
             &storage,
             state_machine,
             &event_bcast,
-            &task_group,
             ticker,
             states.clone(),
+            stopped.clone(),
         );
 
         Ok(Self {
             node_id: cfg.node_id,
             event_bcast,
             actor,
-            task_group,
             shared_states: states,
+            stopped,
             _m1: PhantomData,
         })
     }
@@ -499,7 +500,7 @@ where
     }
 
     pub async fn stop(&self) {
-        self.task_group.stop();
-        self.task_group.joinner().await;
+        self.stopped
+            .store(true, std::sync::atomic::Ordering::SeqCst);
     }
 }

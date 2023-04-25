@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc::Receiver;
 
-use oceanraft::task_group::TaskGroup;
 use oceanraft::tick::ManualTick;
 use oceanraft::transport::LocalTransport;
 use oceanraft::Apply;
@@ -20,7 +19,6 @@ where
 {
     node_size: usize,
     election_ticks: usize,
-    tg: Option<TaskGroup>,
     storages: Vec<T::MS>,
     apply_rxs: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
     state_machines: Vec<Option<T::M>>,
@@ -34,16 +32,10 @@ where
         Self {
             node_size: nodes,
             election_ticks: 0,
-            tg: None,
             storages: Vec::new(),
             state_machines: Vec::new(),
             apply_rxs: Vec::new(),
         }
-    }
-
-    pub fn task_group(mut self, tg: TaskGroup) -> Self {
-        self.tg = Some(tg);
-        self
     }
 
     pub fn storages(mut self, storages: Vec<T::MS>) -> Self {
@@ -145,7 +137,6 @@ where
                 self.state_machines[i]
                     .take()
                     .expect("state machines can't initialize"),
-                self.tg.as_ref().unwrap().clone(),
                 // &event_tx,
                 Some(ticker.clone()),
             )

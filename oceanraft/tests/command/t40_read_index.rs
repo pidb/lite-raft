@@ -17,7 +17,7 @@ async fn test_group_read_index() {
     let command_nums = 10;
 
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let (_, mut cluster) = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
+    let mut cluster = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let group_id = 1;

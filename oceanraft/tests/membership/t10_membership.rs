@@ -1,25 +1,24 @@
 use std::mem::take;
 use std::time::Duration;
 
-use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::Storage;
-use oceanraft::Apply;
 use oceanraft::prelude::ConfChangeTransition;
 use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::StoreData;
-use oceanraft::task_group::TaskGroup;
+use oceanraft::storage::MultiRaftStorage;
+use oceanraft::storage::Storage;
+use oceanraft::Apply;
 use tokio::time::sleep;
 
-use crate::fixtures::RockType;
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::rand_string;
-use crate::fixtures::ClusterBuilder;
 use crate::fixtures::Cluster;
+use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::RockStoreEnv;
+use crate::fixtures::RockType;
 
 #[async_entry::test(
     flavor = "multi_thread",
@@ -27,8 +26,6 @@ use crate::fixtures::RockStoreEnv;
     tracing_span = "debug"
 )]
 async fn test_single_step() {
-    let task_group = TaskGroup::new();
-
     // start five nodes
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
@@ -36,7 +33,6 @@ async fn test_single_step() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .task_group(task_group.clone())
         .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;
@@ -145,8 +141,6 @@ async fn test_single_step() {
     tracing_span = "debug"
 )]
 async fn test_initial_joint_consensus() {
-    let task_group = TaskGroup::new();
-
     // start five nodes.
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
@@ -155,7 +149,6 @@ async fn test_initial_joint_consensus() {
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .apply_rxs(take(&mut rockstore_env.rxs))
-        .task_group(task_group.clone())
         .build()
         .await;
 
@@ -297,8 +290,6 @@ async fn test_initial_joint_consensus() {
     tracing_span = "debug"
 )]
 async fn test_joint_consensus() {
-    let task_group = TaskGroup::new();
-
     // start five nodes.
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
@@ -307,7 +298,6 @@ async fn test_joint_consensus() {
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
         .apply_rxs(take(&mut rockstore_env.rxs))
-        .task_group(task_group.clone())
         .build()
         .await;
 
@@ -541,8 +531,6 @@ async fn test_joint_consensus() {
     tracing_span = "debug"
 )]
 async fn test_remove() {
-    let task_group = TaskGroup::new();
-
     // start five nodes
     let nodes = 5;
     let mut rockstore_env = RockStoreEnv::new(nodes);
@@ -550,7 +538,6 @@ async fn test_remove() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .task_group(task_group.clone())
         .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;

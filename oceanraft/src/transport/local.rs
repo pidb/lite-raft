@@ -1,6 +1,8 @@
 use std::collections::hash_map::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
@@ -13,25 +15,24 @@ use tracing::error;
 use tracing::info;
 use tracing::warn;
 
-use crate::transport::Transport;
-use crate::Error;
 use crate::multiraft::MultiRaftMessageSender;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-use crate::task_group::TaskGroup;
+use crate::transport::Transport;
+use crate::Error;
 
 struct LocalServer<M: MultiRaftMessageSender> {
     tx: Sender<(
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    stopped: bool,
+    stopped: Arc<AtomicBool>,
     _m1: PhantomData<M>,
 }
 
 impl<RD: MultiRaftMessageSender> LocalServer<RD> {
     /// Spawn a server to accepct request.
-    #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher, task_group))]
+    #[tracing::instrument(name = "LocalServer::spawn", skip(rx, dispatcher))]
     fn spawn(
         node_id: u64,
         addr: &str,
@@ -40,13 +41,15 @@ impl<RD: MultiRaftMessageSender> LocalServer<RD> {
             MultiRaftMessage,
             oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
         )>,
-        task_group: &TaskGroup,
+        stopped: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
         let addr = addr.to_string().clone();
-        let mut stopper = task_group.stopper();
         let main_loop = async move {
             info!("node {}: start server listen at {}", node_id, addr);
             loop {
+                if stopped.load(Ordering::SeqCst) {
+                    break
+                }
                 tokio::select! {
                     Some((msg, tx)) = rx.recv() => {
                         let res = dispatcher.send(msg).await;
@@ -55,21 +58,16 @@ impl<RD: MultiRaftMessageSender> LocalServer<RD> {
                             error!("channel receiver closed for client")
                         }
                     },
-                    _ = &mut stopper => {
-
-                        break
-                    },
                 }
             }
         };
 
-        task_group.spawn(main_loop)
+        tokio::spawn(main_loop)
     }
 }
 
 #[derive(Clone)]
 pub struct LocalTransport<M: MultiRaftMessageSender> {
-    task_group: TaskGroup,
     servers: Arc<RwLock<HashMap<u64, LocalServer<M>>>>,
     disconnected: Arc<RwLock<HashMap<u64, Vec<u64>>>>,
 }
@@ -77,7 +75,6 @@ pub struct LocalTransport<M: MultiRaftMessageSender> {
 impl<M: MultiRaftMessageSender> LocalTransport<M> {
     pub fn new() -> Self {
         Self {
-            task_group: TaskGroup::new(),
             servers: Default::default(),
             disconnected: Default::default(),
         }
@@ -104,11 +101,12 @@ impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
         }
 
         // create server
+        let stopped = Arc::new(AtomicBool::new(false));
 
         let (tx, rx) = channel(1);
         let local_server = LocalServer {
             tx,
-            stopped: false,
+            stopped: stopped.clone(),
             _m1: PhantomData,
         };
 
@@ -116,7 +114,7 @@ impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
         wl.insert(node_id, local_server);
 
         // spawn server to accepct request
-        let _ = LocalServer::spawn(node_id, addr, dispatcher, rx, &self.task_group);
+        let _ = LocalServer::spawn(node_id, addr, dispatcher, rx, stopped);
 
         Ok(())
     }
@@ -175,10 +173,8 @@ impl<RD: MultiRaftMessageSender> LocalTransport<RD> {
     pub async fn stop_all(&self) -> Result<(), Error> {
         let mut wl = self.servers.write().await;
         for (_, server) in wl.iter_mut() {
-            server.stopped = true
+            server.stopped.store(true, Ordering::SeqCst)
         }
-        self.task_group.stop();
-        self.task_group.joinner().await;
         Ok(())
     }
 }
@@ -192,12 +188,7 @@ where
         let (from_rep, to_rep) = (msg.msg.as_ref().unwrap().from, msg.msg.as_ref().unwrap().to);
         debug!(
             "node {}: group = {}, send {:?} to {} and forward replica {} -> {}",
-            from_node,
-            msg.group_id,
-            msg,
-            to_node,
-            from_rep,
-            to_rep,
+            from_node, msg.group_id, msg, to_node, from_rep, to_rep,
         );
         let servers = self.servers.clone();
         let disconnected = self.disconnected.clone();
@@ -225,7 +216,7 @@ where
 
             // send reqeust
             let to_server = rl.get(&to_node).unwrap();
-            if to_server.stopped {
+            if to_server.stopped.load(Ordering::SeqCst) {
                 error!("server {} stopped", to_node);
                 return;
             }

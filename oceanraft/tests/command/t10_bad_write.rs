@@ -1,16 +1,15 @@
 use std::mem::take;
 
+use oceanraft::prelude::StoreData;
 use oceanraft::Error;
 use oceanraft::ProposeError;
-use oceanraft::prelude::StoreData;
-use oceanraft::task_group::TaskGroup;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::MemStoreEnv;
-use crate::fixtures::RockStoreEnv;
 use crate::fixtures::MemType;
+use crate::fixtures::RockStoreEnv;
 
 /// The test consensus group does not have a leader or the leader is
 /// submitting a proposal during an election.
@@ -21,12 +20,10 @@ use crate::fixtures::MemType;
 )]
 async fn test_no_leader() {
     let nodes = 3;
-    let task_group = TaskGroup::new();
     let mut env = MemStoreEnv::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::<MemType>::new(nodes)
         .election_ticks(2)
-        .task_group(task_group.clone())
         .state_machines(env.state_machines.clone())
         .apply_rxs(take(&mut env.rxs))
         .storages(env.storages.clone())
@@ -81,12 +78,10 @@ async fn test_no_leader() {
 )]
 async fn test_bad_group() {
     let nodes = 3;
-    let task_group = TaskGroup::new();
     let env = MemStoreEnv::new(nodes);
     // let rockstore_env = RockStorageEnv::<()>::new(nodes);
     let mut cluster = ClusterBuilder::<MemType>::new(nodes)
         .election_ticks(2)
-        .task_group(task_group.clone())
         .state_machines(env.state_machines.clone())
         .storages(env.storages.clone())
         .build()
