@@ -393,7 +393,7 @@ where
                 .scan_replica_desc(metadata.group_id)
                 .await
                 .unwrap();
-            self.create_raft_group(metadata.group_id, metadata.replica_id, replica_descs, 0)
+            self.create_raft_group(metadata.group_id, metadata.replica_id, replica_descs, None)
                 .await
                 .unwrap();
         }
@@ -572,7 +572,7 @@ where
             // because the heartbeats msg always hajacked and fanouted, so the msg.commit
             // always meanless.
             let _ = self
-                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, 0)
+                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, None)
                 .await
                 .map_err(|err| {
                     error!(
@@ -960,7 +960,7 @@ where
                         request.group_id,
                         request.replica_id,
                         request.replicas,
-                        request.applied_hint,
+                        Some(request.applied_hint),
                     )
                     .await;
                 return Some(ResponseCallbackQueue::new_callback(tx, res));
@@ -1073,8 +1073,7 @@ where
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
-        applied: u64,
-        /* TODO: applied, hit skip */
+        applied_hint: Option<u64>,
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroup(RaftGroupError::Exists(
@@ -1096,11 +1095,23 @@ where
         }
 
         let group_storage = self.storage.group_storage(group_id, replica_id).await?;
-        let applied = cmp::max(group_storage.get_applied().unwrap(), applied);
         let rs = group_storage
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
+        let applied = cmp::max(
+            group_storage.get_applied().unwrap_or(0),
+            applied_hint.unwrap_or(0),
+        );
+        let committed_index = rs.hard_state.commit;
+        let persisted_index = group_storage.last_index().unwrap();
+
+        if applied > cmp::min(committed_index, persisted_index) {
+            panic!(
+                "provide hit applied is out of range [applied({}), min (committed({}), persisted({}))]",
+                applied, committed_index, persisted_index
+            );
+        }
         // let (applied_index, applied_term) = group_storage.get_applied()?;
         // if replicas_desc are not empty and are valid data,
         // we know where all replicas of the raft group are located.
