@@ -726,7 +726,6 @@ fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipRequestCont
         }
     }
 }
-
 #[cfg(test)]
 mod test {
     use futures::Future;
