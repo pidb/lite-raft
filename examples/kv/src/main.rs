@@ -1,5 +1,5 @@
 #![feature(type_alias_impl_trait)]
-
+#![feature(impl_trait_in_assoc_type)]
 mod args;
 mod server;
 mod state_machine;

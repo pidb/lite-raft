@@ -1,5 +1,8 @@
 mod storage {
     use std::sync::Arc;
+    use std::time::Duration;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
 
     use futures::Future;
     use prost::Message;
@@ -21,6 +24,7 @@ mod storage {
 
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
+    use crate::prelude::GroupMetadata;
     use crate::prelude::HardState;
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
@@ -283,12 +287,6 @@ mod storage {
             format!("{}_{}_{}", group_id, replica_id, CONF_STATE_PREFIX)
         }
 
-        /// Format applied_index  key with mode `{group_id}_{replica_id}_applied_index`.
-        #[inline]
-        fn format_applied_key(group_id: u64, replica_id: u64) -> String {
-            format!("{}_{}_{}", group_id, replica_id, APPLIED_INDEX_PREFIX)
-        }
-
         /// Format log empty flag with mode `empty_{group_id}_{replica_id}`.
         #[inline]
         fn format_empty_key(group_id: u64, replica_id: u64) -> String {
@@ -318,6 +316,11 @@ mod storage {
         #[inline]
         fn format_entry_key(group_id: u64, index: u64) -> String {
             format!("ent_{}_{:0>20}", group_id, index)
+        }
+
+        #[inline]
+        fn format_applied_key(group_id: u64) -> String {
+            format!("{}_{}", APPLIED_INDEX_PREFIX, group_id)
         }
 
         #[inline]
@@ -967,41 +970,35 @@ mod storage {
                 })
         }
 
-        // fn set_applied(&self, applied_index: u64, applied_term: u64) -> Result<()> {
-        //     let applied = Applied {
-        //         index: applied_index,
-        //         term: applied_term,
-        //     };
+        fn set_applied(&self, index: u64) -> Result<()> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let key = DBEnv::format_applied_key(self.group_id);
+            let mut writeopts = WriteOptions::default();
+            writeopts.set_sync(true);
+            self.db
+                .put_cf_opt(&metacf, &key, index.to_be_bytes(), &writeopts)
+                .map_err(|err| {
+                    self.to_write_err(
+                        err,
+                        true,
+                        false,
+                        format!("set_applied: applied_index = {:?}", index),
+                    )
+                })
+        }
 
-        //     let metacf = DBEnv::get_metadata_cf(&self.db);
-        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-        //     let mut ser = flexbuffer_serialize(&applied).unwrap(); // FIXME: handle err
-        //     let mut writeopts = WriteOptions::default();
-        //     writeopts.set_sync(true);
-        //     self.db
-        //         .put_cf_opt(&metacf, &key, ser.take_buffer(), &writeopts)
-        //         .map_err(|err| {
-        //             self.to_write_err(
-        //                 err,
-        //                 true,
-        //                 false,
-        //                 format!("set_applied_index: applied_index = {:?}", applied),
-        //             )
-        //         })
-        // }
-
-        // fn get_applied(&self) -> Result<(u64, u64)> {
-        //     let metacf = DBEnv::get_metadata_cf(&self.db);
-        //     let key = DBEnv::format_applied_key(self.group_id, self.replica_id);
-        //     let readopts = ReadOptions::default();
-        //     self.db
-        //         .get_cf_opt(&metacf, &key, &readopts)
-        //         .map_err(|err| self.to_write_err(err, true, false, format!("get_applied_index")))?
-        //         .map_or(Ok((0, 0)), |data| {
-        //             let applied = flexbuffer_deserialize::<Applied>(&data).unwrap();
-        //             Ok((applied.index, applied.term))
-        //         })
-        // }
+        fn get_applied(&self) -> Result<u64> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let key = DBEnv::format_applied_key(self.group_id);
+            let readopts = ReadOptions::default();
+            self.db
+                .get_cf_opt(&metacf, &key, &readopts)
+                .map_err(|err| self.to_write_err(err, true, false, format!("get_applied")))?
+                .map_or(Ok(0), |data| {
+                    let index = u64::from_be_bytes(data.try_into().unwrap());
+                    Ok(index)
+                })
+        }
 
         fn append(&self, ents: &[Entry]) -> Result<()> {
             if ents.is_empty() {
@@ -1258,14 +1255,78 @@ mod storage {
                     &self.wsnap,
                 )
                 .and_then(|core| {
+                    let metadata = GroupMetadata {
+                        group_id,
+                        replica_id,
+                        node_id: self.node_id,
+                        create_timestamp: SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or(Duration::default())
+                            .as_secs(),
+                        deleted: false,
+                    };
+
                     let mut writeopts = WriteOptions::default();
                     writeopts.set_sync(true);
-                    // TODO: add added timestamp as data
+                    let val = metadata.encode_to_vec();
                     self.db
-                        .put_cf_opt(&meta_cf, key, b"".to_vec(), &writeopts)?;
+                        .put_cf_opt(&meta_cf, key, val.to_vec(), &writeopts)?;
                     Ok(core)
                 }),
             }
+        }
+
+        /// Scan groups by using `group_` prefix.
+        fn scan_groups(&self) -> std::result::Result<Vec<GroupMetadata>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let prefix = format!("{}_", GROUP_STORE_PREFIX);
+
+            let mut groups = vec![];
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+
+            for item in iter {
+                let (key, val) = item?;
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => break, /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&prefix) {
+                    true => {
+                        let meta = GroupMetadata::decode(val.as_ref()).unwrap();
+                        groups.push(meta);
+                    }
+                    false => break, /* prefix is no longer matched */
+                }
+            }
+            Ok(groups)
+        }
+
+        fn get_group_metadata(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> std::result::Result<Option<GroupMetadata>, RocksdbError> {
+            let meta_cf = DBEnv::get_metadata_cf(&self.db);
+            let key = self.group_store_key(group_id, replica_id);
+            let readopt = ReadOptions::default();
+            self.db
+                .get_cf_opt(&meta_cf, key, &readopt)?
+                .map_or(Ok(None), |data| {
+                    let meta = GroupMetadata::decode(data.as_ref()).unwrap();
+                    Ok(Some(meta))
+                })
+        }
+
+        fn set_group_metadata(&self, meta: GroupMetadata) -> std::result::Result<(), RocksdbError> {
+            let meta_cf = DBEnv::get_metadata_cf(&self.db);
+            let key = self.group_store_key(meta.group_id, meta.replica_id);
+            let mut writeopt = WriteOptions::default();
+            writeopt.set_sync(true);
+            let value = meta.encode_to_vec();
+            return self.db.put_cf_opt(&meta_cf, key, value, &writeopt);
         }
 
         fn get_replica_desc(
@@ -1309,6 +1370,37 @@ mod storage {
             let writeopts = WriteOptions::default();
             // TODO: with fsync by config
             self.db.delete_cf_opt(&metacf, &key, &writeopts)
+        }
+
+        fn scan_replica_desc(
+            &self,
+            group_id: u64,
+        ) -> std::result::Result<Vec<ReplicaDesc>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let prefix = format!("{}_{}", REPLICA_DESC_PREFIX, group_id);
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+
+            let mut replicas = vec![];
+            for item in iter {
+                let (key, value) = item?;
+
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => break, /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&prefix) {
+                    true => {
+                        let replica_desc = ReplicaDesc::decode(value.as_ref()).unwrap();
+                        replicas.push(replica_desc);
+                    }
+                    false => break, /* prefix is no longer matched */
+                }
+            }
+
+            Ok(replicas)
         }
 
         fn search_replica_desc_on_node(
@@ -1362,6 +1454,45 @@ mod storage {
             }
         }
 
+        type ScanGroupMetadataFuture<'life0> = impl Future<Output = Result<Vec<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+        fn scan_group_metadata(&self) -> Self::ScanGroupMetadataFuture<'_> {
+            async move {
+                self.scan_groups()
+                    .map_err(|err| self.to_storage_err(0, 0, err, "scan_group_metadata".into()))
+            }
+        }
+
+        type GetGroupMetadataFuture<'life0> = impl Future<Output = Result<Option<GroupMetadata>>> + 'life0
+        where
+            Self: 'life0;
+        fn get_group_metadata(
+            &self,
+            group_id: u64,
+            replica_id: u64,
+        ) -> Self::GetGroupMetadataFuture<'_> {
+            async move {
+                self.get_group_metadata(group_id, replica_id)
+                    .map_err(|err| {
+                        self.to_storage_err(group_id, replica_id, err, "get_group_metadata".into())
+                    })
+            }
+        }
+
+        type SetGroupMetadataFuture<'life0> = impl Future<Output = Result<()>> + 'life0
+        where
+            Self: 'life0;
+        fn set_group_metadata(&self, meta: GroupMetadata) -> Self::SetGroupMetadataFuture<'_> {
+            async move {
+                let group_id = meta.group_id;
+                let replica_id = meta.replica_id;
+                self.set_group_metadata(meta).map_err(|err| {
+                    self.to_storage_err(group_id, replica_id, err, "set_group_metadata".into())
+                })
+            }
+        }
+
         type ReplicaDescFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
     where
         Self: 'life0;
@@ -1410,10 +1541,20 @@ mod storage {
             }
         }
 
-        type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
-    where
-        Self: 'life0;
+        type ScanReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
+        where
+            Self: 'life0;
+        fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_> {
+            async move {
+                self.scan_replica_desc(group_id).map_err(|err| {
+                    self.to_storage_err(group_id, 0, err, "scan_replica_desc".into())
+                })
+            }
+        }
 
+        type ReplicaForNodeFuture<'life0> = impl Future<Output = Result<Option<ReplicaDesc>>> + 'life0
+        where
+            Self: 'life0;
         fn replica_for_node(&self, group_id: u64, node_id: u64) -> Self::ReplicaForNodeFuture<'_> {
             async move {
                 self.search_replica_desc_on_node(group_id, node_id)
@@ -1968,7 +2109,7 @@ mod state_machine {
                 .map_err(|err| StateMachineStoreError::Other(Box::new(err)))
         }
 
-        /// Save current tuple (applied_index, applied_term) to data column of rocksdb.
+        /// Save current applied to meta column of rocksdb.
         pub fn set_applied(
             &self,
             group_id: u64,

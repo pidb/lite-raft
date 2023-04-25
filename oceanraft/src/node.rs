@@ -26,6 +26,7 @@ use tracing::Span;
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
+use crate::prelude::GroupMetadata;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
@@ -262,7 +263,7 @@ where
             task_group,
         );
 
-        let worker = NodeWorker::<TR, RS, MRS, W, R>::new(
+        let mut worker = NodeWorker::<TR, RS, MRS, W, R>::new(
             cfg,
             transport,
             storage,
@@ -280,6 +281,7 @@ where
 
         let stopper = task_group.stopper();
         task_group.spawn(async move {
+            worker.restore().await;
             worker.main_loop(stopper, ticker).await;
         });
 
@@ -357,7 +359,7 @@ where
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
-            propose_rx: propose_rx,
+            propose_rx,
             campaign_rx,
             multiraft_message_rx: raft_message_rx,
             manage_rx,
@@ -372,6 +374,28 @@ where
             pending_responses: ResponseCallbackQueue::new(),
             shared_states,
             query_group_rx: group_query_rx,
+        }
+    }
+
+    /// Restore the node from storage.
+    async fn restore(&mut self) {
+        // TODO: use group_iter
+        let metadatas = self.storage.scan_group_metadata().await.unwrap();
+        for metadata in metadatas.iter() {
+            // TODO: check group metadta status to detect whether deleted.
+            if metadata.deleted {
+                continue;
+            }
+
+            // TODO: should modify group_storage impl, don't default create
+            let replica_descs = self
+                .storage
+                .scan_replica_desc(metadata.group_id)
+                .await
+                .unwrap();
+            self.create_raft_group(metadata.group_id, metadata.replica_id, replica_descs, None)
+                .await
+                .unwrap();
         }
     }
 
@@ -548,7 +572,7 @@ where
             // because the heartbeats msg always hajacked and fanouted, so the msg.commit
             // always meanless.
             let _ = self
-                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, 0)
+                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, None)
                 .await
                 .map_err(|err| {
                     error!(
@@ -936,7 +960,7 @@ where
                         request.group_id,
                         request.replica_id,
                         request.replicas,
-                        request.applied_hint,
+                        Some(request.applied_hint),
                     )
                     .await;
                 return Some(ResponseCallbackQueue::new_callback(tx, res));
@@ -959,6 +983,33 @@ where
                 }
 
                 group.status = Status::Delete;
+
+                let replica_id = group.replica_id;
+                match self
+                    .storage
+                    .get_group_metadata(group_id, replica_id)
+                    .await
+                    .unwrap()
+                {
+                    None => {
+                        self.storage
+                            .set_group_metadata(GroupMetadata {
+                                group_id,
+                                replica_id,
+                                node_id: self.node_id,
+                                create_timestamp: 0,
+                                deleted: true,
+                            })
+                            .await
+                            .unwrap();
+                    }
+                    Some(mut meta) => {
+                        if !meta.deleted {
+                            meta.deleted = true;
+                            self.storage.set_group_metadata(meta).await.unwrap();
+                        }
+                    }
+                }
 
                 // TODO: impl broadcast
                 return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
@@ -1022,8 +1073,7 @@ where
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
-        applied: u64,
-        /* TODO: applied, hit skip */
+        applied_hint: Option<u64>,
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroup(RaftGroupError::Exists(
@@ -1049,6 +1099,19 @@ where
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
+        let applied = cmp::max(
+            group_storage.get_applied().unwrap_or(0),
+            applied_hint.unwrap_or(0),
+        );
+        let committed_index = rs.hard_state.commit;
+        let persisted_index = group_storage.last_index().unwrap();
+
+        if applied > cmp::min(committed_index, persisted_index) {
+            panic!(
+                "provide hit applied is out of range [applied({}), min (committed({}), persisted({}))]",
+                applied, committed_index, persisted_index
+            );
+        }
         // let (applied_index, applied_term) = group_storage.get_applied()?;
         // if replicas_desc are not empty and are valid data,
         // we know where all replicas of the raft group are located.
@@ -1062,7 +1125,7 @@ where
         // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
-            applied: 0, // TODO: support hint skip
+            applied, // TODO: support hint skip
             election_tick: self.cfg.election_tick,
             heartbeat_tick: self.cfg.heartbeat_tick,
             max_size_per_msg: self.cfg.max_size_per_msg,

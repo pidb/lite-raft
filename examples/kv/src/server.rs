@@ -86,7 +86,6 @@ impl KVServer {
         let mut cfg = Config::default();
         cfg.node_id = arg.node_id;
         let kv_storage = SledStorage::new(&arg.kv_storage_path);
-        let kv_state_machine = KVStateMachine::new();
         let grpc_transport = GRPCTransport::new(peers.clone());
         let rock_storage = RockStore::new(
             arg.node_id,
@@ -94,6 +93,7 @@ impl KVServer {
             kv_storage.clone(),
             kv_storage.clone(),
         );
+        let kv_state_machine = KVStateMachine::new(rock_storage.clone());
 
         let gs = rock_storage.group_storage(1, 1).await.unwrap();
         if !gs.initial_state().unwrap().initialized() {
@@ -115,7 +115,7 @@ impl KVServer {
         )
         .unwrap();
 
-        multiraft
+        if let Err(err) = multiraft
             .create_group(CreateGroupRequest {
                 group_id: 1,
                 replica_id: 1,
@@ -123,7 +123,9 @@ impl KVServer {
                 applied_hint: 0,
             })
             .await
-            .unwrap();
+        {
+            println!("{}", err)
+        }
 
         Self {
             arg,

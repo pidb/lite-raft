@@ -1,3 +1,4 @@
+#![feature(impl_trait_in_assoc_type)]
 use std::cmp;
 use std::error::Error;
 use std::io;
