@@ -134,15 +134,13 @@ where
     T: MultiRaftTypeSpecialization,
     TR: Transport + Clone,
 {
-    pub fn new<TK>(
+    pub fn new(
         cfg: Config,
         transport: TR,
         storage: T::MS,
         state_machine: T::M,
-        ticker: Option<TK>,
+        ticker: Option<Box<dyn Ticker>>,
     ) -> Result<Self, Error>
-    where
-        TK: Ticker,
     {
         cfg.validate()?;
         let states = GroupStates::new();

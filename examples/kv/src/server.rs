@@ -104,7 +104,7 @@ impl KVServer {
             gs.install_snapshot(snap).unwrap();
         }
 
-        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new::<tokio::time::Interval>(
+        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new(
             cfg,
             grpc_transport,
             rock_storage,
