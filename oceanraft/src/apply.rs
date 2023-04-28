@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 
 use prost::Message;
 use raft::prelude::ConfState;
@@ -33,8 +35,6 @@ use crate::prelude::ConfChangeV2;
 use crate::prelude::EntryType;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
-use crate::task_group::Stopper;
-use crate::task_group::TaskGroup;
 use crate::utils::flexbuffer_deserialize;
 
 use super::error::ChannelError;
@@ -63,7 +63,7 @@ impl ApplyActor {
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
         response_tx: UnboundedSender<ApplyResultMessage>,
         commit_tx: UnboundedSender<ApplyCommitMessage>,
-        task_group: &TaskGroup,
+        stopped: Arc<AtomicBool>,
     ) -> Self
     where
         W: ProposeData,
@@ -81,9 +81,8 @@ impl ApplyActor {
             response_tx,
             commit_tx,
         );
-        let stopper = task_group.stopper();
-        task_group.spawn(async move {
-            worker.main_loop(stopper).await;
+        tokio::spawn(async move {
+            worker.main_loop(stopped).await;
         });
 
         Self {}
@@ -230,16 +229,15 @@ where
         }
     }
 
-    async fn main_loop(mut self, mut stopper: Stopper) {
+    async fn main_loop(mut self, stopped: Arc<AtomicBool>) {
         info!("node {}: start apply main_loop", self.node_id);
         let mut pending_msgs = Vec::with_capacity(self.cfg.max_batch_apply_msgs);
 
         loop {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
             tokio::select! {
-                _ = &mut stopper => {
-                    // self.do_stop();
-                    break
-                },
                 // TODO: handle if the node actor stopped
                 Some((_span, msg)) = self.rx.recv() =>  {
                     if pending_msgs.len() < self.cfg.max_batch_apply_msgs {

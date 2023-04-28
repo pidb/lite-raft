@@ -12,15 +12,14 @@ use oceanraft::storage::MultiRaftMemoryStorage;
 use oceanraft::storage::RockStore;
 use oceanraft::storage::RockStoreCore;
 use oceanraft::storage::StateMachineStore;
-use oceanraft::task_group::TaskGroup;
 use oceanraft::Apply;
 use oceanraft::ProposeResponse;
 
 use super::rand_temp_dir;
 use super::rsm::MemStoreStateMachine;
 use super::rsm::RockStoreStateMachine;
-use super::ClusterBuilder;
 use super::Cluster;
+use super::ClusterBuilder;
 use super::MakeGroupPlan;
 
 define_multiraft! {
@@ -202,9 +201,8 @@ pub async fn quickstart_rockstore_multi_groups(
     rockstore_env: &mut RockStoreEnv,
     nodes: usize,
     groups: usize,
-) -> (TaskGroup, Cluster<RockType>) {
+) -> Cluster<RockType> {
     // FIXME: each node has task group, if not that joinner can block.
-    let task_group = TaskGroup::new();
     // let mut cluster = FixtureCluster::make(node_nums as u64, task_group.clone()).await;
     // cluster.start();
 
@@ -212,7 +210,6 @@ pub async fn quickstart_rockstore_multi_groups(
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .task_group(task_group.clone())
         .apply_rxs(take(&mut rockstore_env.rxs))
         .build()
         .await;
@@ -242,22 +239,20 @@ pub async fn quickstart_rockstore_multi_groups(
         }
     }
 
-    (task_group, cluster)
+    cluster
 }
 
 /// Quickly start a consensus group with 3 nodes and 3 replicas, with leader being replica 1.
 pub async fn quickstart_rockstore_group(
     rockstore_env: &mut RockStoreEnv,
     nodes: usize,
-) -> (TaskGroup, Cluster<RockType>) {
+) -> Cluster<RockType> {
     // FIXME: each node has task group, if not that joinner can block.
-    let task_group = TaskGroup::new();
     //  let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .task_group(task_group.clone())
         .apply_rxs(std::mem::take(&mut rockstore_env.rxs))
         .build()
         .await;
@@ -283,21 +278,16 @@ pub async fn quickstart_rockstore_group(
         assert_eq!(leader_event.replica_id, 1);
     }
 
-    (task_group, cluster)
+    cluster
 }
 
-pub async fn quickstart_memstorage_group(
-    env: &mut MemStoreEnv,
-    nodes: usize,
-) -> (TaskGroup, Cluster<MemType>) {
+pub async fn quickstart_memstorage_group(env: &mut MemStoreEnv, nodes: usize) -> Cluster<MemType> {
     // FIXME: each node has task group, if not that joinner can block.
-    let task_group = TaskGroup::new();
     //  let rockstore_env = RockStorageEnv::new(nodes);
     let mut cluster = ClusterBuilder::new(nodes)
         .election_ticks(2)
         .state_machines(env.state_machines.clone())
         .storages(env.storages.clone())
-        .task_group(task_group.clone())
         .apply_rxs(std::mem::take(&mut env.rxs))
         .build()
         .await;
@@ -322,6 +312,5 @@ pub async fn quickstart_memstorage_group(
         assert_eq!(leader_event.group_id, 1);
         assert_eq!(leader_event.replica_id, 1);
     }
-
-    (task_group, cluster)
+    cluster
 }

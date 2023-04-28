@@ -1,7 +1,6 @@
 use std::mem::take;
 use std::time::Duration;
 
-use oceanraft::task_group::TaskGroup;
 use tokio::time::timeout_at;
 use tokio::time::Instant;
 
@@ -38,10 +37,8 @@ async fn test_initial_leader_elect() {
         let nodes = 3;
         // let rockstore_env = RockStorageEnv::new(nodes);
         let mut env = MemStoreEnv::new(nodes);
-        let task_group = TaskGroup::new();
         let mut cluster = ClusterBuilder::new(nodes)
             .election_ticks(2)
-            .task_group(task_group.clone())
             .state_machines(env.state_machines.clone())
             .storages(env.storages.clone())
             .apply_rxs(take(&mut env.rxs))
@@ -57,24 +54,24 @@ async fn test_initial_leader_elect() {
         let _ = cluster.make_group(&mut plan).await.unwrap();
         check_replica_should_elected(&mut cluster, i + 1, plan.group_id, i + 1).await;
 
-        if let Err(_) = timeout_at(
-            Instant::now() + Duration::from_millis(100),
-            cluster.transport.stop_all(),
-        )
-        .await
-        {
-            panic!("wait stop transport error")
-        }
-        cluster.transport.stop_all().await.unwrap();
-        task_group.stop();
-        if let Err(_) = timeout_at(
-            Instant::now() + Duration::from_millis(100),
-            task_group.joinner(),
-        )
-        .await
-        {
-            panic!("wait cluster taks stop error")
-        }
+        // if let Err(_) = timeout_at(
+        //     Instant::now() + Duration::from_millis(100),
+        //     cluster.transport.stop_all(),
+        // )
+        // .await
+        // {
+        //     panic!("wait stop transport error")
+        // }
+        // cluster.transport.stop_all().await.unwrap();
+        // task_group.stop();
+        // if let Err(_) = timeout_at(
+        //     Instant::now() + Duration::from_millis(100),
+        //     task_group.joinner(),
+        // )
+        // .await
+        // {
+        //     panic!("wait cluster taks stop error")
+        // }
         // rockstore_env.destory();
     }
 }

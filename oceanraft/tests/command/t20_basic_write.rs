@@ -18,7 +18,7 @@ async fn test_group_write() {
     let nodes = 3;
     let command_nums = 10;
     let mut rockstore_env = RockStoreEnv::new(nodes);
-    let (_, mut cluster) = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
+    let mut cluster = quickstart_rockstore_group(&mut rockstore_env, nodes).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();
@@ -72,8 +72,7 @@ async fn test_multigroup_write() {
 
     let mut rockstore_env = RockStoreEnv::new(nodes);
 
-    let (_, mut cluster) =
-        quickstart_rockstore_multi_groups(&mut rockstore_env, nodes, groups).await;
+    let mut cluster = quickstart_rockstore_multi_groups(&mut rockstore_env, nodes, groups).await;
 
     let mut recvs = vec![];
     let mut write_checker = WriteChecker::default();

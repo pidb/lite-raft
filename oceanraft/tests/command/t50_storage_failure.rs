@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use oceanraft::storage::MultiRaftStorage;
 use oceanraft::prelude::StoreData;
+use oceanraft::storage::MultiRaftStorage;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_memstorage_group;
@@ -19,7 +19,7 @@ async fn test_log_storeage_unavailable() {
     // create five nodes
     let nodes = 3;
     let mut env = MemStoreEnv::new(nodes);
-    let (_, mut cluster) = quickstart_memstorage_group(&mut env, nodes).await;
+    let mut cluster = quickstart_memstorage_group(&mut env, nodes).await;
 
     // trigger unavailable for 1,2 nodes storage
     env.storages[1]
@@ -100,7 +100,7 @@ async fn test_multi_storeage_unavailable() {
     // create five nodes
     let nodes = 3;
     let mut env = MemStoreEnv::new(nodes);
-    let (_, mut cluster) = quickstart_memstorage_group(&mut env, nodes).await;
+    let mut cluster = quickstart_memstorage_group(&mut env, nodes).await;
 
     // trigger unavailable for 1,2 nodes storage
     env.storages[1].trigger_storage_temp_unavailable(true).await;

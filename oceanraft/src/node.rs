@@ -1,8 +1,8 @@
-use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::collections::hash_map::Iter;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,8 +32,6 @@ use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
-use crate::task_group::Stopper;
-use crate::task_group::TaskGroup;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -231,9 +229,9 @@ where
         storage: &MRS,
         rsm: RSM,
         event_bcast: &EventChannel,
-        task_group: &TaskGroup,
         ticker: Option<TK>,
         states: GroupStates,
+        stopped: Arc<AtomicBool>,
     ) -> Self
     where
         TR: Transport + Clone,
@@ -260,7 +258,7 @@ where
             apply_request_rx,
             apply_response_tx,
             commit_tx,
-            task_group,
+            stopped.clone(),
         );
 
         let mut worker = NodeWorker::<TR, RS, MRS, W, R>::new(
@@ -279,10 +277,10 @@ where
             states,
         );
 
-        let stopper = task_group.stopper();
-        task_group.spawn(async move {
+        //        let stopper = task_group.stopper();
+        tokio::spawn(async move {
             worker.restore().await;
-            worker.main_loop(stopper, ticker).await;
+            worker.main_loop(ticker, stopped).await;
         });
 
         Self {
@@ -405,7 +403,7 @@ where
         skip_all,
         fields(node_id=self.node_id)
     )]
-    async fn main_loop<TK>(mut self, mut stopper: Stopper, ticker: Option<TK>)
+    async fn main_loop<TK>(mut self, ticker: Option<TK>, stopped: Arc<AtomicBool>)
     where
         TK: Ticker,
     {
@@ -421,14 +419,14 @@ where
         // let mut ticker = TK::new(std::time::Instant::now() + tick_interval, tick_interval);
         let mut ticks = 0;
         loop {
+            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                self.do_stop();
+                break;
+            }
             self.event_chan.flush();
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
-                _ = &mut stopper => {
-                    self.do_stop();
-                    break
-                }
 
                 Some((req, tx)) = self.multiraft_message_rx.recv() => {
                     let res = self.handle_multiraft_message(req).await ;

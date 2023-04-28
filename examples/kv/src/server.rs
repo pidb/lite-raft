@@ -8,7 +8,6 @@ use oceanraft::storage::RockStore;
 use oceanraft::storage::RockStoreCore;
 use oceanraft::storage::Storage;
 use oceanraft::storage::StorageExt;
-use oceanraft::task_group::TaskGroup;
 use oceanraft::transport::MultiRaftServiceImpl;
 use oceanraft::transport::MultiRaftServiceServer;
 use oceanraft::Config;
@@ -110,7 +109,6 @@ impl KVServer {
             grpc_transport,
             rock_storage,
             kv_state_machine,
-            TaskGroup::new(),
             None,
         )
         .unwrap();
