@@ -1,3 +1,4 @@
+use std::cmp;
 use std::collections::hash_map::HashMap;
 use std::collections::hash_map::Iter;
 use std::collections::HashSet;
@@ -223,13 +224,13 @@ where
     W: ProposeData,
     R: ProposeResponse,
 {
-    pub fn spawn<TR, RS, MRS, RSM, TK>(
+    pub fn spawn<TR, RS, MRS, RSM>(
         cfg: &Config,
         transport: &TR,
         storage: &MRS,
         rsm: RSM,
         event_bcast: &EventChannel,
-        ticker: Option<TK>,
+        ticker: Option<Box<dyn Ticker>>,
         states: GroupStates,
         stopped: Arc<AtomicBool>,
     ) -> Self
@@ -238,7 +239,6 @@ where
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
         RSM: StateMachine<W, R>,
-        TK: Ticker,
     {
         let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
         let (manage_tx, manage_rx) = channel(1);
@@ -403,20 +403,19 @@ where
         skip_all,
         fields(node_id=self.node_id)
     )]
-    async fn main_loop<TK>(mut self, ticker: Option<TK>, stopped: Arc<AtomicBool>)
-    where
-        TK: Ticker,
-    {
+    async fn main_loop(mut self, ticker: Option<Box<dyn Ticker>>, stopped: Arc<AtomicBool>) {
         info!("node {}: start multiraft main_loop", self.node_id);
 
         let tick_interval = Duration::from_millis(self.cfg.tick_interval);
 
         let mut ticker = ticker.map_or(
-            TK::new(std::time::Instant::now() + tick_interval, tick_interval),
+            Box::new(tokio::time::interval_at(
+                tokio::time::Instant::now() + tick_interval,
+                tick_interval,
+            )) as Box<dyn Ticker>,
             |t| t,
         );
 
-        // let mut ticker = TK::new(std::time::Instant::now() + tick_interval, tick_interval);
         let mut ticks = 0;
         loop {
             if stopped.load(std::sync::atomic::Ordering::SeqCst) {

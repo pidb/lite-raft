@@ -138,7 +138,7 @@ where
                     .take()
                     .expect("state machines can't initialize"),
                 // &event_tx,
-                Some(ticker.clone()),
+                Some(Box::new(ticker.clone())),
             )
             .unwrap();
 
