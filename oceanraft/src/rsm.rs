@@ -92,6 +92,7 @@ where
     fn apply<'life0>(
         &'life0 self,
         group_id: u64,
+        replica_id: u64,
         state: &GroupState,
         applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'life0>;

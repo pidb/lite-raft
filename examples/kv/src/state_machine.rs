@@ -26,13 +26,14 @@ impl StateMachine<KVData, KVResponse> for KVStateMachine {
     fn apply<'life0>(
         &'life0 self,
         group_id: u64,
+        replica_id: u64,
         state: &oceanraft::GroupState,
         applys: Vec<Apply<KVData, KVResponse>>,
     ) -> Self::ApplyFuture<'life0> {
         async move {
             for apply in applys {
                 println!("apply index = {}", apply.get_index());
-                let gs = self.storage.group_storage(group_id, 1).await.unwrap();
+                let gs = self.storage.group_storage(group_id, replica_id).await.unwrap();
                 gs.set_applied(apply.get_index()).unwrap();
             }
         }

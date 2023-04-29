@@ -676,7 +676,7 @@ where
 
         // TODO: handle apply error: setting applied to error before
         self.rsm
-            .apply(group_id, &GroupState::default(), applys)
+            .apply(group_id, apply.replica_id, &GroupState::default(), applys)
             .await;
         // gs.set_applied(last_index, last_term).unwrap();
         state.applied_index = last_index;
@@ -752,7 +752,13 @@ mod test {
         type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn apply(&self, _: u64, _: &GroupState, _: Vec<Apply<(), ()>>) -> Self::ApplyFuture<'_> {
+        fn apply(
+            &self,
+            _: u64,
+            _: u64,
+            _: &GroupState,
+            _: Vec<Apply<(), ()>>,
+        ) -> Self::ApplyFuture<'_> {
             async move {}
         }
     }
