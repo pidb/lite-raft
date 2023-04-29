@@ -28,6 +28,7 @@ where
     fn apply<'life0>(
         &'life0 self,
         group_id: u64,
+        preplica_id: u64,
         state: &GroupState,
         mut applys: Vec<Apply<W, ()>>,
     ) -> Self::ApplyFuture<'life0> {
@@ -81,6 +82,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
     fn apply<'life0>(
         &'life0 self,
         group_id: u64,
+        replica_id: u64,
         _state: &GroupState,
         mut applys: Vec<Apply<StoreData, ()>>,
     ) -> Self::ApplyFuture<'life0> {
