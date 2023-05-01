@@ -22,6 +22,7 @@ mod storage {
     use rocksdb::WriteOptions;
     use tracing::error;
 
+    use crate::multiraft::NO_LEADER;
     use crate::prelude::ConfState;
     use crate::prelude::Entry;
     use crate::prelude::GroupMetadata;
@@ -1259,6 +1260,7 @@ mod storage {
                         group_id,
                         replica_id,
                         node_id: self.node_id,
+                        leader_id: NO_LEADER,
                         create_timestamp: SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap_or(Duration::default())

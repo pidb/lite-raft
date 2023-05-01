@@ -40,7 +40,7 @@ pub struct ApplyMembership<RES: ProposeResponse> {
     pub index: u64,
     pub term: u64,
     // pub conf_change: ConfChangeV2,
-    pub change_data: MembershipChangeData,
+    pub change_data: Option<MembershipChangeData>,
     pub ctx: Option<Vec<u8>>,
     pub conf_state: ConfState,
     pub tx: Option<oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>>,

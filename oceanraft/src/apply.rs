@@ -5,6 +5,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use prost::Message;
+use raft::prelude::ConfChangeTransition;
 use raft::prelude::ConfState;
 use raft::prelude::Entry;
 use raft_proto::ConfChangeI;
@@ -494,7 +495,11 @@ where
     async fn handle_conf_change(&mut self, group_id: u64, ent: Entry) -> Option<Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
+
+        // 当 ConfChangeV2 的转换类型为 Explicit/Auto 时，会发送一个空的 v2 变更来让联合共识离开
+        // 联合点, 所以需要处理这种情况.
         if ent.data.is_empty() && ent.entry_type() != EntryType::EntryConfChangeV2 {
+            // if ent.data.is_empty()  {
             return Some(Apply::NoOp(ApplyNoOp {
                 group_id,
                 index,
@@ -503,7 +508,7 @@ where
         }
 
         let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
-        let (conf_change, request_ctx) = match parse_conf_change(&ent) {
+        let (conf_change, mut request_ctx) = match parse_conf_change(&ent) {
             Err(err) => {
                 tx.map(|tx| {
                     if let Err(backed) = tx.send(Err(err)) {
@@ -519,6 +524,10 @@ where
             Ok(val) => val,
         };
 
+        let change_request = request_ctx
+            .as_ref()
+            .map_or(None, |request_ctx| Some(request_ctx.data.clone()));
+
         // apply the membership changes of apply to oceanraft and raft group first.
         // It doesn't matter if the user state machine then fails to apply,
         // because we set the applied index based on the index successfully
@@ -531,7 +540,7 @@ where
                 index,
                 term,
                 conf_change,
-                change_request: request_ctx.data.clone(),
+                change_request,
             })
             .await
         {
@@ -549,14 +558,18 @@ where
             Ok(conf_state) => conf_state,
         };
 
+        let change_request = request_ctx
+            .take()
+            .map_or(None, |request_ctx| Some(request_ctx.data));
+        let user_ctx = request_ctx.map_or(None, |ctx| ctx.user_ctx);
+
         Some(Apply::Membership(ApplyMembership {
             group_id,
             index,
             term,
-            // conf_change,
             conf_state,
-            change_data: request_ctx.data,
-            ctx: request_ctx.user_ctx,
+            change_data: change_request,
+            ctx: user_ctx,
             tx,
         }))
     }
@@ -699,7 +712,9 @@ where
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.
 /// Return Error if serialization error.
-fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipRequestContext), Error> {
+fn parse_conf_change(
+    ent: &Entry,
+) -> Result<(ConfChangeV2, Option<MembershipRequestContext>), Error> {
     match ent.entry_type() {
         EntryType::EntryNormal => unreachable!(),
         EntryType::EntryConfChange => {
@@ -713,13 +728,23 @@ fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, MembershipRequestCont
             Ok((conf_change.into_v2(), ctx))
         }
         EntryType::EntryConfChangeV2 => {
+            let ccv2 = ConfChangeV2::decode(ent.data.as_ref())
+                .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
+
+            tracing::info!("v2 is leaved {:?}", ccv2);
+            // 这种情况下, 如果 transition 是 auto leave 并且是一个空的变更, 说明正在进行 raft joint consensus
+            // 该 entry 是由 raft-rs 构造的, 当该 entry 提交到 raft-rs 之后，变更会 auto leave 联合共识，即整个
+            // 变更结束。
+            if ccv2.get_transition() == ConfChangeTransition::Auto && ccv2.changes.is_empty() {
+                return Ok((ccv2, None));
+            }
+
             Ok((
-                ConfChangeV2::decode(ent.data.as_ref())
-                    .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
+                ccv2,
                 // TODO: use flexbuffer
                 // MembershipChangeData::decode(ent.context.as_ref())
                 //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
-                flexbuffer_deserialize(&ent.context)?,
+                Some(flexbuffer_deserialize(&ent.context)?),
             ))
         }
     }

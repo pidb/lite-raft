@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use prost::Message;
+use raft::prelude::ConfChangeTransition;
 use raft::prelude::Entry;
 use raft::RawNode;
 use raft::ReadState;
@@ -78,6 +78,7 @@ where
     // track the nodes which members ofq the raft consensus group
     pub node_ids: Vec<u64>,
     pub proposals: ProposalQueue<RES>,
+
     pub leader: ReplicaDesc,
 
     /// the current latest commit index, which is different from the
@@ -108,6 +109,16 @@ where
     #[inline]
     pub(crate) fn is_leader(&self) -> bool {
         self.raft_group.raft.state == StateRole::Leader
+    }
+
+    #[inline]
+    pub(crate) fn is_candidate(&self) -> bool {
+        self.raft_group.raft.state == StateRole::Candidate
+    }
+
+    #[inline]
+    pub(crate) fn is_pre_candidate(&self) -> bool {
+        self.raft_group.raft.state == StateRole::PreCandidate
     }
 
     #[inline]
@@ -192,7 +203,7 @@ where
         }
 
         if let Some(ss) = rd.ss() {
-            self.handle_soft_state_change(node_id, ss, replica_cache, event_bcast)
+            self.handle_soft_state_change(node_id, storage, ss, replica_cache, event_bcast)
                 .await;
         }
 
@@ -335,13 +346,14 @@ where
     async fn handle_soft_state_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
+        storage: &MRS,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         event_bcast: &mut EventChannel,
     ) {
         if ss.leader_id != 0 && ss.leader_id != self.leader.replica_id {
             return self
-                .handle_leader_change(node_id, ss, replica_cache, event_bcast)
+                .handle_leader_change(node_id, storage, ss, replica_cache, event_bcast)
                 .await;
         }
     }
@@ -355,11 +367,14 @@ where
     async fn handle_leader_change<MRS: MultiRaftStorage<RS>>(
         &mut self,
         node_id: u64,
+        storage: &MRS,
         ss: &SoftState,
         replica_cache: &mut ReplicaCache<RS, MRS>,
         event_bcast: &mut EventChannel,
     ) {
         let group_id = self.group_id;
+
+        // cache leader replica desc
         let replica_desc = match replica_cache
             .replica_desc(self.group_id, ss.leader_id)
             .await
@@ -391,16 +406,26 @@ where
             },
         };
 
+        // update group storage metadata to save current leader id
+        let mut gs_meta = storage
+            .get_group_metadata(group_id, self.replica_id)
+            .await
+            .unwrap() // TODO: handle error
+            .expect("why missing group_storage metadata");
+        if gs_meta.leader_id != ss.leader_id {
+            gs_meta.leader_id = ss.leader_id;
+            storage.set_group_metadata(gs_meta).await.unwrap(); // TODO handle error
+        }
+
         // update shared states
         self.shared_state.set_leader_id(ss.leader_id);
         self.shared_state.set_role(&ss.raft_state);
-
+        let replica_id = replica_desc.replica_id;
+        self.leader = replica_desc; // always set because node_id maybe NO_NODE.
         info!(
             "node {}: group = {}, replica = {} became leader",
             node_id, self.group_id, ss.leader_id
         );
-        let replica_id = replica_desc.replica_id;
-        self.leader = replica_desc; // always set because node_id maybe NO_NODE.
 
         event_bcast.push(Event::LederElection(LeaderElectionEvent {
             group_id: self.group_id,
@@ -648,7 +673,6 @@ where
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
             let (ctx, cc) = to_ccv2(request.data, request.context);
-            assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         };
 
@@ -755,6 +779,12 @@ fn to_cc(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, Con
 }
 
 fn to_ccv2(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, ConfChangeV2) {
+    // Handle auto leave case
+    if data.transition() == ConfChangeTransition::Auto && data.changes.is_empty() {
+        let cc = ConfChangeV2::default();
+        return (vec![], cc);
+    }
+
     let mut cc = ConfChangeV2::default();
     cc.set_transition(data.transition());
     let mut sc = vec![];

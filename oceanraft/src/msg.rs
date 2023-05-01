@@ -152,7 +152,7 @@ pub struct CommitMembership {
     pub conf_change: ConfChangeV2,
 
     /// Specific change request data from the client.
-    pub change_request: MembershipChangeData,
+    pub change_request: Option<MembershipChangeData>,
 }
 
 #[derive(Debug)]
