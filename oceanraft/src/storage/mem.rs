@@ -15,6 +15,7 @@ use raft::Result as RaftResult;
 use raft::StorageError;
 use tokio::sync::RwLock as AsyncRwLock;
 
+use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfState;
 use crate::prelude::Entry;
 use crate::prelude::GroupMetadata;
@@ -615,6 +616,7 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
                         group_id,
                         replica_id,
                         node_id: self.node_id,
+                        leader_id: NO_LEADER,
                         create_timestamp: std::time::SystemTime::now()
                             .duration_since(std::time::UNIX_EPOCH)
                             .expect("Time went backwards")

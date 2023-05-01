@@ -140,8 +140,7 @@ where
         storage: T::MS,
         state_machine: T::M,
         ticker: Option<Box<dyn Ticker>>,
-    ) -> Result<Self, Error>
-    {
+    ) -> Result<Self, Error> {
         cfg.validate()?;
         let states = GroupStates::new();
         let event_bcast = EventChannel::new(cfg.event_capacity);

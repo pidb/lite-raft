@@ -277,7 +277,6 @@ where
             states,
         );
 
-        //        let stopper = task_group.stopper();
         tokio::spawn(async move {
             worker.restore().await;
             worker.main_loop(ticker, stopped).await;
@@ -377,6 +376,7 @@ where
 
     /// Restore the node from storage.
     async fn restore(&mut self) {
+        // TODO: load all replica desc to recreate node manager.
         // TODO: use group_iter
         let metadatas = self.storage.scan_group_metadata().await.unwrap();
         for metadata in metadatas.iter() {
@@ -385,15 +385,25 @@ where
                 continue;
             }
 
+            if metadata.node_id != self.node_id {
+                continue;
+            }
+
             // TODO: should modify group_storage impl, don't default create
-            let replica_descs = self
+            let replica_descs: Vec<ReplicaDesc> = self
                 .storage
                 .scan_replica_desc(metadata.group_id)
                 .await
                 .unwrap();
-            self.create_raft_group(metadata.group_id, metadata.replica_id, replica_descs, None)
-                .await
-                .unwrap();
+            self.create_raft_group(
+                metadata.group_id,
+                metadata.replica_id,
+                replica_descs,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
         }
     }
 
@@ -406,8 +416,8 @@ where
     async fn main_loop(mut self, ticker: Option<Box<dyn Ticker>>, stopped: Arc<AtomicBool>) {
         info!("node {}: start multiraft main_loop", self.node_id);
 
+        // create default ticker if ticker is None.
         let tick_interval = Duration::from_millis(self.cfg.tick_interval);
-
         let mut ticker = ticker.map_or(
             Box::new(tokio::time::interval_at(
                 tokio::time::Instant::now() + tick_interval,
@@ -422,6 +432,7 @@ where
                 self.do_stop();
                 break;
             }
+
             self.event_chan.flush();
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
@@ -484,13 +495,6 @@ where
                 continue;
             }
 
-            trace!(
-                "node {}: trigger heartbeta {} -> {} ",
-                self.node_id,
-                self.node_id,
-                *to_node
-            );
-
             // coalesced heartbeat to all nodes. the heartbeat message is node
             // level message so from and to set 0 when sending, and the specific
             // value is set by message receiver.
@@ -536,49 +540,47 @@ where
     )]
     async fn handle_raft_message(
         &mut self,
-        mut msg: MultiRaftMessage,
+         mut msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
-        let raft_msg = msg
+        if !self.groups.contains_key(&msg.group_id) {
+            let msg = msg.clone();
+            let raft_msg = msg.msg.as_ref().expect("why message missing raft msg");
+            // TODO: if group mark deleted, we need return error
+            let _ = self
+                .create_raft_group(
+                    msg.group_id,
+                    raft_msg.to,
+                    msg.replicas.clone(),
+                    None,
+                    Some(msg.clone()),
+                )
+                .await
+                .map_err(|err| {
+                    error!(
+                        "node {}: create group for replica {} error {}",
+                        self.node_id, raft_msg.to, err
+                    );
+                    err
+                })?;
+        }
+
+         let raft_msg = msg
             .msg
             .take()
             .expect("invalid message, raft Message should not be none.");
-        let group_id = msg.group_id;
 
+        let group_id = msg.group_id;
         let from_replica = ReplicaDesc {
             group_id,
             node_id: msg.from_node,
             replica_id: raft_msg.from,
         };
-
         let to_replica = ReplicaDesc {
             group_id,
             node_id: msg.to_node,
             replica_id: raft_msg.to,
         };
 
-        if !self.groups.contains_key(&group_id) {
-            // TODO: if group mark deleted, we need return error
-            // we can't create_raft_group on whether it is an initial message or not,
-            // just like following codes:
-            // ```
-            // let msg_type = msg.get_msg_type();
-            // msg_type == MessageType::MsgRequestVote
-            // || msg_type == MessageType::MsgRequestPreVote
-            // || (msg_type == MessageType::MsgHeartbeat && msg.commit == 0)
-            // ```
-            // because the heartbeats msg always hajacked and fanouted, so the msg.commit
-            // always meanless.
-            let _ = self
-                .create_raft_group(group_id, to_replica.replica_id, msg.replicas, None)
-                .await
-                .map_err(|err| {
-                    error!(
-                        "node {}: create group for replica {} error {}",
-                        self.node_id, to_replica.replica_id, err
-                    );
-                    err
-                })?;
-        }
 
         // processing messages between replicas from other nodes to self node.
         trace!(
@@ -651,8 +653,20 @@ where
                     continue;
                 }
 
-                if group.is_leader() {
-                    warn!("node {}: received a heartbeat from the leader node {}, but replica {} of group {} also leader and there may have been a network partition", self.node_id, from_node_id, *group_id, group.replica_id)
+                if group.is_candidate() || group.is_pre_candidate(){
+                    info!("node {}: replica({}) of group({}) became candidate, the heartbeat message is not received by the leader({}) from node({})", 
+                        self.node_id, 
+                        group.replica_id, 
+                        *group_id, 
+                        group.leader.replica_id,
+                        group.leader.node_id,
+                    );
+                    continue;
+                }
+
+                 if group.is_leader() {
+                    warn!("node {}: received a heartbeat from the leader node {}, but replica {} of group {} also leader and there may have been a network partition", self.node_id, from_node_id, *group_id, group.replica_id);
+                    continue;
                 }
 
                 // gets the replica stored in this node.
@@ -709,18 +723,18 @@ where
                 // maybe cannot satisty. such as in test code 1) submit some commands 2) and
                 // then wait apply and perform a heartbeat. but due to a heartbeat cannot set commit, so
                 // no propose lead to test failed.
-                step_msg.commit = group.raft_group.raft.raft_log.committed;
-                step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
+                // step_msg.commit = group.raft_group.raft.raft_log.committed;
+                // step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
-                trace!(
-                    "node {}: fanout heartbeat {}.{} -> {}.{}",
-                    self.node_id,
-                    from_node_id,
-                    step_msg.from,
-                    to_node_id,
-                    step_msg.to
-                );
+                // trace!(
+                //     "node {}: fanout heartbeat {}.{} -> {}.{}",
+                //     self.node_id,
+                //     from_node_id,
+                //     step_msg.from,
+                //     to_node_id,
+                //     step_msg.to
+                // );
                 if let Err(err) = group.raft_group.step(step_msg) {
                     warn!(
                         "node {}: step heatbeat message error: {}",
@@ -824,7 +838,7 @@ where
 
                 let mut msg = raft::prelude::Message::default();
                 msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
-                msg.term = group.term();
+                // msg.term = group.term();
                 msg.from = from_replica.replica_id;
                 msg.to = to_replica.replica_id;
                 if let Err(err) = group.raft_group.step(msg) {
@@ -958,6 +972,7 @@ where
                         request.replica_id,
                         request.replicas,
                         Some(request.applied_hint),
+                        None,
                     )
                     .await;
                 return Some(ResponseCallbackQueue::new_callback(tx, res));
@@ -995,6 +1010,7 @@ where
                                 replica_id,
                                 node_id: self.node_id,
                                 create_timestamp: 0,
+                                leader_id: group.leader.replica_id,
                                 deleted: true,
                             })
                             .await
@@ -1065,12 +1081,22 @@ where
     //     level = Level::TRACE,
     //     skip(self))
     // ]
+
+    /// # Parameters
+    /// - `msg`: If msg is Some, the raft group is initialized with a message
+    /// from the leader. If `msg` is the leader msg (such as MsgAppend etc.),
+    /// the internal state of the raft replica is initialized for `leader`,
+    /// `Node manager`, etc. which allows the replica to `fanout_heartbeat`
+    /// messages from the leader node.Without this initialization, the new
+    /// raft replica may fail to receive the leader's heartbeat and initiate
+    /// a new election distrubed.
     async fn create_raft_group(
         &mut self,
         group_id: u64,
         replica_id: u64,
         replicas_desc: Vec<ReplicaDesc>,
         applied_hint: Option<u64>,
+        init_msg: Option<MultiRaftMessage>,
     ) -> Result<(), Error> {
         if self.groups.contains_key(&group_id) {
             return Err(Error::RaftGroup(RaftGroupError::Exists(
@@ -1092,34 +1118,24 @@ where
         }
 
         let group_storage = self.storage.group_storage(group_id, replica_id).await?;
-        let rs = group_storage
+        let rs: raft::RaftState = group_storage
             .initial_state()
             .map_err(|err| Error::Raft(err))?;
 
+        // select a suitable applied index from both storage and initial provided.
         let applied = cmp::max(
             group_storage.get_applied().unwrap_or(0),
             applied_hint.unwrap_or(0),
         );
         let committed_index = rs.hard_state.commit;
         let persisted_index = group_storage.last_index().unwrap();
-
         if applied > cmp::min(committed_index, persisted_index) {
             panic!(
                 "provide hit applied is out of range [applied({}), min (committed({}), persisted({}))]",
                 applied, committed_index, persisted_index
             );
         }
-        // let (applied_index, applied_term) = group_storage.get_applied()?;
-        // if replicas_desc are not empty and are valid data,
-        // we know where all replicas of the raft group are located.
-        //
-        // but, voters of raft and replicas_desc are not one-to-one, because voters
-        // can be added in the subsequent way of membership change.
 
-        // If there is an initial state, there are two cases
-        // 1. create a new replica, started by configuration, applied should be 1
-        // 2. an already run replica is created again, may have experienced snapshot,
-        // applied is the committed log index that keeping the invariant applied <= committed.
         let raft_cfg = raft::Config {
             id: replica_id,
             applied, // TODO: support hint skip
@@ -1128,17 +1144,52 @@ where
             max_size_per_msg: self.cfg.max_size_per_msg,
             max_inflight_msgs: self.cfg.max_inflight_msgs,
             batch_append: self.cfg.batch_append,
+            pre_vote: true,
             ..Default::default()
         };
-
         let raft_store = group_storage.clone();
         let raft_group = raft::RawNode::with_default_logger(&raft_cfg, raft_store)
             .map_err(|err| Error::Raft(err))?;
 
         info!(
-            "node {}: raft group_id = {}, replica_id = {} created",
+            "node {}: replica({}) of raft group({}) is created",
             self.node_id, group_id, replica_id
         );
+
+        let mut leader: ReplicaDesc = ReplicaDesc::default();
+
+        if let Some(init_msg) = init_msg {
+            let mut gs_meta = self
+                .storage
+                .get_group_metadata(group_id, replica_id)
+                .await?
+                .expect("why missing group_storage metadata");
+
+            let raft_msg = init_msg.msg.as_ref().unwrap();
+            //  Persisted leader info of the current replica to prevent
+            //  rejecting the leader heartbeat if it does not have the
+            //  leader information after the replica restarts.
+            if gs_meta.leader_id != raft_msg.from {
+                gs_meta.leader_id = raft_msg.from;
+                self.storage.set_group_metadata(gs_meta.clone()).await?;
+                info!(
+                    "node {}: persisted leader_id({}) to storage for replica({}) of raft group({}) from init msg",
+                    self.node_id, raft_msg.from, replica_id, group_id
+                );
+            }
+
+            // Save the leader and from_node information so that the replica can receive
+            // the leader heartbeat after being created
+            leader.replica_id = raft_msg.from;
+            leader.node_id = init_msg.from_node;
+            leader.group_id = init_msg.group_id;
+            self.node_manager
+                .add_group(init_msg.from_node, init_msg.group_id);
+            info!(
+                "node {}: initial leader({:?}) for replica({}) of raft group({}) from init msg",
+                self.node_id, leader, replica_id, group_id
+            );
+        }
 
         //  initialize shared_state of group
         let shared_state = Arc::new(GroupState::from((
@@ -1155,7 +1206,7 @@ where
             raft_group,
             node_ids: Vec::new(),
             proposals: ProposalQueue::new(replica_id),
-            leader: ReplicaDesc::default(),
+            leader,
             status: Status::None,
             read_index_queue: ReadIndexQueue::new(),
             shared_state: shared_state.clone(),
@@ -1318,15 +1369,17 @@ where
 
     async fn commit_membership_change(
         &mut self,
-        view: CommitMembership,
+        mut view: CommitMembership,
     ) -> Result<ConfState, Error> {
-        assert_eq!(
-            view.change_request.changes.len(),
-            view.conf_change.changes.len()
-        );
+        if view.change_request.is_none() && view.conf_change.leave_joint() {
+            tracing::info!("now leave ccv2");
+            return self.apply_conf_change(view).await;
+        }
+
+        let changes = view.change_request.take().unwrap().changes;
+        assert_eq!(changes.len(), view.conf_change.changes.len());
 
         let group_id = view.group_id;
-
         let group = match self.groups.get_mut(&group_id) {
             Some(group) => group,
             None => {
@@ -1342,12 +1395,7 @@ where
         };
 
         // apply to inner state
-        for (conf_change, change_request) in view
-            .conf_change
-            .changes
-            .iter()
-            .zip(view.change_request.changes.iter())
-        {
+        for (conf_change, change_request) in view.conf_change.changes.iter().zip(changes.iter()) {
             match conf_change.change_type() {
                 ConfChangeType::AddNode => {
                     Self::add_replica(
@@ -1362,7 +1410,7 @@ where
                 }
 
                 ConfChangeType::RemoveNode => {
-                    Self::add_replica(
+                    Self::remove_replica(
                         self.node_id,
                         group,
                         &mut self.node_manager,
@@ -1394,7 +1442,51 @@ where
             }
         }
 
+        return self.apply_conf_change(view).await;
         // apply to raft
+        // let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
+        //     Err(err) => {
+        //         error!(
+        //             "node {}: commit membership change error: group = {}, err = {}",
+        //             self.node_id, group_id, err,
+        //         );
+        //         return Err(Error::Raft(err));
+        //     }
+        //     Ok(conf_state) => conf_state,
+        // };
+
+        // let gs = &self
+        //     .storage
+        //     .group_storage(group_id, group.replica_id)
+        //     .await?;
+        // gs.set_confstate(conf_state.clone())?;
+        // debug!(
+        //     "node {}: applied conf_state {:?} for group {} replica{}",
+        //     self.node_id, conf_state, group_id, group.replica_id
+        // );
+        // return Ok(conf_state);
+    }
+
+    async fn apply_conf_change(
+        &mut self,
+        // group_id: u64,
+        // group: &mut RaftGroup<RS, RES>,
+        view: CommitMembership,
+    ) -> Result<ConfState, Error> {
+        let group_id = view.group_id;
+        let group = match self.groups.get_mut(&group_id) {
+            Some(group) => group,
+            None => {
+                error!(
+                    "node {}: commit membership change failed: group {} deleted",
+                    self.node_id, group_id,
+                );
+                return Err(Error::RaftGroup(RaftGroupError::Deleted(
+                    self.node_id,
+                    group_id,
+                )));
+            }
+        };
         let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
             Err(err) => {
                 error!(
