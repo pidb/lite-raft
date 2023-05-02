@@ -40,6 +40,7 @@ opentelemetry-jaeger = "0.17"
 lazy_static = { version = "1" }
 async-entry = { version = "0.3" }
 rand = { version = "0.8.4" }
+tempdir = { version = "0.3" }
 
 [build-dependencies]
 prost-build = { version = "0.11" }

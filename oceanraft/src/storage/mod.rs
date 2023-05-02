@@ -276,14 +276,14 @@ pub trait MultiRaftStorage<S: RaftStorage>: Clone + Send + Sync + 'static {
     ) -> Self::RemoveReplicaDescFuture<'_>;
 
     /// GAT trait for `set_replica_desc`.
-    type ScanReplicaDescFuture<'life0>: Send
+    type ScanGroupReplicaDescFuture<'life0>: Send
         + Future<Output = Result<Vec<ReplicaDesc>>>
         + Send
         + 'life0
     where
         Self: 'life0;
-    /// Scan the `ReplicaDesc` with prefix.
-    fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_>;
+    /// Scan the `ReplicaDesc` of specify group with prefix.
+    fn scan_group_replica_desc(&self, group_id: u64) -> Self::ScanGroupReplicaDescFuture<'_>;
 
     /// GAT trait for `replica_for_node`.
     type ReplicaForNodeFuture<'life0>: Send + Future<Output = Result<Option<ReplicaDesc>>>

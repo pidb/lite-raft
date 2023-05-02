@@ -375,35 +375,52 @@ where
     }
 
     /// Restore the node from storage.
+    /// TODO: add unit test
     async fn restore(&mut self) {
+
         // TODO: load all replica desc to recreate node manager.
         // TODO: use group_iter
-        let metadatas = self.storage.scan_group_metadata().await.unwrap();
-        for metadata in metadatas.iter() {
+        let gs_metas = self.storage.scan_group_metadata().await.unwrap();
+
+   
+        for gs_meta in gs_metas.iter() {
             // TODO: check group metadta status to detect whether deleted.
-            if metadata.deleted {
+            if gs_meta.deleted  || gs_meta.node_id != self.node_id{
                 continue;
             }
 
-            if metadata.node_id != self.node_id {
+            // TODO: cache optimize
+            let gs = self.storage.group_storage(gs_meta.group_id, gs_meta.replica_id).await.unwrap();
+            let rs = gs.initial_state().unwrap();
+            if !rs.initialized() {
                 continue;
             }
 
-            // TODO: should modify group_storage impl, don't default create
+            self.node_manager.add_group(gs_meta.node_id, gs_meta.group_id);
+
             let replica_descs: Vec<ReplicaDesc> = self
                 .storage
-                .scan_replica_desc(metadata.group_id)
+                .scan_group_replica_desc(gs_meta.group_id)
                 .await
                 .unwrap();
+
+            for replica_desc in replica_descs.iter() {
+                if replica_desc.node_id != gs_meta.node_id && replica_desc.group_id == gs_meta.group_id {
+                    self.node_manager.add_group(replica_desc.node_id, replica_desc.group_id);
+                }
+            }
+
+            // TODO: create_raft_group should return RaftGroup instance.
             self.create_raft_group(
-                metadata.group_id,
-                metadata.replica_id,
+                gs_meta.group_id,
+                gs_meta.replica_id,
                 replica_descs,
                 None,
                 None,
             )
             .await
             .unwrap();
+            // TODO: move track group node here.
         }
     }
 
