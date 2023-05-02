@@ -754,10 +754,10 @@ impl MultiRaftStorage<MemStorage> for MultiRaftMemoryStorage {
         }
     }
 
-    type ScanReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
+    type ScanGroupReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
         where
             Self: 'life0;
-    fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_> {
+    fn scan_group_replica_desc(&self, group_id: u64) -> Self::ScanGroupReplicaDescFuture<'_> {
         async move {
             let trigger_storage_temp_unavailable =
                 self.trigger_storage_temp_unavailable.read().await;

@@ -339,13 +339,21 @@ mod storage {
         /// stored in metadata cf.
         #[inline]
         fn format_replica_desc_key(group_id: u64, replica_id: u64) -> String {
-            format!("{}_{}_{}", REPLICA_DESC_PREFIX, group_id, replica_id)
+            format!(
+                "{}_{:0>20}_{:0>20}",
+                REPLICA_DESC_PREFIX, group_id, replica_id
+            )
+        }
+
+        #[inline]
+        fn format_replica_desc_seek_key() -> String {
+            format!("{}_", REPLICA_DESC_PREFIX)
         }
 
         /// Format replica description seek specific group by key with mode `rd_{group_id}_` and
         /// stored in metadata cf.
         #[inline]
-        fn format_replica_desc_seek_key(group_id: u64) -> String {
+        fn format_group_replica_desc_seek_key(group_id: u64) -> String {
             format!("{}_{}_", REPLICA_DESC_PREFIX, group_id)
         }
     }
@@ -1374,7 +1382,36 @@ mod storage {
             self.db.delete_cf_opt(&metacf, &key, &writeopts)
         }
 
-        fn scan_replica_desc(
+        // scan saved all replica descs from storage.
+        fn scan_replica_desc(&self) -> std::result::Result<Vec<ReplicaDesc>, RocksdbError> {
+            let metacf = DBEnv::get_metadata_cf(&self.db);
+            let prefix = DBEnv::format_replica_desc_seek_key();
+            let iter_mode = IteratorMode::From(prefix.as_bytes(), rocksdb::Direction::Forward);
+            let readopts = ReadOptions::default();
+            let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
+
+            let mut replicas = vec![];
+            for item in iter {
+                let (key, value) = item?;
+
+                let key = match std::str::from_utf8(&key) {
+                    Ok(key) => key,
+                    Err(_) => break, /* cross the boundary of the seek prefix */
+                };
+
+                match key.starts_with(&prefix) {
+                    true => {
+                        let replica_desc = ReplicaDesc::decode(value.as_ref()).unwrap();
+                        replicas.push(replica_desc);
+                    }
+                    false => break, /* prefix is no longer matched */
+                }
+            }
+
+            Ok(replicas)
+        }
+
+        fn scan_group_replica_desc(
             &self,
             group_id: u64,
         ) -> std::result::Result<Vec<ReplicaDesc>, RocksdbError> {
@@ -1411,7 +1448,7 @@ mod storage {
             target_node_id: u64,
         ) -> std::result::Result<Option<ReplicaDesc>, RocksdbError> {
             let metacf = DBEnv::get_metadata_cf(&self.db);
-            let seek = DBEnv::format_replica_desc_seek_key(group_id);
+            let seek = DBEnv::format_group_replica_desc_seek_key(group_id);
             let iter_mode = IteratorMode::From(seek.as_bytes(), rocksdb::Direction::Forward);
             let readopts = ReadOptions::default();
             let iter = self.db.iterator_cf_opt(&metacf, readopts, iter_mode);
@@ -1435,6 +1472,75 @@ mod storage {
             }
 
             return Ok(None);
+        }
+    }
+
+    mod rock_store_test {
+        use crate::prelude::*;
+        use crate::storage::RaftSnapshotReader;
+        use crate::storage::RaftSnapshotWriter;
+        use crate::storage::RockStore;
+
+        #[derive(Clone, Default)]
+        struct NoopSnap;
+        impl RaftSnapshotReader for NoopSnap {
+            fn load_snapshot(
+                &self,
+                _group_id: u64,
+                _replica_id: u64,
+            ) -> crate::storage::Result<Vec<u8>> {
+                unimplemented!()
+            }
+        }
+
+        impl RaftSnapshotWriter for NoopSnap {
+            fn build_snapshot(
+                &self,
+                _group_id: u64,
+                _replica_id: u64,
+                _applied_index: u64,
+                _applied_term: u64,
+                _last_conf_state: ConfState,
+            ) -> crate::storage::Result<()> {
+                unimplemented!()
+            }
+
+            fn install_snapshot(
+                &self,
+                _group_id: u64,
+                _replica_id: u64,
+                _data: Vec<u8>,
+            ) -> crate::storage::Result<()> {
+                unimplemented!()
+            }
+        }
+
+        #[test]
+        fn test_scan_replica_desc() {
+            use tempdir;
+            let tmp_dir = tempdir::TempDir::new("oceanraft").unwrap();
+
+            let node_id = 1;
+            let snap = NoopSnap::default();
+            let rock_store = RockStore::new(node_id, tmp_dir.path(), snap.clone(), snap.clone());
+
+            let replica_descs = (1..=10000)
+                .map(|i| ReplicaDesc {
+                    node_id,
+                    group_id: i,
+                    replica_id: i,
+                })
+                .collect::<Vec<_>>();
+
+            for replica_desc in replica_descs.iter() {
+                rock_store
+                    .set_replica_desc(replica_desc.group_id, replica_desc)
+                    .unwrap();
+            }
+
+            let scan_replica_descs = rock_store.scan_replica_desc().unwrap();
+            assert_eq!(scan_replica_descs, replica_descs);
+            tmp_dir.close().unwrap();
         }
     }
 
@@ -1543,12 +1649,12 @@ mod storage {
             }
         }
 
-        type ScanReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
+        type ScanGroupReplicaDescFuture<'life0> = impl Future<Output = Result<Vec<ReplicaDesc>>> + 'life0
         where
             Self: 'life0;
-        fn scan_replica_desc(&self, group_id: u64) -> Self::ScanReplicaDescFuture<'_> {
+        fn scan_group_replica_desc(&self, group_id: u64) -> Self::ScanGroupReplicaDescFuture<'_> {
             async move {
-                self.scan_replica_desc(group_id).map_err(|err| {
+                self.scan_group_replica_desc(group_id).map_err(|err| {
                     self.to_storage_err(group_id, 0, err, "scan_replica_desc".into())
                 })
             }
