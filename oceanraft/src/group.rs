@@ -98,9 +98,6 @@ where
     pub shared_state: Arc<GroupState>,
 }
 
-//===----------------------------------------------------------------------===//
-// The raft group internal state
-//===----------------------------------------------------------------------===//
 impl<RS, RES> RaftGroup<RS, RES>
 where
     RS: RaftStorage,
@@ -130,16 +127,7 @@ where
     pub(crate) fn last_index(&self) -> u64 {
         self.raft_group.raft.raft_log.last_index()
     }
-}
 
-//===----------------------------------------------------------------------===//
-// Handle raft group ready
-//===----------------------------------------------------------------------===//
-impl<RS, RES> RaftGroup<RS, RES>
-where
-    RS: RaftStorage,
-    RES: ProposeResponse,
-{
     #[tracing::instrument(
         level = Level::TRACE,
         name = "RaftGroup::handle_ready",
