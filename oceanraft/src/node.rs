@@ -377,40 +377,36 @@ where
     /// Restore the node from storage.
     /// TODO: add unit test
     async fn restore(&mut self) {
-
         // TODO: load all replica desc to recreate node manager.
         // TODO: use group_iter
         let gs_metas = self.storage.scan_group_metadata().await.unwrap();
 
-   
         for gs_meta in gs_metas.iter() {
             // TODO: check group metadta status to detect whether deleted.
-            if gs_meta.deleted  || gs_meta.node_id != self.node_id{
+            if gs_meta.deleted || gs_meta.node_id != self.node_id {
                 continue;
             }
 
             // TODO: cache optimize
-            let gs = self.storage.group_storage(gs_meta.group_id, gs_meta.replica_id).await.unwrap();
+            let gs = self
+                .storage
+                .group_storage(gs_meta.group_id, gs_meta.replica_id)
+                .await
+                .unwrap();
             let rs = gs.initial_state().unwrap();
             if !rs.initialized() {
                 continue;
             }
 
-            self.node_manager.add_group(gs_meta.node_id, gs_meta.group_id);
+            self.node_manager
+                .add_group(gs_meta.node_id, gs_meta.group_id);
 
             let replica_descs: Vec<ReplicaDesc> = self
                 .storage
                 .scan_group_replica_desc(gs_meta.group_id)
                 .await
                 .unwrap();
-
-            for replica_desc in replica_descs.iter() {
-                if replica_desc.node_id != gs_meta.node_id && replica_desc.group_id == gs_meta.group_id {
-                    self.node_manager.add_group(replica_desc.node_id, replica_desc.group_id);
-                }
-            }
-
-            // TODO: create_raft_group should return RaftGroup instance.
+            // if empty voters and conf state uninitialized, don't restore
             self.create_raft_group(
                 gs_meta.group_id,
                 gs_meta.replica_id,
@@ -557,7 +553,7 @@ where
     )]
     async fn handle_raft_message(
         &mut self,
-         mut msg: MultiRaftMessage,
+        mut msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
         if !self.groups.contains_key(&msg.group_id) {
             let msg = msg.clone();
@@ -581,7 +577,7 @@ where
                 })?;
         }
 
-         let raft_msg = msg
+        let raft_msg = msg
             .msg
             .take()
             .expect("invalid message, raft Message should not be none.");
@@ -597,7 +593,6 @@ where
             node_id: msg.to_node,
             replica_id: raft_msg.to,
         };
-
 
         // processing messages between replicas from other nodes to self node.
         trace!(
@@ -666,22 +661,10 @@ where
                 self.active_groups.insert(*group_id);
 
                 if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
-                    trace!("node {}: not fanning out heartbeat to {}, msg is from {} and leader is {:?}", self.node_id, group_id, from_node_id, group.leader);
                     continue;
                 }
 
-                if group.is_candidate() || group.is_pre_candidate(){
-                    info!("node {}: replica({}) of group({}) became candidate, the heartbeat message is not received by the leader({}) from node({})", 
-                        self.node_id, 
-                        group.replica_id, 
-                        *group_id, 
-                        group.leader.replica_id,
-                        group.leader.node_id,
-                    );
-                    continue;
-                }
-
-                 if group.is_leader() {
+                if group.is_leader() {
                     warn!("node {}: received a heartbeat from the leader node {}, but replica {} of group {} also leader and there may have been a network partition", self.node_id, from_node_id, *group_id, group.replica_id);
                     continue;
                 }
@@ -744,14 +727,17 @@ where
                 // step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
                 step_msg.from = from_replica.replica_id;
                 step_msg.to = to_replica.replica_id;
-                // trace!(
-                //     "node {}: fanout heartbeat {}.{} -> {}.{}",
-                //     self.node_id,
-                //     from_node_id,
-                //     step_msg.from,
-                //     to_node_id,
-                //     step_msg.to
-                // );
+                if group.is_candidate() || group.is_pre_candidate() {
+                    info!("node {}: replica({}) of group({}) became candidate, the heartbeat message is not received by the leader({}) from node({})",
+                         self.node_id,
+                         group.replica_id,
+                         *group_id,
+                         group.leader.replica_id,
+                         group.leader.node_id,
+                     );
+                    step_msg.term = group.raft_group.raft.term;
+                }
+
                 if let Err(err) = group.raft_group.step(step_msg) {
                     warn!(
                         "node {}: step heatbeat message error: {}",
