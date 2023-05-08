@@ -1,4 +1,7 @@
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::RwLock;
 
 use oceanraft::prelude::ConfState;
 use oceanraft::storage::RaftSnapshotReader;
@@ -6,12 +9,28 @@ use oceanraft::storage::RaftSnapshotWriter;
 use oceanraft::storage::Result;
 use oceanraft::storage::RockStoreCore;
 
+type MemStorage = Arc<RwLock<HashMap<String, Vec<u8>>>>;
+
 #[derive(Clone)]
-pub struct SledStorage {}
+pub struct SledStorage {
+    mem_map: MemStorage,
+}
 
 impl SledStorage {
     pub fn new<P: AsRef<Path>>(path: P) -> Self {
-        Self {}
+        Self {
+            mem_map: MemStorage::default(),
+        }
+    }
+
+    pub fn put(&self, key: String, value: Vec<u8>) {
+        let mut wl = self.mem_map.write().unwrap();
+        let _ = wl.entry(key).or_insert(value);
+    }
+
+    pub fn get(&self, key: &str) -> Option<Vec<u8>>{
+        let rl = self.mem_map.read().unwrap();
+        rl.get(key).map(|v| v.clone())
     }
 }
 

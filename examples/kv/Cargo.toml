@@ -25,3 +25,7 @@ tonic-build = { version = "0.9.1",features = ["prost"] }
 [[bin]]
 name = "cli"
 path = "src/cli.rs"
+
+[[bin]]
+name = "client"
+path = "src/client.rs"

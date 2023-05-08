@@ -32,9 +32,29 @@ impl StateMachine<KVData, KVResponse> for KVStateMachine {
     ) -> Self::ApplyFuture<'life0> {
         async move {
             for apply in applys {
-                println!("apply index = {}", apply.get_index());
-                let gs = self.storage.group_storage(group_id, replica_id).await.unwrap();
-                gs.set_applied(apply.get_index()).unwrap();
+                let apply_index = apply.get_index();
+                println!("group({}), replica({}) apply index = {}", group_id, replica_id, apply_index);
+                match apply {
+                    Apply::NoOp(apply) => {}
+                    Apply::Normal(apply) => {}
+                    Apply::Membership(apply) => {
+                        apply.tx.map(|tx| {
+                            tx.send(Ok((
+                                KVResponse {
+                                    index: apply.index,
+                                    term: apply.term,
+                                },
+                                apply.ctx,
+                            )))
+                        });
+                    }
+                }
+                let gs = self
+                    .storage
+                    .group_storage(group_id, replica_id)
+                    .await
+                    .unwrap();
+                gs.set_applied(apply_index).unwrap();
             }
         }
     }

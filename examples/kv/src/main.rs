@@ -10,6 +10,8 @@ pub mod grpc {
     tonic::include_proto!("kv");
 }
 
+use std::time::Duration;
+
 use args::ServerArgs;
 use clap::Parser;
 
@@ -21,6 +23,23 @@ async fn main() {
     }
 
     let mut server = server::KVServer::new(arg).await;
+    server.event_consumer();
     server.start();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    if server.node_id == 1 {
+        let mut members = vec![];
+        for (peer_id, _) in server.peers.iter() {
+            if *peer_id == server.node_id {
+                continue;
+            }
+
+            members.push((*peer_id, *peer_id));
+        }
+
+        // for (peer_id, _) in server.peers.iter() {
+        //     println!("group({}) add members({:?})", *peer_id, members);
+        //     server.add_members(*peer_id, members.clone()).await;
+        // }
+    }
     server.join().await;
 }
