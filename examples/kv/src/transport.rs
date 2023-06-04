@@ -10,10 +10,8 @@ pub struct GRPCTransport {
 }
 
 impl GRPCTransport {
-    pub fn new (peers: Arc<HashMap<u64, String>>) -> Self {
-        Self {
-            peers
-        }
+    pub fn new(peers: Arc<HashMap<u64, String>>) -> Self {
+        Self { peers }
     }
 }
 
@@ -23,10 +21,17 @@ impl Transport for GRPCTransport {
         let addr = self.peers.get(&to).unwrap().to_string();
 
         tokio::spawn(async move {
-            let mut client = MultiRaftServiceClient::connect(addr.to_string())
-                .await
-                .unwrap();
-            client.send(msg).await.unwrap();
+            let client = MultiRaftServiceClient::connect(addr.to_string()).await;
+            match client {
+                Err(err) => {
+                    // println!("connect({}) got err({:?})",addr.to_string(), err);
+                }
+                Ok(mut client) => {
+                    if let Err(err) = client.send(msg).await {
+                        println!("err({:?})", err);
+                    }
+                }
+            }
         });
 
         Ok(())

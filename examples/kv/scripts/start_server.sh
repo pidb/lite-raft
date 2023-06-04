@@ -17,7 +17,7 @@ eval set -- "${FLAGS_ARGV}"
 
 nodes=""
 for ((i=0; i<$FLAGS_server_num; ++i)); do
-    nodes="${nodes}$((i+1))=${FLAGS_host}:$((${FLAGS_port}+i)),"
+    nodes="${nodes}$((i+1))=http://${FLAGS_host}:$((${FLAGS_port}+i)),"
 done
 
 for ((i=0; i<$FLAGS_server_num; ++i)); do
@@ -29,6 +29,7 @@ for ((i=0; i<$FLAGS_server_num; ++i)); do
         --nodes=${nodes} \
         --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
         --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1))
+    
     $mydir/../../../target/debug/oceanraft-kv-example \
         --node-id=$((i+1)) \
         --addr=${FLAGS_host}:$((${FLAGS_port}+i)) \
