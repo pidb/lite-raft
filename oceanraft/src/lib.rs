@@ -713,8 +713,8 @@ mod replica_cache;
 mod rsm;
 mod state;
 
+pub mod log;
 pub mod storage;
-// pub mod task_group;
 pub mod tick;
 pub mod transport;
 pub mod utils;

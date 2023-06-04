@@ -684,7 +684,7 @@ where
                     }
                     Ok(val) => match val {
                         None => {
-                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            // warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
                             continue;
                         }
                         Some(val) => val,
@@ -706,7 +706,7 @@ where
                     }
                     Ok(val) => match val {
                         None => {
-                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            // warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
                             continue;
                         }
                         Some(val) => val,
@@ -815,7 +815,7 @@ where
                     }
                     Ok(val) => match val {
                         None => {
-                            warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
+                            // warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
                             continue;
                         }
                         Some(val) => val,
@@ -832,7 +832,7 @@ where
                     }
                     Ok(val) => match val {
                         None => {
-                            warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
+                            // warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
                             continue;
                         }
                         Some(val) => val,
