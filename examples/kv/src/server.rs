@@ -3,14 +3,9 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
-use std::sync::Weak;
-use std::time::Duration;
 
-use oceanraft::prelude::ConfChangeType;
 use oceanraft::prelude::CreateGroupRequest;
-use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::ReplicaDesc;
-use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::RockStore;
@@ -23,7 +18,6 @@ use oceanraft::Config;
 use oceanraft::MultiRaft;
 
 use tokio::task::JoinHandle;
-use tokio::time::sleep;
 use tonic::transport::Server;
 use tonic::Request;
 use tonic::Response;
@@ -36,7 +30,7 @@ use crate::grpc::kv_service_server::KvServiceServer;
 use crate::grpc::PutRequest;
 use crate::grpc::PutResponse;
 use crate::state_machine::KVStateMachine;
-use crate::storage::SledStorage;
+use crate::storage::MemKvStorage;
 use crate::transport::GRPCTransport;
 
 use oceanraft::define_multiraft;
@@ -46,15 +40,15 @@ define_multiraft! {
         D =  KVData,
         R = KVResponse,
         M = KVStateMachine,
-        S = RockStoreCore<SledStorage, SledStorage>,
-        MS = RockStore<SledStorage, SledStorage>
+        S = RockStoreCore<MemKvStorage, MemKvStorage>,
+        MS = RockStore<MemKvStorage, MemKvStorage>
 }
 
 /// Define propose data to oceanraft.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct KVData {
-    key: String,
-    value: Vec<u8>,
+    pub key: String,
+    pub value: Vec<u8>,
 }
 
 /// Define propose response to oceanraft.
@@ -107,7 +101,7 @@ pub struct KVServer {
     // Mapping nodes to network addr.
     pub peers: Arc<HashMap<u64, String>>,
 
-    kv_storage: SledStorage,
+    kv_storage: MemKvStorage,
 
     multiraft: Arc<MultiRaft<KVAppType, GRPCTransport>>,
 
@@ -121,14 +115,14 @@ impl KVServer {
         cfg.node_id = arg.node_id;
         cfg.tick_interval = 100;
 
-        let kv_storage = SledStorage::new(&arg.kv_storage_path);
+        let kv_storage = MemKvStorage::new();
         let rock_storage = RockStore::new(
             arg.node_id,
             &arg.log_storage_path,
             kv_storage.clone(),
             kv_storage.clone(),
         );
-        let kv_state_machine = KVStateMachine::new(rock_storage.clone());
+        let kv_state_machine = KVStateMachine::new(rock_storage.clone(), kv_storage.clone());
 
         let grpc_transport = GRPCTransport::new(peers.clone());
         let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new(

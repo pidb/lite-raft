@@ -4,10 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# raft-proto = { version = "0.7.0", default-features = false, features = ["prost-codec"] }
-#raft = { version = "0.7.0", default-features = false, features=["default-logger", "prost-codec"]}
-raft-proto = { path = "../../raft-rs/proto", version = "0.7.0", default-features = false, features = ["prost-codec"] }
-raft = { path = "../../raft-rs", version = "0.7.0", default-features = false, features=["default-logger", "prost-codec"]}
+raft-proto = { version = "0.7.0", default-features = false, features = ["prost-codec"] }
+raft = { version = "0.7.0", default-features = false, features=["default-logger", "prost-codec"]}
+# raft-proto = { path = "../../raft-rs/proto", version = "0.7.0", default-features = false, features = ["prost-codec"] }
+# raft = { path = "../../raft-rs", version = "0.7.0", default-features = false, features=["default-logger", "prost-codec"]}
 serde = { version = "1.0", features = ["derive"] }
 tokio = { version = "1", features = ["full"] }
 slog = { version = "2.2", features = ["max_level_debug"] }

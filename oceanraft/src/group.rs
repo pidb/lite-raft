@@ -520,6 +520,7 @@ where
         //     ));
         // }
 
+        // TODO: let forward_to_leader as configurable
         if !self.is_leader() {
             return Err(Error::Propose(ProposeError::NotLeader {
                 node_id: self.node_id,
