@@ -14,9 +14,11 @@ use std::time::Duration;
 
 use args::ServerArgs;
 use clap::Parser;
+use oceanraft::log;
 
 #[tokio::main]
 async fn main() {
+    log::init_global_console_tracing("info");
     let arg = ServerArgs::parse();
     if let Err(reason) = arg.validate() {
         panic!("{}", reason)
