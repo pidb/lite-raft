@@ -301,28 +301,28 @@ where
     W: ProposeData,
     R: ProposeResponse,
 {
-    cfg: Config,
-    node_id: u64,
-    storage: MRS,
-    transport: TR,
-    node_manager: NodeManager,
-    replica_cache: ReplicaCache<RS, MRS>,
-    groups: HashMap<u64, RaftGroup<RS, R>>,
-    active_groups: HashSet<u64>,
-    pending_responses: ResponseCallbackQueue,
-    event_chan: EventChannel,
-    multiraft_message_rx: Receiver<(
+    pub(crate) cfg: Config,
+    pub(crate) node_id: u64,
+    pub(crate) storage: MRS,
+    pub(crate) transport: TR,
+    pub(crate) node_manager: NodeManager,
+    pub(crate) replica_cache: ReplicaCache<RS, MRS>,
+    pub(crate) groups: HashMap<u64, RaftGroup<RS, R>>,
+    pub(crate) active_groups: HashSet<u64>,
+    pub(crate) pending_responses: ResponseCallbackQueue,
+    pub(crate) event_chan: EventChannel,
+    pub(crate) multiraft_message_rx: Receiver<(
         MultiRaftMessage,
         oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
     )>,
-    propose_rx: Receiver<ProposeMessage<W, R>>,
-    manage_rx: Receiver<ManageMessage>,
-    campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
-    commit_rx: UnboundedReceiver<ApplyCommitMessage>,
-    apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
-    apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
-    query_group_rx: UnboundedReceiver<QueryGroup>,
-    shared_states: GroupStates,
+    pub(crate) propose_rx: Receiver<ProposeMessage<W, R>>,
+    pub(crate) manage_rx: Receiver<ManageMessage>,
+    pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
+    pub(crate) commit_rx: UnboundedReceiver<ApplyCommitMessage>,
+    pub(crate) apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
+    pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
+    pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
+    pub(crate) shared_states: GroupStates,
 }
 
 impl<TR, RS, MRS, WD, RES> NodeWorker<TR, RS, MRS, WD, RES>
@@ -500,34 +500,6 @@ where
         }
     }
 
-    /// The node sends heartbeats to other nodes instead
-    /// of all raft groups on that node.
-    fn merge_heartbeats(&self) {
-        for (to_node, _) in self.node_manager.iter() {
-            if *to_node == self.node_id {
-                continue;
-            }
-
-            // coalesced heartbeat to all nodes. the heartbeat message is node
-            // level message so from and to set 0 when sending, and the specific
-            // value is set by message receiver.
-            let mut raft_msg = Message::default();
-            raft_msg.set_msg_type(MessageType::MsgHeartbeat);
-            if let Err(err) = self.transport.send(MultiRaftMessage {
-                group_id: NO_GORUP,
-                from_node: self.node_id,
-                to_node: *to_node,
-                replicas: vec![],
-                msg: Some(raft_msg),
-            }) {
-                error!(
-                    "node {}: send heartbeat to {} error: {}",
-                    self.node_id, *to_node, err
-                )
-            }
-        }
-    }
-
     async fn handle_multiraft_message(
         &mut self,
         msg: MultiRaftMessage,
@@ -635,229 +607,6 @@ where
             warn!("node {}: step raf message error: {}", self.node_id, err);
         }
         self.active_groups.insert(group_id);
-        Ok(MultiRaftMessageResponse {})
-    }
-
-    /// Fanout heartbeats from other nodes to all raft groups on this node.
-    async fn fanout_heartbeat(
-        &mut self,
-        msg: MultiRaftMessage,
-    ) -> Result<MultiRaftMessageResponse, Error> {
-        let from_node_id = msg.from_node;
-        let to_node_id = msg.to_node;
-        let mut fanouted_groups = 0;
-        let mut fanouted_followers = 0;
-        if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
-            for (group_id, _) in from_node.group_map.iter() {
-                let group = match self.groups.get_mut(group_id) {
-                    None => {
-                        warn!("node {}: from node {} failed to fanout to group {} because does not exists", self.node_id, from_node_id, *group_id);
-                        continue;
-                    }
-                    Some(group) => group,
-                };
-
-                fanouted_groups += 1;
-                self.active_groups.insert(*group_id);
-
-                if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
-                    continue;
-                }
-
-                if group.is_leader() {
-                    warn!("node {}: received a heartbeat from the leader node {}, but replica {} of group {} also leader and there may have been a network partition", self.node_id, from_node_id, *group_id, group.replica_id);
-                    continue;
-                }
-
-                // gets the replica stored in this node.
-                let from_replica = match self
-                    .replica_cache
-                    .replica_for_node(*group_id, from_node_id)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on from_node {} in current node {} error: {}",
-                            group_id, msg.from_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            // warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                // FIXME: t30_membership single_step
-                let to_replica = match self
-                    .replica_cache
-                    .replica_for_node(*group_id, to_node_id)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on to_node {} in current node {} error: {}",
-                            group_id, msg.to_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            // warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                fanouted_followers += 1;
-
-                let mut step_msg = raft::prelude::Message::default();
-                step_msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeat);
-                // FIX(test command)
-                //
-                // Although the heatbeat is not set without affecting correctness, but liveness
-                // maybe cannot satisty. such as in test code 1) submit some commands 2) and
-                // then wait apply and perform a heartbeat. but due to a heartbeat cannot set commit, so
-                // no propose lead to test failed.
-                // step_msg.commit = group.raft_group.raft.raft_log.committed;
-                // step_msg.term = group.raft_group.raft.term; // FIX(t30_membership::test_remove)
-                step_msg.from = from_replica.replica_id;
-                step_msg.to = to_replica.replica_id;
-                if group.is_candidate() || group.is_pre_candidate() {
-                    info!("node {}: replica({}) of group({}) became candidate, the heartbeat message is not received by the leader({}) from node({})",
-                         self.node_id,
-                         group.replica_id,
-                         *group_id,
-                         group.leader.replica_id,
-                         group.leader.node_id,
-                     );
-                    step_msg.term = group.raft_group.raft.term;
-                }
-
-                if let Err(err) = group.raft_group.step(step_msg) {
-                    warn!(
-                        "node {}: step heatbeat message error: {}",
-                        self.node_id, err
-                    );
-                }
-            }
-        } else {
-            // In this point, we receive heartbeat message from other nodes,
-            // but we don't have the from_node raft group information, so we
-            // don't know which raft group's replica we should fanout to.
-            warn!(
-                "missing raft groups at from_node {} fanout heartbeat",
-                msg.from_node
-            );
-            self.node_manager.add_node(msg.from_node);
-        }
-
-        trace!(
-            "node {}: fanouted {} groups and followers {}",
-            self.node_id,
-            fanouted_groups,
-            fanouted_followers
-        );
-
-        let response_msg = {
-            let mut raft_msg = Message::default();
-            raft_msg.set_msg_type(MessageType::MsgHeartbeatResponse);
-            MultiRaftMessage {
-                group_id: NO_GORUP,
-                from_node: self.node_id,
-                to_node: from_node_id,
-                replicas: vec![],
-                msg: Some(raft_msg),
-            }
-        };
-
-        let _ = self.transport.send(response_msg)?;
-        Ok(MultiRaftMessageResponse {})
-    }
-
-    /// Fanout heartbeats response from other nodes to all raft groups on this node.
-    async fn fanout_heartbeat_response(
-        &mut self,
-        msg: MultiRaftMessage,
-    ) -> Result<MultiRaftMessageResponse, Error> {
-        if let Some(node) = self.node_manager.get_node(&msg.from_node) {
-            for (group_id, _) in node.group_map.iter() {
-                let group = match self.groups.get_mut(group_id) {
-                    None => {
-                        warn!("node {}: from node {} failed to fanout response to group {} because does not exists", self.node_id, msg.from_node, *group_id);
-                        continue;
-                    }
-                    Some(group) => group,
-                };
-
-                self.active_groups.insert(*group_id);
-
-                if group.leader.node_id != self.node_id || msg.from_node == self.node_id {
-                    continue;
-                }
-
-                // gets the replica stored in this node.
-                let from_replica = match self
-                    .storage
-                    .replica_for_node(*group_id, msg.from_node)
-                    .await
-                {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on from_node {} in current node {} error: {}",
-                            group_id, msg.from_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            // warn!("the current node {} that look up replcia not found in group {} on from_node {}", self.node_id, group_id, msg.from_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                let to_replica = match self.storage.replica_for_node(*group_id, msg.to_node).await {
-                    Err(err) => {
-                        warn!(
-                            "find replcia in group {} on to_node {} in current node {} error: {}",
-                            group_id, msg.to_node, self.node_id, err
-                        );
-                        continue;
-                    }
-                    Ok(val) => match val {
-                        None => {
-                            // warn!("the current node {} that look up replcia not found in group {} on to_node {}", self.node_id, group_id, msg.to_node);
-                            continue;
-                        }
-                        Some(val) => val,
-                    },
-                };
-
-                let mut msg = raft::prelude::Message::default();
-                msg.set_msg_type(raft::prelude::MessageType::MsgHeartbeatResponse);
-                // msg.term = group.term();
-                msg.from = from_replica.replica_id;
-                msg.to = to_replica.replica_id;
-                if let Err(err) = group.raft_group.step(msg) {
-                    warn!(
-                        "node {}: step heatbeat response message error: {}",
-                        self.node_id, err
-                    );
-                }
-            }
-        } else {
-            warn!(
-                "missing raft groups at from_node {} fanout heartbeat response",
-                msg.from_node
-            );
-            self.node_manager.add_node(msg.from_node);
-        }
         Ok(MultiRaftMessageResponse {})
     }
 
@@ -1351,17 +1100,6 @@ where
     #[inline]
     fn get_group(&self, group_id: u64) -> Result<&RaftGroup<RS, RES>, Error> {
         self.groups.get(&group_id).map_or(
-            Err(Error::RaftGroup(RaftGroupError::Deleted(
-                self.node_id,
-                group_id,
-            ))),
-            |group| Ok(group),
-        )
-    }
-
-    #[inline]
-    fn mut_group(&mut self, group_id: u64) -> Result<&mut RaftGroup<RS, RES>, Error> {
-        self.groups.get_mut(&group_id).map_or(
             Err(Error::RaftGroup(RaftGroupError::Deleted(
                 self.node_id,
                 group_id,
