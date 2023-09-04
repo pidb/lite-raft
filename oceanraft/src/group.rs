@@ -50,7 +50,7 @@ use super::transport;
 use super::utils;
 use super::utils::flexbuffer_serialize;
 use super::Event;
-use super::ProposeData;
+use super::ProposeRequest;
 
 pub enum Status {
     None,
@@ -510,7 +510,7 @@ where
         Ok(None)
     }
 
-    fn pre_propose_write<WD: ProposeData>(
+    fn pre_propose_write<WD: ProposeRequest>(
         &mut self,
         write_data: &WriteRequest<WD, RES>,
     ) -> Result<(), Error> {
@@ -539,7 +539,7 @@ where
         Ok(())
     }
 
-    pub fn propose_write<WD: ProposeData>(
+    pub fn propose_write<WD: ProposeRequest>(
         &mut self,
         write_request: WriteRequest<WD, RES>,
     ) -> Option<ResponseCallback> {

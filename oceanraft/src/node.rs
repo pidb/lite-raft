@@ -64,7 +64,7 @@ use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 use super::tick::Ticker;
 use super::transport::Transport;
-use super::ProposeData;
+use super::ProposeRequest;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -203,7 +203,7 @@ impl NodeManager {
 
 pub struct NodeActor<W, R>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     // TODO: queue should have one per-group.
@@ -221,7 +221,7 @@ where
 
 impl<W, R> NodeActor<W, R>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     pub fn spawn<TR, RS, MRS, RSM>(
@@ -298,7 +298,7 @@ where
     TR: Transport,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     pub(crate) cfg: Config,
@@ -330,7 +330,7 @@ where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    WD: ProposeData,
+    WD: ProposeRequest,
     RES: ProposeResponse,
 {
     fn new(

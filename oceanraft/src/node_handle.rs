@@ -1,4 +1,4 @@
-use super::ProposeData;
+use super::ProposeRequest;
 
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
@@ -48,7 +48,7 @@ use tokio::sync::oneshot;
 
 pub(crate) struct NodeHandle<W, R>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     // TODO: queue should have one per-group.

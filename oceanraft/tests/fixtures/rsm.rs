@@ -4,7 +4,7 @@ use oceanraft::storage::StateMachineStore;
 use oceanraft::Apply;
 use oceanraft::ApplyNormal;
 use oceanraft::GroupState;
-use oceanraft::ProposeData;
+use oceanraft::ProposeRequest;
 use oceanraft::ProposeResponse;
 use oceanraft::StateMachine;
 use tokio::sync::mpsc::Sender;
@@ -13,14 +13,14 @@ use tracing::info;
 #[derive(Clone)]
 pub struct MemStoreStateMachine<W>
 where
-    W: ProposeData,
+    W: ProposeRequest,
 {
     tx: Sender<Vec<Apply<W, ()>>>,
 }
 
 impl<W> StateMachine<W, ()> for MemStoreStateMachine<W>
 where
-    W: ProposeData,
+    W: ProposeRequest,
 {
     type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
@@ -56,7 +56,7 @@ where
 
 impl<W> MemStoreStateMachine<W>
 where
-    W: ProposeData,
+    W: ProposeRequest,
 {
     pub fn new(tx: Sender<Vec<Apply<W, ()>>>) -> Self {
         Self { tx }

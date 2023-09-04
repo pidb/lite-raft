@@ -16,11 +16,11 @@ use crate::prelude::RemoveGroupRequest;
 
 use super::error::Error;
 use super::proposal::Proposal;
-use super::ProposeData;
+use super::ProposeRequest;
 
 pub struct WriteRequest<REQ, RES>
 where
-    REQ: ProposeData,
+    REQ: ProposeRequest,
     RES: ProposeResponse,
 {
     pub group_id: u64,
@@ -63,7 +63,7 @@ pub struct ReadIndexData {
 
 pub enum ProposeMessage<REQ, RES>
 where
-    REQ: ProposeData,
+    REQ: ProposeRequest,
     RES: ProposeResponse,
 {
     Write(WriteRequest<REQ, RES>),

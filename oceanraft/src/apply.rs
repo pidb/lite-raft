@@ -25,7 +25,7 @@ use crate::Config;
 use crate::Error;
 use crate::GroupState;
 use crate::GroupStates;
-use crate::ProposeData;
+use crate::ProposeRequest;
 use crate::ProposeError;
 use crate::ProposeResponse;
 use crate::StateMachine;
@@ -67,7 +67,7 @@ impl ApplyActor {
         stopped: Arc<AtomicBool>,
     ) -> Self
     where
-        W: ProposeData,
+        W: ProposeRequest,
         R: ProposeResponse,
         RSM: StateMachine<W, R>,
         S: RaftStorage,
@@ -92,7 +92,7 @@ impl ApplyActor {
 
 pub struct ApplyWorker<W, R, RSM, S, MS>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
     S: RaftStorage,
@@ -111,7 +111,7 @@ where
 
 impl<W, R, RSM, S, MS> ApplyWorker<W, R, RSM, S, MS>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
     S: RaftStorage,
@@ -369,7 +369,7 @@ where
 
 pub struct ApplyDelegate<W, R, RSM>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
@@ -383,7 +383,7 @@ where
 
 impl<W, R, RSM> ApplyDelegate<W, R, RSM>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {

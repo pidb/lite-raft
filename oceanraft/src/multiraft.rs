@@ -44,12 +44,12 @@ pub const NO_LEADER: u64 = 0;
 
 /// Propose request can be with custom data types
 /// for which `ProposeRequest` provides trait constraints.
-pub trait ProposeData:
+pub trait ProposeRequest:
     Debug + Clone + Send + Sync + Serialize + for<'d> Deserialize<'d> + 'static
 {
 }
 
-impl<T> ProposeData for T where
+impl<T> ProposeRequest for T where
     T: Debug + Clone + Send + Sync + Serialize + for<'d> Deserialize<'d> + 'static
 {
 }
@@ -58,10 +58,10 @@ impl<T> ProposeData for T where
 /// for which `ProposePropose` provides trait constraints.
 pub trait ProposeResponse: Debug + Clone + Send + Sync + 'static {}
 
-impl<R> ProposeResponse for R where R: Debug + Clone + Send + Sync + 'static {}
+impl<T> ProposeResponse for T where T: Debug + Clone + Send + Sync + 'static {}
 
 pub trait MultiRaftTypeSpecialization {
-    type D: ProposeData;
+    type D: ProposeRequest;
     type R: ProposeResponse;
     type M: StateMachine<Self::D, Self::R>;
     type S: RaftStorage;

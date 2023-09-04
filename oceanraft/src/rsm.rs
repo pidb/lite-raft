@@ -9,7 +9,7 @@ use crate::prelude::MembershipChangeData;
 
 use super::error::Error;
 use super::GroupState;
-use super::ProposeData;
+use super::ProposeRequest;
 
 #[derive(Debug)]
 pub struct ApplyNoOp {
@@ -21,7 +21,7 @@ pub struct ApplyNoOp {
 #[derive(Debug)]
 pub struct ApplyNormal<REQ, RES>
 where
-    REQ: ProposeData,
+    REQ: ProposeRequest,
     RES: ProposeResponse,
 {
     pub group_id: u64,
@@ -49,7 +49,7 @@ pub struct ApplyMembership<RES: ProposeResponse> {
 #[derive(Debug)]
 pub enum Apply<W, R>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     NoOp(ApplyNoOp),
@@ -59,7 +59,7 @@ where
 
 impl<W, R> Apply<W, R>
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     pub fn get_index(&self) -> u64 {
@@ -82,7 +82,7 @@ where
 
 pub trait StateMachine<W, R>: Send + Sync + 'static
 where
-    W: ProposeData,
+    W: ProposeRequest,
     R: ProposeResponse,
 {
     type ApplyFuture<'life0>: Send + Future<Output = ()> + 'life0

@@ -65,14 +65,14 @@ use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
 // use super::tick::Ticker;
 use super::transport::Transport;
-use super::ProposeData;
+use super::ProposeRequest;
 
 impl<TR, RS, MRS, WD, RES> NodeWorker<TR, RS, MRS, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
-    WD: ProposeData,
+    WD: ProposeRequest,
     RES: ProposeResponse,
 {
     /// The node sends heartbeats to other nodes instead

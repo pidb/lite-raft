@@ -726,7 +726,7 @@ pub use error::{Error, MultiRaftStorageError, ProposeError, RaftCoreError, RaftG
 pub use event::{Event, LeaderElectionEvent};
 pub use multiraft::{
     MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl, MultiRaftTypeSpecialization,
-    ProposeData, ProposeResponse,
+    ProposeRequest, ProposeResponse,
 };
 pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
 pub use state::{GroupState, GroupStates};
