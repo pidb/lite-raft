@@ -19,10 +19,16 @@ use super::error::Error;
 use super::proposal::Proposal;
 use super::ProposeRequest;
 
+/// Message with notify.
+pub struct MessageWithNotify<T, R> {
+    pub msg: T,
+    pub tx: oneshot::Sender<R>,
+}
+
 pub struct WriteRequest<REQ, RES>
-    where
-        REQ: ProposeRequest,
-        RES: ProposeResponse,
+where
+    REQ: ProposeRequest,
+    RES: ProposeResponse,
 {
     pub group_id: u64,
     pub term: u64,
@@ -38,8 +44,8 @@ pub struct MembershipRequestContext {
 }
 
 pub struct MembershipRequest<RES>
-    where
-        RES: ProposeResponse,
+where
+    RES: ProposeResponse,
 {
     pub group_id: u64,
     pub term: Option<u64>,
@@ -63,9 +69,9 @@ pub struct ReadIndexData {
 }
 
 pub enum ProposeMessage<REQ, RES>
-    where
-        REQ: ProposeRequest,
-        RES: ProposeResponse,
+where
+    REQ: ProposeRequest,
+    RES: ProposeResponse,
 {
     Write(WriteRequest<REQ, RES>),
     Membership(MembershipRequest<RES>),
@@ -78,16 +84,16 @@ pub enum ManageMessage {
 }
 
 pub enum NodeMessage<REQ, RES>
-    where
-        REQ: ProposeRequest,
-        RES: ProposeResponse
+where
+    REQ: ProposeRequest,
+    RES: ProposeResponse,
 {
-    Peer(MultiRaftMessage),
+    Peer(MessageWithNotify<MultiRaftMessage, Result<(), Error>>),
     Write(WriteRequest<REQ, RES>),
     Membership(MembershipRequest<RES>),
     ReadIndexData(ReadIndexData),
-    CreateGroup(CreateGroupRequest, oneshot::Sender<Result<(), Error>>),
-    RemoveGroup(RemoveGroupRequest, oneshot::Sender<Result<(), Error>>),
+    CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
+    RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
 }
 
 #[allow(unused)]
@@ -95,8 +101,8 @@ pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct ApplyData<R>
-    where
-        R: ProposeResponse,
+where
+    R: ProposeResponse,
 {
     pub replica_id: u64,
     pub group_id: u64,
@@ -109,8 +115,8 @@ pub struct ApplyData<R>
 }
 
 impl<R> ApplyData<R>
-    where
-        R: ProposeResponse,
+where
+    R: ProposeResponse,
 {
     pub fn try_batch(&mut self, that: &mut ApplyData<R>, max_batch_size: usize) -> bool {
         assert_eq!(self.replica_id, that.replica_id);
@@ -132,8 +138,8 @@ impl<R> ApplyData<R>
 }
 
 pub enum ApplyMessage<RES>
-    where
-        RES: ProposeResponse,
+where
+    RES: ProposeResponse,
 {
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,

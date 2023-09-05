@@ -720,7 +720,6 @@ pub mod storage;
 pub mod tick;
 pub mod transport;
 pub mod utils;
-mod channel;
 
 pub use config::Config;
 pub use error::{Error, MultiRaftStorageError, ProposeError, RaftCoreError, RaftGroupError};
