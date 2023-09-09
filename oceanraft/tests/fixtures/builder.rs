@@ -130,7 +130,7 @@ where
                 replica_sync: true,
             };
             let ticker = ManualTick::new();
-            let node = MultiRaft::new(
+            let node = MultiRaft::spawn(
                 config,
                 transport.clone(),
                 self.storages[i].clone(),

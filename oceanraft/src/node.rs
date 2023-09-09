@@ -27,7 +27,7 @@ use tracing::Span;
 use crate::msg::MembershipRequest;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
-use crate::msg::ReadIndexData;
+use crate::msg::ReadIndexRequest;
 use crate::msg::WriteRequest;
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
@@ -41,7 +41,7 @@ use crate::prelude::ReplicaDesc;
 use crate::protos::CreateGroupRequest;
 use crate::protos::RemoveGroupRequest;
 use crate::utils;
-use crate::utils::channel_wrap;
+use crate::utils::mpsc;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -58,8 +58,8 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
-use super::msg::ManageMessage;
-use super::msg::ProposeMessage;
+// use super::msg::ManageMessage;
+// use super::msg::ProposeMessage;
 use super::msg::QueryGroup;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
@@ -216,14 +216,18 @@ where
     R: ProposeResponse,
 {
     // TODO: queue should have one per-group.
-    pub propose_tx: Sender<ProposeMessage<W, R>>,
-    pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
-    pub raft_message_tx: Sender<(
-        MultiRaftMessage,
-        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
-    )>,
-    pub manage_tx: Sender<ManageMessage>,
-    pub query_group_tx: UnboundedSender<QueryGroup>,
+    // pub propose_tx: Sender<ProposeMessage<W, R>>,
+    // pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
+    // pub raft_message_tx: Sender<(
+    //     MultiRaftMessage,
+    //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
+    // )>,
+    // pub manage_tx: Sender<ManageMessage>,
+    // pub query_group_tx: UnboundedSender<QueryGroup>,
+    node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+    pub peer_msg_tx: mpsc::WrapSender<
+        MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
+    >,
     #[allow(unused)]
     apply: ApplyActor,
 }
@@ -249,18 +253,18 @@ where
         MRS: MultiRaftStorage<RS>,
         RSM: StateMachine<W, R>,
     {
-        let (tx, rx) = channel_wrap::<NodeMessage<W, R>>(-1);
+        let (tx, rx) = mpsc::channel_wrap::<NodeMessage<W, R>>(-1);
 
-        let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
-        let (manage_tx, manage_rx) = channel(1);
-        let (campaign_tx, campaign_rx) = channel(1);
-        let (raft_message_tx, raft_message_rx) = channel(10);
+        // let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
+        // let (manage_tx, manage_rx) = channel(1);
+        // let (campaign_tx, campaign_rx) = channel(1);
+        let (peer_msg_tx, peer_msg_rx) = mpsc::channel_wrap(-1);
 
         let (commit_tx, commit_rx) = unbounded_channel();
 
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         let (apply_response_tx, apply_response_rx) = unbounded_channel();
-        let (group_query_tx, group_query_rx) = unbounded_channel();
+        // let (group_query_tx, group_query_rx) = unbounded_channel();
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
@@ -277,15 +281,15 @@ where
             transport,
             storage,
             rx,
-            propose_rx,
-            campaign_rx,
-            raft_message_rx,
+            // propose_rx,
+            // campaign_rx,
+            peer_msg_rx,
             apply_request_tx,
             apply_response_rx,
-            manage_rx,
+            // manage_rx,
             event_bcast,
             commit_rx,
-            group_query_rx,
+            // group_query_rx,
             states,
         );
 
@@ -295,12 +299,26 @@ where
         });
 
         Self {
-            query_group_tx: group_query_tx,
-            raft_message_tx,
-            propose_tx,
-            campaign_tx,
-            manage_tx,
+            node_msg_tx: tx,
+            peer_msg_tx,
+            // query_group_tx: group_query_tx,
+            // raft_message_tx,
+            // propose_tx,
+            // campaign_tx,
+            // manage_tx,
             apply,
+        }
+    }
+
+    pub fn try_send_node_msg(&self, msg: NodeMessage<W, R>) -> Result<(), Error> {
+        match self.node_msg_tx.try_send(msg) {
+            Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+                "channel no avaiable capacity for write".to_owned(),
+            ))),
+            Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
+                ChannelError::ReceiverClosed("channel receiver closed for write".to_owned()),
+            )),
+            Ok(_) => Ok(()),
         }
     }
 }
@@ -323,18 +341,21 @@ where
     pub(crate) active_groups: HashSet<u64>,
     pub(crate) pending_responses: ResponseCallbackQueue,
     pub(crate) event_chan: EventChannel,
-    pub(crate) rx: utils::WrapReceiver<NodeMessage<W, R>>,
-    pub(crate) multiraft_message_rx: Receiver<(
-        MultiRaftMessage,
-        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
-    )>,
-    pub(crate) propose_rx: Receiver<ProposeMessage<W, R>>,
-    pub(crate) manage_rx: Receiver<ManageMessage>,
-    pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
+    pub(crate) rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
+    pub(crate) peer_msg_rx: mpsc::WrapReceiver<
+        MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
+    >,
+    // pub(crate) multiraft_message_rx: Receiver<(
+    //     MultiRaftMessage,
+    //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
+    // )>,
+    // pub(crate) propose_rx: Receiver<ProposeMessage<W, R>>,
+    // pub(crate) manage_rx: Receiver<ManageMessage>,
+    // pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub(crate) commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     pub(crate) apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
     pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
-    pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
+    // pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
     pub(crate) shared_states: GroupStates,
 }
 
@@ -350,19 +371,22 @@ where
         cfg: &Config,
         transport: &TR,
         storage: &MRS,
-        rx: utils::WrapReceiver<NodeMessage<WD, RES>>,
-        propose_rx: Receiver<ProposeMessage<WD, RES>>,
-        campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
-        raft_message_rx: Receiver<(
-            MultiRaftMessage,
-            oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
-        )>,
+        rx: utils::mpsc::WrapReceiver<NodeMessage<WD, RES>>,
+        peer_msg_rx: mpsc::WrapReceiver<
+            MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
+        >,
+        // propose_rx: Receiver<ProposeMessage<WD, RES>>,
+        // campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
+        // raft_message_rx: Receiver<(
+        //     MultiRaftMessage,
+        //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
+        // )>,
         apply_request_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
         apply_response_rx: UnboundedReceiver<ApplyResultMessage>,
-        manage_rx: Receiver<ManageMessage>,
+        // manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
-        group_query_rx: UnboundedReceiver<QueryGroup>,
+        // group_query_rx: UnboundedReceiver<QueryGroup>,
         shared_states: GroupStates,
     ) -> Self {
         NodeWorker::<TR, RS, MRS, WD, RES> {
@@ -371,10 +395,11 @@ where
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
             rx,
-            propose_rx,
-            campaign_rx,
-            multiraft_message_rx: raft_message_rx,
-            manage_rx,
+            peer_msg_rx,
+            // propose_rx,
+            // campaign_rx,
+            // multiraft_message_rx: raft_message_rx,
+            // manage_rx,
             storage: storage.clone(),
             transport: transport.clone(),
             apply_tx: apply_request_tx,
@@ -385,7 +410,7 @@ where
             event_chan: event_chan.clone(),
             pending_responses: ResponseCallbackQueue::new(),
             shared_states,
-            query_group_rx: group_query_rx,
+            // query_group_rx: group_query_rx,
         }
     }
 
@@ -466,15 +491,13 @@ where
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
 
-                Some(msg) = self.rx.recv() => {
-                },
+                Some(msg) = self.rx.recv() => self.handle_node_msg(msg).await,
 
-                Some((req, tx)) = self.multiraft_message_rx.recv() => {
-                    let res = self.handle_multiraft_message(req).await ;
-                    self.pending_responses.push_back(ResponseCallbackQueue::new_callback(tx, res));
+                Some(msg) = self.peer_msg_rx.recv() => {
+                    let res = self.handle_peer_msg(msg.msg).await;
+                    self.pending_responses
+                        .push_back(ResponseCallbackQueue::new_callback(msg.tx, res));
                 },
-
-                // receive from rx
 
                 _ = ticker.recv() => {
                     self.groups.iter_mut().for_each(|(id, group)| {
@@ -489,24 +512,26 @@ where
                     }
                 },
 
-                Some(req) = self.propose_rx.recv() => if let Some(cb) = self.handle_propose(req) {
-                    self.pending_responses.push_back(cb);
-                },
+
 
                 Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
 
-                Some(msg) = self.manage_rx.recv() => if let Some(cb) = self.handle_manage_message(msg).await {
-                    self.pending_responses.push_back(cb);
-                },
-
-                Some((group_id, tx)) = self.campaign_rx.recv() => {
-                    self.campaign_raft(group_id, tx);
-                    self.active_groups.insert(group_id);
-                }
-
                 Some(msg) = self.commit_rx.recv() => self.handle_apply_commit(msg).await,
 
-                Some(msg) = self.query_group_rx.recv() => self.handle_query_group(msg),
+                // Some(req) = self.propose_rx.recv() => if let Some(cb) = self.handle_propose(req) {
+                //     self.pending_responses.push_back(cb);
+                // },
+                // Some(msg) = self.manage_rx.recv() => if let Some(cb) = self.handle_manage_message(msg).await {
+                //     self.pending_responses.push_back(cb);
+                // },
+
+                // Some((group_id, tx)) = self.campaign_rx.recv() => {
+                //     self.campaign_raft(group_id, tx);
+                //     self.active_groups.insert(group_id);
+                // }
+
+
+                // Some(msg) = self.query_group_rx.recv() => self.handle_query_group(msg),
 
                 else => {},
             }
@@ -520,13 +545,8 @@ where
         }
     }
 
-    async fn handle_msg(&mut self, msg: NodeMessage<WD, RES>) {
+    async fn handle_node_msg(&mut self, msg: NodeMessage<WD, RES>) {
         match msg {
-            NodeMessage::Peer(msg) => {
-                let res = self.handle_peer_msg(msg.msg).await;
-                self.pending_responses
-                    .push_back(ResponseCallbackQueue::new_callback(msg.tx, res));
-            }
             NodeMessage::Write(msg) => {
                 if let Some(cb) = self.handle_write_msg(msg) {
                     self.pending_responses.push_back(cb);
@@ -551,6 +571,9 @@ where
                 if let Some(cb) = self.handle_remove_group_msg(msg.msg, msg.tx).await {
                     self.pending_responses.push_back(cb);
                 }
+            }
+            NodeMessage::Campaign(msg) => {
+                self.campaign_raft(msg.msg, msg.tx);
             }
         }
     }
@@ -593,7 +616,7 @@ where
         }
     }
 
-    fn handle_readindex_msg(&mut self, msg: ReadIndexData) -> Option<ResponseCallback> {
+    fn handle_readindex_msg(&mut self, msg: ReadIndexRequest) -> Option<ResponseCallback> {
         let group_id = msg.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
@@ -706,24 +729,6 @@ where
         return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
     }
 
-    async fn handle_multiraft_message(
-        &mut self,
-        msg: MultiRaftMessage,
-    ) -> Result<MultiRaftMessageResponse, Error> {
-        let rmsg = msg.msg.as_ref().expect("invalid msg");
-        // for a heartbeat message, fanout is executed only if context in
-        // the heartbeat message is empty.
-        match rmsg.msg_type() {
-            MessageType::MsgHeartbeat if rmsg.context.is_empty() => {
-                self.fanout_heartbeat(msg).await
-            }
-            MessageType::MsgHeartbeatResponse if rmsg.context.is_empty() => {
-                self.fanout_heartbeat_response(msg).await
-            }
-            _ => self.handle_raft_message(msg).await,
-        }
-    }
-
     #[tracing::instrument(
         name = "NodeActor::handle_raft_message",
         level = Level::TRACE,
@@ -821,72 +826,72 @@ where
     /// returned.
     ///
     /// Note: Must be called to respond to the client when the loop ends.
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "NodeActor::handle_propose",
-        skip_all
-    )]
-    fn handle_propose(&mut self, msg: ProposeMessage<WD, RES>) -> Option<ResponseCallback> {
-        match msg {
-            ProposeMessage::Write(data) => {
-                let group_id = data.group_id;
-                match self.groups.get_mut(&group_id) {
-                    None => {
-                        warn!(
-                            "node {}: proposal failed, group {} does not exists",
-                            self.node_id, group_id,
-                        );
-                        return Some(ResponseCallbackQueue::new_error_callback(
-                            data.tx,
-                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                        ));
-                    }
-                    Some(group) => {
-                        self.active_groups.insert(group_id);
-                        group.propose_write(data)
-                    }
-                }
-            }
-            ProposeMessage::Membership(request) => {
-                let group_id = request.group_id;
-                match self.groups.get_mut(&group_id) {
-                    None => {
-                        warn!(
-                            "node {}: proposal membership failed, group {} does not exists",
-                            self.node_id, group_id,
-                        );
-                        return Some(ResponseCallbackQueue::new_error_callback(
-                            request.tx,
-                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                        ));
-                    }
-                    Some(group) => {
-                        self.active_groups.insert(group_id);
-                        group.propose_membership_change(request)
-                    }
-                }
-            }
-            ProposeMessage::ReadIndexData(read_data) => {
-                let group_id = read_data.group_id;
-                match self.groups.get_mut(&group_id) {
-                    None => {
-                        warn!(
-                            "node {}: proposal read_index failed, group {} does not exists",
-                            self.node_id, group_id,
-                        );
-                        return Some(ResponseCallbackQueue::new_error_callback(
-                            read_data.tx,
-                            Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                        ));
-                    }
-                    Some(group) => {
-                        self.active_groups.insert(group_id);
-                        group.read_index_propose(read_data)
-                    }
-                }
-            }
-        }
-    }
+    // #[tracing::instrument(
+    //     level = Level::TRACE,
+    //     name = "NodeActor::handle_propose",
+    //     skip_all
+    // )]
+    // fn handle_propose(&mut self, msg: ProposeMessage<WD, RES>) -> Option<ResponseCallback> {
+    //     match msg {
+    //         ProposeMessage::Write(data) => {
+    //             let group_id = data.group_id;
+    //             match self.groups.get_mut(&group_id) {
+    //                 None => {
+    //                     warn!(
+    //                         "node {}: proposal failed, group {} does not exists",
+    //                         self.node_id, group_id,
+    //                     );
+    //                     return Some(ResponseCallbackQueue::new_error_callback(
+    //                         data.tx,
+    //                         Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+    //                     ));
+    //                 }
+    //                 Some(group) => {
+    //                     self.active_groups.insert(group_id);
+    //                     group.propose_write(data)
+    //                 }
+    //             }
+    //         }
+    //         ProposeMessage::Membership(request) => {
+    //             let group_id = request.group_id;
+    //             match self.groups.get_mut(&group_id) {
+    //                 None => {
+    //                     warn!(
+    //                         "node {}: proposal membership failed, group {} does not exists",
+    //                         self.node_id, group_id,
+    //                     );
+    //                     return Some(ResponseCallbackQueue::new_error_callback(
+    //                         request.tx,
+    //                         Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+    //                     ));
+    //                 }
+    //                 Some(group) => {
+    //                     self.active_groups.insert(group_id);
+    //                     group.propose_membership_change(request)
+    //                 }
+    //             }
+    //         }
+    //         ProposeMessage::ReadIndexData(read_data) => {
+    //             let group_id = read_data.group_id;
+    //             match self.groups.get_mut(&group_id) {
+    //                 None => {
+    //                     warn!(
+    //                         "node {}: proposal read_index failed, group {} does not exists",
+    //                         self.node_id, group_id,
+    //                     );
+    //                     return Some(ResponseCallbackQueue::new_error_callback(
+    //                         read_data.tx,
+    //                         Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
+    //                     ));
+    //                 }
+    //                 Some(group) => {
+    //                     self.active_groups.insert(group_id);
+    //                     group.read_index_propose(read_data)
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     #[tracing::instrument(
         level = Level::TRACE,
@@ -895,7 +900,7 @@ where
     )]
     fn campaign_raft(&mut self, group_id: u64, tx: oneshot::Sender<Result<(), Error>>) {
         let res = if let Some(group) = self.groups.get_mut(&group_id) {
-            //            self.activity_groups.insert(group_id);
+            self.active_groups.insert(group_id);
             group.raft_group.campaign().map_err(|err| Error::Raft(err))
         } else {
             warn!(
@@ -913,80 +918,80 @@ where
         }
     }
 
-    #[tracing::instrument(
-        name = "NodeActor::handle_admin_message",
-        level = Level::TRACE,
-        skip_all,
-    )]
-    async fn handle_manage_message(&mut self, msg: ManageMessage) -> Option<ResponseCallback> {
-        match msg {
-            // handle raft group management request
-            // ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
-            ManageMessage::CreateGroup(request, tx) => {
-                self.active_groups.insert(request.group_id);
-                let res = self
-                    .create_raft_group(
-                        request.group_id,
-                        request.replica_id,
-                        request.replicas,
-                        Some(request.applied_hint),
-                        None,
-                    )
-                    .await;
-                return Some(ResponseCallbackQueue::new_callback(tx, res));
-            }
-            ManageMessage::RemoveGroup(request, tx) => {
-                // marke delete
-                let group_id = request.group_id;
-                let group = match self.groups.get_mut(&group_id) {
-                    None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
-                    Some(group) => group,
-                };
+    // #[tracing::instrument(
+    //     name = "NodeActor::handle_admin_message",
+    //     level = Level::TRACE,
+    //     skip_all,
+    // )]
+    // async fn handle_manage_message(&mut self, msg: ManageMessage) -> Option<ResponseCallback> {
+    //     match msg {
+    //         // handle raft group management request
+    //         // ManageMessage::GroupData(data) => self.handle_group_manage(data).await,
+    //         ManageMessage::CreateGroup(request, tx) => {
+    //             self.active_groups.insert(request.group_id);
+    //             let res = self
+    //                 .create_raft_group(
+    //                     request.group_id,
+    //                     request.replica_id,
+    //                     request.replicas,
+    //                     Some(request.applied_hint),
+    //                     None,
+    //                 )
+    //                 .await;
+    //             return Some(ResponseCallbackQueue::new_callback(tx, res));
+    //         }
+    //         ManageMessage::RemoveGroup(request, tx) => {
+    //             // marke delete
+    //             let group_id = request.group_id;
+    //             let group = match self.groups.get_mut(&group_id) {
+    //                 None => return Some(ResponseCallbackQueue::new_callback(tx, Ok(()))),
+    //                 Some(group) => group,
+    //             };
 
-                for proposal in group.proposals.drain(..) {
-                    proposal.tx.map(|tx| {
-                        tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
-                            self.node_id,
-                            group_id,
-                        ))))
-                    });
-                }
+    //             for proposal in group.proposals.drain(..) {
+    //                 proposal.tx.map(|tx| {
+    //                     tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+    //                         self.node_id,
+    //                         group_id,
+    //                     ))))
+    //                 });
+    //             }
 
-                group.status = Status::Delete;
+    //             group.status = Status::Delete;
 
-                let replica_id = group.replica_id;
-                match self
-                    .storage
-                    .get_group_metadata(group_id, replica_id)
-                    .await
-                    .unwrap()
-                {
-                    None => {
-                        self.storage
-                            .set_group_metadata(GroupMetadata {
-                                group_id,
-                                replica_id,
-                                node_id: self.node_id,
-                                create_timestamp: 0,
-                                leader_id: group.leader.replica_id,
-                                deleted: true,
-                            })
-                            .await
-                            .unwrap();
-                    }
-                    Some(mut meta) => {
-                        if !meta.deleted {
-                            meta.deleted = true;
-                            self.storage.set_group_metadata(meta).await.unwrap();
-                        }
-                    }
-                }
+    //             let replica_id = group.replica_id;
+    //             match self
+    //                 .storage
+    //                 .get_group_metadata(group_id, replica_id)
+    //                 .await
+    //                 .unwrap()
+    //             {
+    //                 None => {
+    //                     self.storage
+    //                         .set_group_metadata(GroupMetadata {
+    //                             group_id,
+    //                             replica_id,
+    //                             node_id: self.node_id,
+    //                             create_timestamp: 0,
+    //                             leader_id: group.leader.replica_id,
+    //                             deleted: true,
+    //                         })
+    //                         .await
+    //                         .unwrap();
+    //                 }
+    //                 Some(mut meta) => {
+    //                     if !meta.deleted {
+    //                         meta.deleted = true;
+    //                         self.storage.set_group_metadata(meta).await.unwrap();
+    //                     }
+    //                 }
+    //             }
 
-                // TODO: impl broadcast
-                return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
-            }
-        }
-    }
+    //             // TODO: impl broadcast
+    //             return Some(ResponseCallbackQueue::new_callback(tx, Ok(())));
+    //         }
+    //     }
+    // }
 
     // #[tracing::instrument(
     //     name = "MultiRaftActorRuntime::raft_group_management",

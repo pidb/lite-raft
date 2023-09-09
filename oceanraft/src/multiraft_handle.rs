@@ -5,9 +5,11 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::msg::NodeMessage;
 use crate::prelude::CreateGroupRequest;
 use crate::prelude::MembershipChangeData;
 use crate::protos::RemoveGroupRequest;
+use crate::utils::mpsc;
 use crate::MultiRaftMessageSenderImpl;
 use crate::MultiRaftTypeSpecialization;
 
@@ -124,20 +126,22 @@ where
         let (tx, rx) = oneshot::channel();
         match self
             .node_handle
-            .propose_tx
-            .try_send(ProposeMessage::Write(WriteRequest {
+            .tx
+            .as_ref()
+            .unwrap()
+            .try_send(NodeMessage::Write(WriteRequest {
                 group_id,
                 term,
                 data,
                 context,
                 tx,
             })) {
-            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+            Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no avaiable capacity for write".to_owned(),
             ))),
-            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
-                "channel receiver closed for write".to_owned(),
-            ))),
+            Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
+                ChannelError::ReceiverClosed("channel receiver closed for write".to_owned()),
+            )),
             Ok(_) => Ok(rx),
         }
     }

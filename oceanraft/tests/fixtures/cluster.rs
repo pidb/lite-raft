@@ -243,7 +243,7 @@ where
                 // }
             }
         };
-        match timeout_at(Instant::now() + Duration::from_millis(100), wait_loop_fut).await {
+        match timeout_at(Instant::now() + Duration::from_millis(1000), wait_loop_fut).await {
             Err(_) => Err(format!("wait for leader elect event timeouted")),
             Ok(res) => res,
         }

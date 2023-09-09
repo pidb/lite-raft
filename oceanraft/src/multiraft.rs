@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
@@ -6,28 +7,29 @@ use std::sync::Arc;
 use futures::Future;
 use serde::Deserialize;
 use serde::Serialize;
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::msg::MessageWithNotify;
+use crate::msg::NodeMessage;
 use crate::prelude::CreateGroupRequest;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::protos::RemoveGroupRequest;
+use crate::utils::mpsc;
 
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
 use super::event::EventChannel;
 use super::event::EventReceiver;
-use super::msg::ManageMessage;
+// use super::msg::ManageMessage;
 use super::msg::MembershipRequest;
-use super::msg::ProposeMessage;
-use super::msg::QueryGroup;
+// use super::msg::ProposeMessage;
+// use super::msg::QueryGroup;
 use super::msg::ReadIndexContext;
-use super::msg::ReadIndexData;
+use super::msg::ReadIndexRequest;
 use super::msg::WriteRequest;
 use super::node::NodeActor;
 use super::state::GroupStates;
@@ -84,10 +86,9 @@ pub trait MultiRaftMessageSender: Send + Sync + 'static {
 
 #[derive(Clone)]
 pub struct MultiRaftMessageSenderImpl {
-    pub tx: Sender<(
-        MultiRaftMessage,
-        oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
-    )>,
+    tx: mpsc::WrapSender<
+        MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
+    >,
 }
 
 impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
@@ -98,11 +99,14 @@ impl MultiRaftMessageSender for MultiRaftMessageSenderImpl {
     fn send<'life0>(&'life0 self, msg: MultiRaftMessage) -> Self::SendFuture<'life0> {
         async move {
             let (tx, rx) = oneshot::channel();
-            match self.tx.try_send((msg, tx)) {
-                Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
-                    "channel receiver closed for raft message".to_owned(),
-                ))),
-                Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+            let msg = MessageWithNotify { msg, tx };
+            match self.tx.try_send(msg) {
+                Err(mpsc::TrySendError::Closed(_)) => {
+                    Err(Error::Channel(ChannelError::ReceiverClosed(
+                        "channel receiver closed for raft message".to_owned(),
+                    )))
+                }
+                Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                     "channel receiver fulled for raft message".to_owned(),
                 ))),
                 Ok(_) => rx.await.map_err(|_| {
@@ -121,11 +125,16 @@ where
     T: MultiRaftTypeSpecialization,
     TR: Transport + Clone,
 {
+    cfg: Config,
     node_id: u64,
     stopped: Arc<AtomicBool>,
-    actor: NodeActor<T::D, T::R>,
+    actor: RefCell<Option<NodeActor<T::D, T::R>>>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
+    storage: T::MS,
+    transport: TR,
+    state_machine: RefCell<Option<T::M>>,
+    ticker: RefCell<Option<Box<dyn Ticker>>>,
     _m1: PhantomData<TR>,
 }
 
@@ -142,6 +151,51 @@ where
         ticker: Option<Box<dyn Ticker>>,
     ) -> Result<Self, Error> {
         cfg.validate()?;
+        let node_id = cfg.node_id;
+        let states = GroupStates::new();
+        let event_bcast = EventChannel::new(cfg.event_capacity);
+        let stopped = Arc::new(AtomicBool::new(false));
+
+        Ok(Self {
+            cfg,
+            transport,
+            storage,
+            state_machine: RefCell::new(Some(state_machine)),
+            ticker: RefCell::new(ticker),
+            node_id,
+            event_bcast,
+            actor: RefCell::new(None),
+            shared_states: states,
+            stopped,
+            _m1: PhantomData,
+        })
+    }
+
+    pub fn start(&self) {
+        let state_machine = self.state_machine.borrow_mut().take().unwrap();
+        let ticker = self.ticker.borrow_mut().take();
+        let actor = NodeActor::spawn(
+            &self.cfg,
+            &self.transport,
+            &self.storage,
+            state_machine,
+            &self.event_bcast,
+            ticker,
+            self.shared_states.clone(),
+            self.stopped.clone(),
+        );
+        self.actor.replace(Some(actor));
+    }
+
+    pub fn spawn(
+        cfg: Config,
+        transport: TR,
+        storage: T::MS,
+        state_machine: T::M,
+        ticker: Option<Box<dyn Ticker>>,
+    ) -> Result<Self, Error> {
+        cfg.validate()?;
+        let node_id = cfg.node_id;
         let states = GroupStates::new();
         let event_bcast = EventChannel::new(cfg.event_capacity);
         let stopped = Arc::new(AtomicBool::new(false));
@@ -157,9 +211,14 @@ where
         );
 
         Ok(Self {
-            node_id: cfg.node_id,
+            cfg,
+            transport,
+            storage,
+            state_machine: RefCell::new(None),
+            ticker: RefCell::new(None),
+            node_id,
             event_bcast,
-            actor,
+            actor: RefCell::new(Some(actor)),
             shared_states: states,
             stopped,
             _m1: PhantomData,
@@ -247,24 +306,42 @@ where
         let _ = self.pre_propose_check(group_id)?;
 
         let (tx, rx) = oneshot::channel();
-        match self
-            .actor
-            .propose_tx
-            .try_send(ProposeMessage::Write(WriteRequest {
-                group_id,
-                term,
-                data,
-                context,
-                tx,
-            })) {
-            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-                "channel no avaiable capacity for write".to_owned(),
-            ))),
-            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
-                "channel receiver closed for write".to_owned(),
-            ))),
-            Ok(_) => Ok(rx),
-        }
+
+        let msg = NodeMessage::Write(WriteRequest {
+            group_id,
+            term,
+            data,
+            context,
+            tx,
+        });
+        self.actor
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .try_send_node_msg(msg)?;
+
+        Ok(rx)
+        // match self
+        //     .actor
+        //     .borrow()
+        //     .as_ref()
+        //     .unwrap()
+        //     .node_msg_tx
+        //     .try_send(NodeMessage::Write(WriteRequest {
+        //         group_id,
+        //         term,
+        //         data,
+        //         context,
+        //         tx,
+        //     })) {
+        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+        //         "channel no avaiable capacity for write".to_owned(),
+        //     ))),
+        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
+        //         ChannelError::ReceiverClosed("channel receiver closed for write".to_owned()),
+        //     )),
+        //     Ok(_) => Ok(rx),
+        // }
     }
 
     pub async fn membership(
@@ -316,19 +393,29 @@ where
             tx,
         };
 
-        match self
-            .actor
-            .propose_tx
-            .try_send(ProposeMessage::Membership(request))
-        {
-            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-                "channel no available capacity for memberhsip".to_owned(),
-            ))),
-            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
-                "channel receiver closed for membership".to_owned(),
-            ))),
-            Ok(_) => Ok(rx),
-        }
+        let msg = NodeMessage::Membership(request);
+        self.actor
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .try_send_node_msg(msg)?;
+        Ok(rx)
+        // match self
+        //     .actor
+        //     .borrow()
+        //     .as_ref()
+        //     .unwrap()
+        //     .node_msg_tx
+        //     .try_send(NodeMessage::Membership(request))
+        // {
+        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+        //         "channel no available capacity for memberhsip".to_owned(),
+        //     ))),
+        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
+        //         ChannelError::ReceiverClosed("channel receiver closed for membership".to_owned()),
+        //     )),
+        //     Ok(_) => Ok(rx),
+        // }
     }
 
     /// `read_index` is use **read_index algorithm** to read data
@@ -389,25 +476,39 @@ where
         context: Option<Vec<u8>>,
     ) -> Result<oneshot::Receiver<Result<Option<Vec<u8>>, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
-        match self
+        let msg = NodeMessage::ReadIndexData(ReadIndexRequest {
+            group_id,
+            context: ReadIndexContext {
+                uuid: Uuid::new_v4().into_bytes(),
+                context,
+            },
+            tx,
+        });
+        let _ = self
             .actor
-            .propose_tx
-            .try_send(ProposeMessage::ReadIndexData(ReadIndexData {
-                group_id,
-                context: ReadIndexContext {
-                    uuid: Uuid::new_v4().into_bytes(),
-                    context,
-                },
-                tx,
-            })) {
-            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-                "channel no available capacity for read_index".to_owned(),
-            ))),
-            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::ReceiverClosed(
-                "channel receiver closed for read_index".to_owned(),
-            ))),
-            Ok(_) => Ok(rx),
-        }
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .try_send_node_msg(msg)?;
+        Ok(rx)
+        // match self.actor.borrow().as_ref().unwrap().node_msg_tx.try_send(
+        //     NodeMessage::ReadIndexData(ReadIndexRequest {
+        //         group_id,
+        //         context: ReadIndexContext {
+        //             uuid: Uuid::new_v4().into_bytes(),
+        //             context,
+        //         },
+        //         tx,
+        //     }),
+        // ) {
+        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+        //         "channel no available capacity for read_index".to_owned(),
+        //     ))),
+        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
+        //         ChannelError::ReceiverClosed("channel receiver closed for read_index".to_owned()),
+        //     )),
+        //     Ok(_) => Ok(rx),
+        // }
     }
 
     /// Campaign and wait raft group by given `group_id`.
@@ -432,7 +533,16 @@ where
     /// campaign receiver stop, `Error` is returned.
     pub fn campaign_group_non_block(&self, group_id: u64) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        if let Err(_) = self.actor.campaign_tx.try_send((group_id, tx)) {
+        if let Err(_) =
+            self.actor
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .try_send_node_msg(NodeMessage::Campaign(MessageWithNotify {
+                    msg: group_id,
+                    tx,
+                }))
+        {
             panic!("MultiRaftActor stopped")
         }
 
@@ -441,7 +551,8 @@ where
 
     pub async fn create_group(&self, request: CreateGroupRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        self.management_request(ManageMessage::CreateGroup(request, tx))?;
+        let msg = MessageWithNotify { msg: request, tx };
+        self.management_request(NodeMessage::CreateGroup(msg))?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the group_manager change was dropped".to_owned(),
@@ -451,7 +562,8 @@ where
 
     pub async fn remove_group(&self, request: RemoveGroupRequest) -> Result<(), Error> {
         let (tx, rx) = oneshot::channel();
-        self.management_request(ManageMessage::RemoveGroup(request, tx))?;
+        let msg = MessageWithNotify { msg: request, tx };
+        self.management_request(NodeMessage::RemoveGroup(msg))?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the group_manager change was dropped".to_owned(),
@@ -459,33 +571,47 @@ where
         })?
     }
 
-    fn management_request(&self, msg: ManageMessage) -> Result<(), Error> {
-        match self.actor.manage_tx.try_send(msg) {
-            Err(TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-                "channel no available capacity for group management".to_owned(),
-            ))),
-            Err(TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::SenderClosed(
-                "channel closed for group management".to_owned(),
-            ))),
-            Ok(_) => Ok(()),
-        }
+    fn management_request(&self, msg: NodeMessage<T::D, T::R>) -> Result<(), Error> {
+        self.actor
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .try_send_node_msg(msg)?;
+        Ok(())
+        // match self
+        //     .actor
+        //     .borrow()
+        //     .as_ref()
+        //     .unwrap()
+        //     .node_msg_tx
+        //     .try_send(msg)
+        // {
+        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
+        //         "channel no available capacity for group management".to_owned(),
+        //     ))),
+        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(ChannelError::SenderClosed(
+        //         "channel closed for group management".to_owned(),
+        //     ))),
+        //     Ok(_) => Ok(()),
+        // }
     }
 
     /// Return true if it is can to submit membership change to givend group_id.
     pub async fn can_submmit_membership_change(&self, group_id: u64) -> Result<bool, Error> {
-        let (tx, rx) = oneshot::channel();
-        self.actor
-            .query_group_tx
-            .send(QueryGroup::HasPendingConf(group_id, tx))
-            .unwrap();
-        let res = rx.await.unwrap()?;
-        Ok(!res)
+        todo!()
+        // let (tx, rx) = oneshot::channel();
+        // self.actor
+        //     .query_group_tx
+        //     .send(QueryGroup::HasPendingConf(group_id, tx))
+        //     .unwrap();
+        // let res = rx.await.unwrap()?;
+        // Ok(!res)
     }
 
     #[inline]
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
         MultiRaftMessageSenderImpl {
-            tx: self.actor.raft_message_tx.clone(),
+            tx: self.actor.borrow().as_ref().unwrap().peer_msg_tx.clone(),
         }
     }
 

@@ -32,7 +32,7 @@ use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
 use super::msg::ApplyResultMessage;
 use super::msg::MembershipRequest;
-use super::msg::ReadIndexData;
+use super::msg::ReadIndexRequest;
 use super::msg::WriteRequest;
 use super::multiraft::NO_NODE;
 use super::node::NodeManager;
@@ -598,7 +598,7 @@ where
         None
     }
 
-    pub fn read_index_propose(&mut self, data: ReadIndexData) -> Option<ResponseCallback> {
+    pub fn read_index_propose(&mut self, data: ReadIndexRequest) -> Option<ResponseCallback> {
         let mut flexs = flexbuffer_serialize(&data.context).expect("invalid ReadIndexContext type");
         self.raft_group.read_index(flexs.take_buffer());
 

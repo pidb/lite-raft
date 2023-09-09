@@ -1,5 +1,6 @@
 use super::ProposeRequest;
 
+use crate::msg::NodeMessage;
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
 use crate::prelude::ConfChangeType;
@@ -9,6 +10,7 @@ use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::ReplicaDesc;
+use crate::utils::mpsc;
 
 use super::apply::ApplyActor;
 use super::config::Config;
@@ -25,8 +27,8 @@ use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultMessage;
 use super::msg::CommitMembership;
-use super::msg::ManageMessage;
-use super::msg::ProposeMessage;
+// use super::msg::ManageMessage;
+// use super::msg::ProposeMessage;
 use super::msg::QueryGroup;
 use super::multiraft::NO_GORUP;
 use super::multiraft::NO_NODE;
@@ -52,6 +54,7 @@ where
     R: ProposeResponse,
 {
     // TODO: queue should have one per-group.
+    pub tx: Option<mpsc::WrapSender<NodeMessage<W, R>>>,
     pub propose_tx: Sender<ProposeMessage<W, R>>,
     pub campaign_tx: Sender<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub raft_message_tx: Sender<(

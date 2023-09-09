@@ -1,5 +1,7 @@
 // pub type Result<T> = std::result::Result<T, Error>;
 
+use crate::utils::mpsc;
+
 /// RaftCoreError is raft::Error re-exported.
 pub type RaftCoreError = raft::Error;
 

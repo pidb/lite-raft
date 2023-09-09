@@ -12,8 +12,9 @@ use crate::prelude::ConfState;
 use crate::prelude::CreateGroupRequest;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
+// use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::RemoveGroupRequest;
-use crate::protos::MultiRaftMessage;
+// use crate::protos::MultiRaftMessage;
 
 use super::error::Error;
 use super::proposal::Proposal;
@@ -37,6 +38,20 @@ where
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ReadIndexContext {
+    pub uuid: [u8; 16],
+
+    /// context for user
+    pub context: Option<Vec<u8>>,
+}
+
+pub struct ReadIndexRequest {
+    pub group_id: u64,
+    pub context: ReadIndexContext,
+    pub tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct MembershipRequestContext {
     pub data: MembershipChangeData,
@@ -54,44 +69,31 @@ where
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
-pub struct ReadIndexContext {
-    pub uuid: [u8; 16],
+// pub enum ProposeMessage<REQ, RES>
+// where
+//     REQ: ProposeRequest,
+//     RES: ProposeResponse,
+// {
+//     Write(WriteRequest<REQ, RES>),
+//     Membership(MembershipRequest<RES>),
+//     ReadIndexData(ReadIndexData),
+// }
 
-    /// context for user
-    pub context: Option<Vec<u8>>,
-}
-
-pub struct ReadIndexData {
-    pub group_id: u64,
-    pub context: ReadIndexContext,
-    pub tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
-}
-
-pub enum ProposeMessage<REQ, RES>
-where
-    REQ: ProposeRequest,
-    RES: ProposeResponse,
-{
-    Write(WriteRequest<REQ, RES>),
-    Membership(MembershipRequest<RES>),
-    ReadIndexData(ReadIndexData),
-}
-
-pub enum ManageMessage {
-    CreateGroup(CreateGroupRequest, oneshot::Sender<Result<(), Error>>),
-    RemoveGroup(RemoveGroupRequest, oneshot::Sender<Result<(), Error>>),
-}
+// pub enum ManageMessage {
+//     CreateGroup(CreateGroupRequest, oneshot::Sender<Result<(), Error>>),
+//     RemoveGroup(RemoveGroupRequest, oneshot::Sender<Result<(), Error>>),
+// }
 
 pub enum NodeMessage<REQ, RES>
 where
     REQ: ProposeRequest,
     RES: ProposeResponse,
 {
-    Peer(MessageWithNotify<MultiRaftMessage, Result<(), Error>>),
+    // Peer(MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>),
     Write(WriteRequest<REQ, RES>),
     Membership(MembershipRequest<RES>),
-    ReadIndexData(ReadIndexData),
+    ReadIndexData(ReadIndexRequest),
+    Campaign(MessageWithNotify<u64, Result<(), Error>>),
     CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
 }
