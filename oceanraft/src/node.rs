@@ -56,7 +56,7 @@ use super::group::Status;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
-use super::msg::ApplyResultMessage;
+use super::msg::ApplyResultRequest;
 use super::msg::CommitMembership;
 // use super::msg::ManageMessage;
 // use super::msg::ProposeMessage;
@@ -263,15 +263,16 @@ where
         let (commit_tx, commit_rx) = unbounded_channel();
 
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
-        let (apply_response_tx, apply_response_rx) = unbounded_channel();
+        // let (apply_response_tx, apply_response_rx) = unbounded_channel();
         // let (group_query_tx, group_query_rx) = unbounded_channel();
         let apply = ApplyActor::spawn(
             cfg,
             rsm,
             storage.clone(),
             states.clone(),
+            tx.clone(),
             apply_request_rx,
-            apply_response_tx,
+            // apply_response_tx,
             commit_tx,
             stopped.clone(),
         );
@@ -285,7 +286,7 @@ where
             // campaign_rx,
             peer_msg_rx,
             apply_request_tx,
-            apply_response_rx,
+            // apply_response_rx,
             // manage_rx,
             event_bcast,
             commit_rx,
@@ -354,7 +355,7 @@ where
     // pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
     pub(crate) commit_rx: UnboundedReceiver<ApplyCommitMessage>,
     pub(crate) apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
-    pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultMessage>,
+    // pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultRequest>,
     // pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
     pub(crate) shared_states: GroupStates,
 }
@@ -382,7 +383,7 @@ where
         //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
         // )>,
         apply_request_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
-        apply_response_rx: UnboundedReceiver<ApplyResultMessage>,
+        // apply_response_rx: UnboundedReceiver<ApplyResultRequest>,
         // manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
         commit_rx: UnboundedReceiver<ApplyCommitMessage>,
@@ -403,7 +404,7 @@ where
             storage: storage.clone(),
             transport: transport.clone(),
             apply_tx: apply_request_tx,
-            apply_result_rx: apply_response_rx,
+            // apply_result_rx: apply_response_rx,
             commit_rx,
             active_groups: HashSet::new(),
             replica_cache: ReplicaCache::new(storage.clone()),
@@ -514,7 +515,7 @@ where
 
 
 
-                Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
+                // Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
 
                 Some(msg) = self.commit_rx.recv() => self.handle_apply_commit(msg).await,
 
@@ -575,6 +576,7 @@ where
             NodeMessage::Campaign(msg) => {
                 self.campaign_raft(msg.msg, msg.tx);
             }
+            NodeMessage::ApplyResult(msg) => self.handle_apply_result(msg).await,
         }
     }
 
@@ -1257,7 +1259,7 @@ where
         name = "NodeActor::handle_apply_result",
         skip(self))
     ]
-    async fn handle_apply_result(&mut self, result: ApplyResultMessage) {
+    async fn handle_apply_result(&mut self, result: ApplyResultRequest) {
         let group = match self.groups.get_mut(&result.group_id) {
             Some(group) => group,
             None => {
@@ -1284,40 +1286,29 @@ where
         }
     }
 
-    fn handle_query_group(&self, msg: QueryGroup) {
-        match msg {
-            QueryGroup::HasPendingConf(group_id, tx) => match self.get_group(group_id) {
-                Err(err) => {
-                    // TODO: move response callback queue
-                    // TODO: We should consider adding a priority to the response callback queue,
-                    // to which the response should have a higher priority
-                    if let Err(_) = tx.send(Err(err)) {
-                        error!("send query HasPendingConf result error, receiver dropped");
-                    }
-                }
-                Ok(group) => {
-                    // TODO: move response callback queue
-                    // TODO: We should consider adding a priority to the response callback queue,
-                    // to which the response should have a higher priority
-                    let res = group.raft_group.raft.has_pending_conf();
-                    if let Err(_) = tx.send(Ok(res)) {
-                        error!("send query HasPendingConf result error, receiver dropped");
-                    }
-                }
-            },
-        }
-    }
-
-    #[inline]
-    fn get_group(&self, group_id: u64) -> Result<&RaftGroup<RS, RES>, Error> {
-        self.groups.get(&group_id).map_or(
-            Err(Error::RaftGroup(RaftGroupError::Deleted(
-                self.node_id,
-                group_id,
-            ))),
-            |group| Ok(group),
-        )
-    }
+    // fn handle_query_group(&self, msg: QueryGroup) {
+    //     match msg {
+    //         QueryGroup::HasPendingConf(group_id, tx) => match self.get_group(group_id) {
+    //             Err(err) => {
+    //                 // TODO: move response callback queue
+    //                 // TODO: We should consider adding a priority to the response callback queue,
+    //                 // to which the response should have a higher priority
+    //                 if let Err(_) = tx.send(Err(err)) {
+    //                     error!("send query HasPendingConf result error, receiver dropped");
+    //                 }
+    //             }
+    //             Ok(group) => {
+    //                 // TODO: move response callback queue
+    //                 // TODO: We should consider adding a priority to the response callback queue,
+    //                 // to which the response should have a higher priority
+    //                 let res = group.raft_group.raft.has_pending_conf();
+    //                 if let Err(_) = tx.send(Ok(res)) {
+    //                     error!("send query HasPendingConf result error, receiver dropped");
+    //                 }
+    //             }
+    //         },
+    //     }
+    // }
 
     async fn commit_membership_change(
         &mut self,
@@ -1551,7 +1542,7 @@ where
                 }
                 Some(group) => group,
             };
-            if !group.raft_group.has_ready() {
+            if !group.has_ready() {
                 continue;
             }
 

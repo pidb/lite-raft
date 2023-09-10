@@ -30,7 +30,7 @@ use super::error::RaftGroupError;
 use super::event::EventChannel;
 use super::event::LeaderElectionEvent;
 use super::msg::ApplyData;
-use super::msg::ApplyResultMessage;
+use super::msg::ApplyResultRequest;
 use super::msg::MembershipRequest;
 use super::msg::ReadIndexRequest;
 use super::msg::WriteRequest;
@@ -103,6 +103,11 @@ where
     RS: RaftStorage,
     RES: ProposeResponse,
 {
+    #[inline]
+    pub(crate) fn has_ready(&self) -> bool {
+        self.raft_group.has_ready()
+    }
+
     #[inline]
     pub(crate) fn is_leader(&self) -> bool {
         self.raft_group.raft.state == StateRole::Leader
@@ -739,7 +744,7 @@ where
             });
     }
 
-    pub(crate) fn advance_apply(&mut self, result: &ApplyResultMessage) {
+    pub(crate) fn advance_apply(&mut self, result: &ApplyResultRequest) {
         // keep  invariant
         assert!(result.applied_index <= self.commit_index);
 

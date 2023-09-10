@@ -69,6 +69,13 @@ where
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
+#[derive(Debug)]
+pub struct ApplyResultRequest {
+    pub group_id: u64,
+    pub applied_index: u64,
+    pub applied_term: u64,
+}
+
 // pub enum ProposeMessage<REQ, RES>
 // where
 //     REQ: ProposeRequest,
@@ -96,6 +103,7 @@ where
     Campaign(MessageWithNotify<u64, Result<(), Error>>),
     CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
+    ApplyResult(ApplyResultRequest),
 }
 
 #[allow(unused)]
@@ -146,13 +154,6 @@ where
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,
     },
-}
-
-#[derive(Debug)]
-pub struct ApplyResultMessage {
-    pub group_id: u64,
-    pub applied_index: u64,
-    pub applied_term: u64,
 }
 
 /// Commit membership change results.

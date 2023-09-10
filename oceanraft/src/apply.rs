@@ -17,6 +17,8 @@ use tracing::info;
 use tracing::trace;
 use tracing::Span;
 
+use crate::msg::NodeMessage;
+use crate::utils::mpsc;
 use crate::Apply;
 use crate::ApplyMembership;
 use crate::ApplyNoOp;
@@ -25,8 +27,8 @@ use crate::Config;
 use crate::Error;
 use crate::GroupState;
 use crate::GroupStates;
-use crate::ProposeRequest;
 use crate::ProposeError;
+use crate::ProposeRequest;
 use crate::ProposeResponse;
 use crate::StateMachine;
 
@@ -43,7 +45,7 @@ use super::error::DeserializationError;
 use super::msg::ApplyCommitMessage;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
-use super::msg::ApplyResultMessage;
+use super::msg::ApplyResultRequest;
 use super::msg::CommitMembership;
 use super::proposal::Proposal;
 
@@ -61,8 +63,9 @@ impl ApplyActor {
         rsm: RSM,
         storage: MS,
         shared_states: GroupStates,
+        node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
-        response_tx: UnboundedSender<ApplyResultMessage>,
+        // response_tx: UnboundedSender<ApplyResultRequest>,
         commit_tx: UnboundedSender<ApplyCommitMessage>,
         stopped: Arc<AtomicBool>,
     ) -> Self
@@ -79,7 +82,8 @@ impl ApplyActor {
             storage,
             shared_states,
             request_rx,
-            response_tx,
+            node_msg_tx,
+            // response_tx,
             commit_tx,
         );
         tokio::spawn(async move {
@@ -101,7 +105,9 @@ where
     node_id: u64,
     cfg: Config,
     rx: UnboundedReceiver<(tracing::span::Span, ApplyMessage<R>)>,
-    tx: UnboundedSender<ApplyResultMessage>,
+    // tx: UnboundedSender<ApplyResultRequest>,
+    node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+
     delegate: ApplyDelegate<W, R, RSM>,
     local_apply_states: HashMap<u64, LocalApplyState>,
     shared_states: GroupStates,
@@ -215,13 +221,13 @@ where
                 .handle_applys(group_id, replica_id, applys, apply_state, &gs)
                 .await;
 
-            let res = ApplyResultMessage {
+            let res = ApplyResultRequest {
                 group_id,
                 applied_index: apply_state.applied_index,
                 applied_term: apply_state.applied_term,
             };
 
-            if let Err(_) = self.tx.send(res) {
+            if let Err(_) = self.node_msg_tx.send(NodeMessage::ApplyResult(res)).await {
                 error!(
                     "node {}: send response failed, the node actor dropped",
                     self.node_id
@@ -260,7 +266,8 @@ where
         storage: MS,
         shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
-        response_tx: UnboundedSender<ApplyResultMessage>,
+        node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+        // response_tx: UnboundedSender<ApplyResultRequest>,
         commit_tx: UnboundedSender<ApplyCommitMessage>,
     ) -> Self {
         Self {
@@ -268,7 +275,8 @@ where
             node_id: cfg.node_id,
             cfg: cfg.clone(),
             rx: request_rx,
-            tx: response_tx,
+            node_msg_tx,
+            // tx: response_tx,
             shared_states,
             storage,
             delegate: ApplyDelegate::new(cfg.node_id, rsm, commit_tx),
@@ -765,6 +773,7 @@ mod test {
     // use crate::multiraft::MultiStateMachine;
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
+    use crate::utils::mpsc;
     use crate::Apply;
     use crate::StateMachine;
 
@@ -830,7 +839,7 @@ mod test {
         batch_size: usize,
     ) -> ApplyWorker<(), (), NoOpStateMachine, MemStorage, MultiRaftMemoryStorage> {
         let (_request_tx, request_rx) = unbounded_channel();
-        let (response_tx, _response_rx) = unbounded_channel();
+        let (response_tx, _response_rx) = mpsc::channel_wrap(-1);
         let (callback_tx, _callback_rx) = unbounded_channel();
         let cfg = Config {
             batch_apply,
