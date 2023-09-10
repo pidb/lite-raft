@@ -76,6 +76,18 @@ pub struct ApplyResultRequest {
     pub applied_term: u64,
 }
 
+#[derive(Debug)]
+pub enum ApplyCommitRequest {
+    None,
+    Membership((CommitMembership, oneshot::Sender<Result<ConfState, Error>>)),
+}
+
+impl Default for ApplyCommitRequest {
+    fn default() -> Self {
+        ApplyCommitRequest::None
+    }
+}
+
 // pub enum ProposeMessage<REQ, RES>
 // where
 //     REQ: ProposeRequest,
@@ -104,6 +116,7 @@ where
     CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
     ApplyResult(ApplyResultRequest),
+    ApplyCommit(ApplyCommitRequest),
 }
 
 #[allow(unused)]
@@ -177,18 +190,6 @@ pub struct CommitMembership {
 
     /// Specific change request data from the client.
     pub change_request: Option<MembershipChangeData>,
-}
-
-#[derive(Debug)]
-pub enum ApplyCommitMessage {
-    None,
-    Membership((CommitMembership, oneshot::Sender<Result<ConfState, Error>>)),
-}
-
-impl Default for ApplyCommitMessage {
-    fn default() -> Self {
-        ApplyCommitMessage::None
-    }
 }
 
 /// An internal structure to query raft internal status in

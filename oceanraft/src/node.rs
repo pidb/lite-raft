@@ -53,7 +53,7 @@ use super::event::EventChannel;
 use super::group::RaftGroup;
 use super::group::RaftGroupWriteRequest;
 use super::group::Status;
-use super::msg::ApplyCommitMessage;
+use super::msg::ApplyCommitRequest;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultRequest;
@@ -260,7 +260,7 @@ where
         // let (campaign_tx, campaign_rx) = channel(1);
         let (peer_msg_tx, peer_msg_rx) = mpsc::channel_wrap(-1);
 
-        let (commit_tx, commit_rx) = unbounded_channel();
+        // let (commit_tx, commit_rx) = unbounded_channel();
 
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         // let (apply_response_tx, apply_response_rx) = unbounded_channel();
@@ -273,7 +273,7 @@ where
             tx.clone(),
             apply_request_rx,
             // apply_response_tx,
-            commit_tx,
+            // commit_tx,
             stopped.clone(),
         );
 
@@ -289,7 +289,7 @@ where
             // apply_response_rx,
             // manage_rx,
             event_bcast,
-            commit_rx,
+            // commit_rx,
             // group_query_rx,
             states,
         );
@@ -342,10 +342,11 @@ where
     pub(crate) active_groups: HashSet<u64>,
     pub(crate) pending_responses: ResponseCallbackQueue,
     pub(crate) event_chan: EventChannel,
-    pub(crate) rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
+    pub(crate) node_msg_rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
     pub(crate) peer_msg_rx: mpsc::WrapReceiver<
         MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
     >,
+    pub(crate) apply_msg_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
     // pub(crate) multiraft_message_rx: Receiver<(
     //     MultiRaftMessage,
     //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
@@ -353,8 +354,7 @@ where
     // pub(crate) propose_rx: Receiver<ProposeMessage<W, R>>,
     // pub(crate) manage_rx: Receiver<ManageMessage>,
     // pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
-    pub(crate) commit_rx: UnboundedReceiver<ApplyCommitMessage>,
-    pub(crate) apply_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
+    // pub(crate) commit_rx: UnboundedReceiver<ApplyCommitRequest>,
     // pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultRequest>,
     // pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
     pub(crate) shared_states: GroupStates,
@@ -386,7 +386,7 @@ where
         // apply_response_rx: UnboundedReceiver<ApplyResultRequest>,
         // manage_rx: Receiver<ManageMessage>,
         event_chan: &EventChannel,
-        commit_rx: UnboundedReceiver<ApplyCommitMessage>,
+        // commit_rx: UnboundedReceiver<ApplyCommitRequest>,
         // group_query_rx: UnboundedReceiver<QueryGroup>,
         shared_states: GroupStates,
     ) -> Self {
@@ -395,7 +395,7 @@ where
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
-            rx,
+            node_msg_rx: rx,
             peer_msg_rx,
             // propose_rx,
             // campaign_rx,
@@ -403,9 +403,9 @@ where
             // manage_rx,
             storage: storage.clone(),
             transport: transport.clone(),
-            apply_tx: apply_request_tx,
+            apply_msg_tx: apply_request_tx,
             // apply_result_rx: apply_response_rx,
-            commit_rx,
+            // commit_rx,
             active_groups: HashSet::new(),
             replica_cache: ReplicaCache::new(storage.clone()),
             event_chan: event_chan.clone(),
@@ -492,7 +492,7 @@ where
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
 
-                Some(msg) = self.rx.recv() => self.handle_node_msg(msg).await,
+                Some(msg) = self.node_msg_rx.recv() => self.handle_node_msg(msg).await,
 
                 Some(msg) = self.peer_msg_rx.recv() => {
                     let res = self.handle_peer_msg(msg.msg).await;
@@ -517,7 +517,7 @@ where
 
                 // Some(res) = self.apply_result_rx.recv() =>  self.handle_apply_result(res).await,
 
-                Some(msg) = self.commit_rx.recv() => self.handle_apply_commit(msg).await,
+                // Some(msg) = self.commit_rx.recv() => self.handle_apply_commit(msg).await,
 
                 // Some(req) = self.propose_rx.recv() => if let Some(cb) = self.handle_propose(req) {
                 //     self.pending_responses.push_back(cb);
@@ -577,6 +577,7 @@ where
                 self.campaign_raft(msg.msg, msg.tx);
             }
             NodeMessage::ApplyResult(msg) => self.handle_apply_result(msg).await,
+            NodeMessage::ApplyCommit(msg) => self.handle_apply_commit(msg).await,
         }
     }
 
@@ -1275,10 +1276,10 @@ where
         );
     }
 
-    async fn handle_apply_commit(&mut self, commit: ApplyCommitMessage) {
+    async fn handle_apply_commit(&mut self, commit: ApplyCommitRequest) {
         match commit {
-            ApplyCommitMessage::None => return,
-            ApplyCommitMessage::Membership((commit, tx)) => {
+            ApplyCommitRequest::None => return,
+            ApplyCommitRequest::Membership((commit, tx)) => {
                 let res = self.commit_membership_change(commit).await;
                 self.pending_responses
                     .push_back(ResponseCallbackQueue::new_callback(tx, res))
@@ -1702,7 +1703,7 @@ where
     fn send_applys(&self, applys: HashMap<u64, ApplyData<RES>>) {
         let span = tracing::span::Span::current();
         if let Err(_err) = self
-            .apply_tx
+            .apply_msg_tx
             .send((span.clone(), ApplyMessage::Apply { applys }))
         {
             // FIXME: this should unreachable, because the lifetime of apply actor is bound to us.

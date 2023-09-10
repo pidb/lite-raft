@@ -42,7 +42,7 @@ use crate::utils::flexbuffer_deserialize;
 
 use super::error::ChannelError;
 use super::error::DeserializationError;
-use super::msg::ApplyCommitMessage;
+use super::msg::ApplyCommitRequest;
 use super::msg::ApplyData;
 use super::msg::ApplyMessage;
 use super::msg::ApplyResultRequest;
@@ -66,7 +66,7 @@ impl ApplyActor {
         node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
         // response_tx: UnboundedSender<ApplyResultRequest>,
-        commit_tx: UnboundedSender<ApplyCommitMessage>,
+        // commit_tx: UnboundedSender<ApplyCommitRequest>,
         stopped: Arc<AtomicBool>,
     ) -> Self
     where
@@ -84,7 +84,7 @@ impl ApplyActor {
             request_rx,
             node_msg_tx,
             // response_tx,
-            commit_tx,
+            // commit_tx,
         );
         tokio::spawn(async move {
             worker.main_loop(stopped).await;
@@ -268,18 +268,18 @@ where
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
         node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
         // response_tx: UnboundedSender<ApplyResultRequest>,
-        commit_tx: UnboundedSender<ApplyCommitMessage>,
+        // commit_tx: UnboundedSender<ApplyCommitRequest>,
     ) -> Self {
         Self {
             local_apply_states: HashMap::default(),
             node_id: cfg.node_id,
             cfg: cfg.clone(),
             rx: request_rx,
-            node_msg_tx,
+            node_msg_tx: node_msg_tx.clone(),
             // tx: response_tx,
             shared_states,
             storage,
-            delegate: ApplyDelegate::new(cfg.node_id, rsm, commit_tx),
+            delegate: ApplyDelegate::new(cfg.node_id, rsm, node_msg_tx),
             _m: PhantomData,
         }
     }
@@ -384,7 +384,8 @@ where
     node_id: u64,
     pending_senders: PendingSenderQueue<R>,
     rsm: RSM,
-    commit_tx: UnboundedSender<ApplyCommitMessage>,
+    // commit_tx: UnboundedSender<ApplyCommitRequest>,
+    node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
     _m1: PhantomData<W>,
     _m2: PhantomData<R>,
 }
@@ -395,12 +396,17 @@ where
     R: ProposeResponse,
     RSM: StateMachine<W, R>,
 {
-    fn new(node_id: u64, rsm: RSM, commit_tx: UnboundedSender<ApplyCommitMessage>) -> Self {
+    fn new(
+        node_id: u64,
+        rsm: RSM,
+        node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+        // commit_tx: UnboundedSender<ApplyCommitRequest>,
+    ) -> Self {
         Self {
             node_id,
             pending_senders: PendingSenderQueue::new(),
             rsm,
-            commit_tx,
+            node_msg_tx,
             _m1: PhantomData,
             _m2: PhantomData,
         }
@@ -484,8 +490,11 @@ where
         let (tx, rx) = oneshot::channel();
 
         if let Err(_) = self
-            .commit_tx
-            .send(ApplyCommitMessage::Membership((commit, tx)))
+            .node_msg_tx
+            .send(NodeMessage::ApplyCommit(ApplyCommitRequest::Membership((
+                commit, tx,
+            ))))
+            .await
         {
             return Err(Error::Channel(ChannelError::ReceiverClosed(
                 "node actor dropped".to_owned(),
@@ -840,7 +849,7 @@ mod test {
     ) -> ApplyWorker<(), (), NoOpStateMachine, MemStorage, MultiRaftMemoryStorage> {
         let (_request_tx, request_rx) = unbounded_channel();
         let (response_tx, _response_rx) = mpsc::channel_wrap(-1);
-        let (callback_tx, _callback_rx) = unbounded_channel();
+        // let (callback_tx, _callback_rx) = unbounded_channel();
         let cfg = Config {
             batch_apply,
             batch_size,
@@ -857,7 +866,7 @@ mod test {
             shared_states,
             request_rx,
             response_tx,
-            callback_tx,
+            // callback_tx,
         )
     }
     #[test]
