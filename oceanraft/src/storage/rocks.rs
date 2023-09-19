@@ -780,15 +780,14 @@ mod storage {
             let high = std::cmp::min(high, log_meta.last_index + 1);
 
             let mut ents = Vec::with_capacity((high - low) as usize);
-            let log_cf = DBEnv::get_log_cf(&self.db); // TODO handle error
+            let log_cf = DBEnv::get_log_cf(&self.db);
             let start_key = DBEnv::format_entry_key(self.group_id, low);
             let iter_mode = IteratorMode::From(start_key.as_bytes(), rocksdb::Direction::Forward);
             let mut readopts = ReadOptions::default();
             readopts.set_ignore_range_deletions(true); // skip delete_range to improve read performance
-                                                       // TODO: handle if temporaily unavailable
-            let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
 
             // iterator enteris from [low, high)
+            let iter = self.db.iterator_cf_opt(&log_cf, readopts, iter_mode);
             let mut next = low;
             for ent in iter {
                 if next == high {
@@ -796,12 +795,14 @@ mod storage {
                 }
 
                 let next_key = DBEnv::format_entry_key(self.group_id, next);
-                let (key_data, value_data) = ent.unwrap();
-                if next_key.as_bytes() != key_data.as_ref() {
+                let (key_data, value_data) = ent.map_err(|err| {
+                    self.to_read_err(err, true, false, "entries: iter for entry".into())
+                })?;
+                if next_key.as_bytes() != &*key_data {
                     break;
                 }
 
-                let ent = Entry::decode(value_data.as_ref())
+                let ent = Entry::decode(&*value_data)
                     .expect(format!("prase error {:?}", value_data).as_str()); // TODO: handle error
                 ents.push(ent);
                 next += 1;
@@ -813,6 +814,7 @@ mod storage {
         }
 
         fn term(&self, idx: u64) -> RaftResult<u64> {
+            // if snapshot meta exists, first get from snapshot meta
             let snap_meta = self.get_snapshot_metadata().unwrap(); // already initialized
             if idx == snap_meta.index {
                 return Ok(snap_meta.term);

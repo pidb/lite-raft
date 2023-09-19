@@ -446,25 +446,40 @@ where
         let mut ready = write.ready.take().unwrap();
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot().clone();
-            debug!("node {}: install snapshot {:?}", node_id, snapshot);
+            tracing::debug!(
+                "node {}: group {} start install snapshot",
+                node_id,
+                group_id
+            );
             // FIXME: call add voters to track node, node mgr etc.
             // TODO: consider move install_snapshot to async queues.
             gs.install_snapshot(snapshot)?;
+            tracing::debug!("node {}: group {} install snapshot done", node_id, group_id);
         }
 
         if !ready.entries().is_empty() {
             let entries = ready.take_entries();
-            debug!(
-                "node {}: append entries [{}, {}]",
+            let (start, end) = (entries[0].index, entries[entries.len() - 1].index);
+            tracing::debug!(
+                "node {}: group {} start append entries [{}, {}]",
                 node_id,
-                entries[0].index,
-                entries[entries.len() - 1].index
+                group_id,
+                start,
+                end
             );
 
             // If append fails due to temporary storage unavailability,
             // we will try again later.
             gs.append(&entries)?;
+            tracing::debug!(
+                "node {}: group {} append entries [{}, {}] done",
+                node_id,
+                group_id,
+                start,
+                end
+            );
         }
+
         if let Some(hs) = ready.hs() {
             gs.set_hardstate(hs.clone())?
         }
