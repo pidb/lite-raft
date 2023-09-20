@@ -27,7 +27,7 @@ async fn main() {
     let mut server = server::KVServer::new(arg).await;
     server.event_consumer();
     server.start();
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // tokio::time::sleep(Duration::from_secs(5)).await;
     if server.node_id == 1 {
         let mut members = vec![];
         for (peer_id, _) in server.peers.iter() {

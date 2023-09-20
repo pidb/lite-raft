@@ -1,20 +1,5 @@
+use anyhow::anyhow;
 use std::collections::HashMap;
-
-pub fn parse_nodes(
-    nodes: &str,
-) -> Result<HashMap<u64, String>, Box<dyn std::error::Error + Send + Sync + 'static>> {
-    let iter = nodes.split(',');
-    let mut nodes = HashMap::new();
-    for s in iter {
-        if let Some(pos) = s.find('=') {
-            let (k, v) = (s[..pos].parse()?, s[pos + 1..].parse()?);
-            nodes.insert(k, v);
-        }
-    }
-
-    Ok(nodes)
-}
-
 
 /// Define server command args
 #[derive(clap::Parser, Debug, Clone)]
@@ -42,22 +27,20 @@ pub struct ServerArgs {
 }
 
 impl ServerArgs {
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         if self.node_id == 0 {
-            return Err("node_id must be more than 0".to_string());
+            return Err(anyhow!("node_id must be more than 0"));
         }
 
         if self.addr.is_empty() {
-            return Err("addr must be not empty".to_string());
+            return Err(anyhow!("addr must be not empty"));
         }
 
         if let Err(_) = self.addr.parse::<std::net::SocketAddr>() {
-            return Err(format!("{} is not valid network addr", self.addr));
+            return Err(anyhow!("{} is not valid network addr", self.addr));
         }
 
-        if let Err(err) = parse_nodes(&self.nodes) {
-            return Err(err.to_string());
-        }
+        let _ = parse_nodes(&self.nodes)?;
 
         Ok(())
     }
@@ -84,3 +67,15 @@ impl ClientArgs {
     }
 }
 
+pub fn parse_nodes(nodes: &str) -> anyhow::Result<HashMap<u64, String>> {
+    let iter = nodes.split(',');
+    let mut nodes = HashMap::new();
+    for s in iter {
+        if let Some(pos) = s.find('=') {
+            let (k, v) = (s[..pos].parse()?, s[pos + 1..].parse()?);
+            nodes.insert(k, v);
+        }
+    }
+
+    Ok(nodes)
+}

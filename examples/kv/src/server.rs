@@ -4,6 +4,7 @@ use std::hash::Hash;
 use std::hash::Hasher;
 use std::sync::Arc;
 
+use anyhow::anyhow;
 use oceanraft::prelude::CreateGroupRequest;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
@@ -16,7 +17,6 @@ use oceanraft::transport::MultiRaftServiceImpl;
 use oceanraft::transport::MultiRaftServiceServer;
 use oceanraft::Config;
 use oceanraft::MultiRaft;
-
 use tokio::task::JoinHandle;
 use tonic::transport::Server;
 use tonic::Request;
@@ -109,22 +109,29 @@ pub struct KVServer {
 }
 
 impl KVServer {
-    pub async fn new(arg: ServerArgs) -> Self {
-        let peers = Arc::new(parse_nodes(&arg.nodes).unwrap());
+    pub async fn new(arg: ServerArgs) -> anyhow::Result<Self> {
+        let peers = Arc::new(parse_nodes(&arg.nodes)?);
         let mut cfg = Config::default();
         cfg.node_id = arg.node_id;
         cfg.tick_interval = 100;
 
         let kv_storage = MemKvStorage::new();
+
+        // create multiraft storage
         let rock_storage = RockStore::new(
             arg.node_id,
             &arg.log_storage_path,
             kv_storage.clone(),
             kv_storage.clone(),
         );
+
+        // create multiraft bussiness statemachine
         let kv_state_machine = KVStateMachine::new(rock_storage.clone(), kv_storage.clone());
 
+        // create multiraft transport
         let grpc_transport = GRPCTransport::new(peers.clone());
+
+        // create multiraft instance
         let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new(
             cfg,
             grpc_transport,
@@ -132,7 +139,7 @@ impl KVServer {
             kv_state_machine,
             None,
         )
-        .unwrap();
+        .map_err(|err| anyhow!("{}", err))?;
 
         let node_id = arg.node_id;
         let server = Self {
@@ -204,24 +211,28 @@ impl KVServer {
         server
     }
 
-    // pub async fn add_members(&self, multiraft: &Weak<MultiRaft<KVAppType, GRPCTransport>>, storage: &RockStore<SledStorage, SledStorage>, group_id: u64, members: Vec<(u64, u64)>) {
-    //     storage
-
-    //     let mut data = MembershipChangeData::default();
-    //     for (node_id, replica_id) in members.iter() {
-    //         let mut change = SingleMembershipChange::default();
-    //         change.set_node_id(*node_id);
-    //         change.set_replica_id(*replica_id);
-    //         change.set_change_type(ConfChangeType::AddNode);
-    //         data.changes.push(change);
-    //     }
-    //     let term = None;
-    //     let context = None;
-    //     self.multiraft
-    //         .membership(group_id, term, context, data)
-    //         .await
-    //         .unwrap();
-    // }
+    pub async fn add_members(
+        &self,
+        multiraft: &Weak<MultiRaft<KVAppType, GRPCTransport>>,
+        storage: &RockStore<SledStorage, SledStorage>,
+        group_id: u64,
+        members: Vec<(u64, u64)>,
+    ) {
+        let mut data = MembershipChangeData::default();
+        for (node_id, replica_id) in members.iter() {
+            let mut change = SingleMembershipChange::default();
+            change.set_node_id(*node_id);
+            change.set_replica_id(*replica_id);
+            change.set_change_type(ConfChangeType::AddNode);
+            data.changes.push(change);
+        }
+        let term = None;
+        let context = None;
+        self.multiraft
+            .membership(group_id, term, context, data)
+            .await
+            .unwrap();
+    }
 
     pub fn event_consumer(&self) {
         let rx = self.multiraft.subscribe();
@@ -244,6 +255,7 @@ impl KVServer {
 
     /// Start server in spearted tokio task.
     pub fn start(&mut self) {
+        self.multiraft.start();
         self.start_server();
     }
 
