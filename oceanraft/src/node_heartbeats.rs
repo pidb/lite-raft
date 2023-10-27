@@ -127,7 +127,11 @@ where
                 fanouted_groups += 1;
                 self.active_groups.insert(*group_id);
 
-                if group.leader.node_id != from_node_id || msg.from_node == self.node_id {
+                if group.leader.node_id != from_node_id {
+                    continue;
+                }
+
+                if msg.from_node == self.node_id {
                     continue;
                 }
 

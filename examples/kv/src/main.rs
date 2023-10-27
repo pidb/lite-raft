@@ -10,8 +10,6 @@ pub mod grpc {
     tonic::include_proto!("kv");
 }
 
-use std::time::Duration;
-
 use args::ServerArgs;
 use clap::Parser;
 use oceanraft::log;
@@ -24,7 +22,7 @@ async fn main() {
         panic!("{}", reason)
     }
 
-    let mut server = server::KVServer::new(arg).await;
+    let mut server = server::KVServer::new(arg).await.unwrap();
     server.event_consumer();
     server.start();
     // tokio::time::sleep(Duration::from_secs(5)).await;

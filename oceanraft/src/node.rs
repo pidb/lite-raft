@@ -741,7 +741,16 @@ where
         &mut self,
         mut msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
+        println!(
+            "node {}: handle_raft_message {:?}",
+            self.node_id,
+            msg.get_msg().msg_type()
+        );
         if !self.groups.contains_key(&msg.group_id) {
+            println!(
+                "node {}: from group {} not exists",
+                self.node_id, msg.group_id
+            );
             let msg = msg.clone();
             let raft_msg = msg.msg.as_ref().expect("why message missing raft msg");
             // TODO: if group mark deleted, we need return error

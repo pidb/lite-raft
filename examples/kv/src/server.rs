@@ -132,7 +132,7 @@ impl KVServer {
         let grpc_transport = GRPCTransport::new(peers.clone());
 
         // create multiraft instance
-        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new(
+        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::spawn(
             cfg,
             grpc_transport,
             rock_storage.clone(),
@@ -208,31 +208,31 @@ impl KVServer {
             }
         }
 
-        server
+        Ok(server)
     }
 
-    pub async fn add_members(
-        &self,
-        multiraft: &Weak<MultiRaft<KVAppType, GRPCTransport>>,
-        storage: &RockStore<SledStorage, SledStorage>,
-        group_id: u64,
-        members: Vec<(u64, u64)>,
-    ) {
-        let mut data = MembershipChangeData::default();
-        for (node_id, replica_id) in members.iter() {
-            let mut change = SingleMembershipChange::default();
-            change.set_node_id(*node_id);
-            change.set_replica_id(*replica_id);
-            change.set_change_type(ConfChangeType::AddNode);
-            data.changes.push(change);
-        }
-        let term = None;
-        let context = None;
-        self.multiraft
-            .membership(group_id, term, context, data)
-            .await
-            .unwrap();
-    }
+    // pub async fn add_members(
+    //     &self,
+    //     multiraft: &Weak<MultiRaft<KVAppType, GRPCTransport>>,
+    //     storage: &RockStore<SledStorage, SledStorage>,
+    //     group_id: u64,
+    //     members: Vec<(u64, u64)>,
+    // ) {
+    //     let mut data = MembershipChangeData::default();
+    //     for (node_id, replica_id) in members.iter() {
+    //         let mut change = SingleMembershipChange::default();
+    //         change.set_node_id(*node_id);
+    //         change.set_replica_id(*replica_id);
+    //         change.set_change_type(ConfChangeType::AddNode);
+    //         data.changes.push(change);
+    //     }
+    //     let term = None;
+    //     let context = None;
+    //     self.multiraft
+    //         .membership(group_id, term, context, data)
+    //         .await
+    //         .unwrap();
+    // }
 
     pub fn event_consumer(&self) {
         let rx = self.multiraft.subscribe();
@@ -240,7 +240,7 @@ impl KVServer {
             loop {
                 let event = match rx.recv().await {
                     Err(_error) => break,
-                    Ok(event) => event,
+                    Ok(e) => e,
                 };
 
                 match event {
@@ -255,7 +255,7 @@ impl KVServer {
 
     /// Start server in spearted tokio task.
     pub fn start(&mut self) {
-        self.multiraft.start();
+        // self.multiraft.start();
         self.start_server();
     }
 

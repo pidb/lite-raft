@@ -3,6 +3,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use futures::Future;
 use serde::Deserialize;
@@ -128,13 +129,13 @@ where
     cfg: Config,
     node_id: u64,
     stopped: Arc<AtomicBool>,
-    actor: RefCell<Option<NodeActor<T::D, T::R>>>,
+    actor: Mutex<Option<NodeActor<T::D, T::R>>>,
     shared_states: GroupStates,
     event_bcast: EventChannel,
     storage: T::MS,
     transport: TR,
-    state_machine: RefCell<Option<T::M>>,
-    ticker: RefCell<Option<Box<dyn Ticker>>>,
+    state_machine: Mutex<Option<T::M>>,
+    ticker: Mutex<Option<Box<dyn Ticker>>>,
     _m1: PhantomData<TR>,
 }
 
@@ -160,11 +161,11 @@ where
             cfg,
             transport,
             storage,
-            state_machine: RefCell::new(Some(state_machine)),
-            ticker: RefCell::new(ticker),
+            state_machine: Mutex::new(Some(state_machine)),
+            ticker: Mutex::new(ticker),
             node_id,
             event_bcast,
-            actor: RefCell::new(None),
+            actor: Mutex::new(None),
             shared_states: states,
             stopped,
             _m1: PhantomData,
@@ -172,8 +173,15 @@ where
     }
 
     pub fn start(&self) {
-        let state_machine = self.state_machine.borrow_mut().take().unwrap();
-        let ticker = self.ticker.borrow_mut().take();
+        let state_machine = {
+            let mut state_machine = self.state_machine.lock().expect("lock state_machine");
+            state_machine.take().expect("state_machine is none")
+        };
+
+        let ticker = {
+            let mut ticker = self.ticker.lock().expect("lock ticker");
+            ticker.take()
+        };
         let actor = NodeActor::spawn(
             &self.cfg,
             &self.transport,
@@ -184,7 +192,8 @@ where
             self.shared_states.clone(),
             self.stopped.clone(),
         );
-        self.actor.replace(Some(actor));
+
+        self.actor.lock().expect("lock actor").replace(actor);
     }
 
     pub fn spawn(
@@ -214,11 +223,11 @@ where
             cfg,
             transport,
             storage,
-            state_machine: RefCell::new(None),
-            ticker: RefCell::new(None),
+            state_machine: Mutex::new(None),
+            ticker: Mutex::new(None),
             node_id,
             event_bcast,
-            actor: RefCell::new(Some(actor)),
+            actor: Mutex::new(Some(actor)),
             shared_states: states,
             stopped,
             _m1: PhantomData,
@@ -314,10 +323,11 @@ where
             context,
             tx,
         });
-        self.actor
-            .borrow()
+
+        let mut actor = self.actor.lock().expect("lock actor");
+        actor
             .as_ref()
-            .unwrap()
+            .expect("actor is none")
             .try_send_node_msg(msg)?;
 
         Ok(rx)
@@ -394,10 +404,10 @@ where
         };
 
         let msg = NodeMessage::Membership(request);
-        self.actor
-            .borrow()
+        let actor = self.actor.lock().expect("lock actor");
+        actor
             .as_ref()
-            .unwrap()
+            .expect("actor is none")
             .try_send_node_msg(msg)?;
         Ok(rx)
         // match self
@@ -484,12 +494,13 @@ where
             },
             tx,
         });
-        let _ = self
-            .actor
-            .borrow()
+
+        let actor = self.actor.lock().expect("lock actor");
+        actor
             .as_ref()
-            .unwrap()
+            .expect("actor is none")
             .try_send_node_msg(msg)?;
+
         Ok(rx)
         // match self.actor.borrow().as_ref().unwrap().node_msg_tx.try_send(
         //     NodeMessage::ReadIndexData(ReadIndexRequest {
@@ -533,11 +544,11 @@ where
     /// campaign receiver stop, `Error` is returned.
     pub fn campaign_group_non_block(&self, group_id: u64) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
+        let actor = self.actor.lock().expect("lock actor");
         if let Err(_) =
-            self.actor
-                .borrow()
+            actor
                 .as_ref()
-                .unwrap()
+                .expect("actor is none")
                 .try_send_node_msg(NodeMessage::Campaign(MessageWithNotify {
                     msg: group_id,
                     tx,
@@ -572,11 +583,12 @@ where
     }
 
     fn management_request(&self, msg: NodeMessage<T::D, T::R>) -> Result<(), Error> {
-        self.actor
-            .borrow()
+        let actor = self.actor.lock().expect("lock actor");
+        actor
             .as_ref()
-            .unwrap()
+            .expect("actor is none")
             .try_send_node_msg(msg)?;
+
         Ok(())
         // match self
         //     .actor
@@ -610,8 +622,9 @@ where
 
     #[inline]
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
+        let actor = self.actor.lock().expect("lock actor");
         MultiRaftMessageSenderImpl {
-            tx: self.actor.borrow().as_ref().unwrap().peer_msg_tx.clone(),
+            tx: actor.as_ref().expect("actor is none").peer_msg_tx.clone(),
         }
     }
 

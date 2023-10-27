@@ -677,11 +677,11 @@ where
         let next_index = self.last_index() + 1;
 
         let res = if request.data.changes.len() == 1 {
-            let (ctx, cc) = to_cc(request.data, request.context);
+            let (ctx, cc) = to_cc(request.data, request.context); // TODO: move to proto
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
-            let (ctx, cc) = to_ccv2(request.data, request.context);
+            let (ctx, cc) = to_ccv2(request.data, request.context); // TODO: move to proto and use into
             self.raft_group.propose_conf_change(ctx, cc)
         };
 

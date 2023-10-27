@@ -30,11 +30,11 @@ for ((i=0; i<$FLAGS_server_num; ++i)); do
         --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
         --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1))
     
-    $mydir/../../../target/debug/oceanraft-kv-example \
-        --node-id=$((i+1)) \
-        --addr=${FLAGS_host}:$((${FLAGS_port}+i)) \
-        --nodes=${nodes} \
-        --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
-        --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1)) &
+    # $mydir/../../../target/debug/oceanraft-kv-example \
+    #     --node-id=$((i+1)) \
+    #     --addr=${FLAGS_host}:$((${FLAGS_port}+i)) \
+    #     --nodes=${nodes} \
+    #     --log-storage-path=${FLAGS_path}/oceanraft_runtime/log_$((i+1)) \
+    #     --kv-storage-path=${FLAGS_path}/oceanraft_runtime/kv_$((i+1)) &
 done
 echo $nodes
