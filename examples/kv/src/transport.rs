@@ -6,11 +6,11 @@ use oceanraft::transport::{MultiRaftServiceClient, Transport};
 
 #[derive(Clone)]
 pub struct GRPCTransport {
-    peers: Arc<HashMap<u64, String>>,
+    peers: Arc<Vec<(u64, String)>>,
 }
 
 impl GRPCTransport {
-    pub fn new(peers: Arc<HashMap<u64, String>>) -> Self {
+    pub fn new(peers: Arc<Vec<(u64, String)>>) -> Self {
         Self { peers }
     }
 }
@@ -18,7 +18,13 @@ impl GRPCTransport {
 impl Transport for GRPCTransport {
     fn send(&self, msg: MultiRaftMessage) -> Result<(), oceanraft::Error> {
         let to = msg.to_node;
-        let addr = self.peers.get(&to).unwrap().to_string();
+        let addr = self
+            .peers
+            .iter()
+            .find(|(id, _)| *id == to)
+            .unwrap()
+            .1
+            .clone();
 
         tokio::spawn(async move {
             let client = MultiRaftServiceClient::connect(addr.to_string()).await;

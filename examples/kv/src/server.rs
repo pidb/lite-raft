@@ -6,7 +6,10 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use oceanraft::prelude::CreateGroupRequest;
+use oceanraft::prelude::MembershipChangeData;
+use oceanraft::prelude::RaftState;
 use oceanraft::prelude::ReplicaDesc;
+use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::Snapshot;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::RockStore;
@@ -96,12 +99,14 @@ fn partition(key: &str, partition: u64) -> u64 {
 pub struct KVServer {
     arg: ServerArgs,
 
-    pub node_id: u64,
+    node_id: u64,
 
     // Mapping nodes to network addr.
-    pub peers: Arc<HashMap<u64, String>>,
+    peers: Arc<Vec<(u64, String)>>,
 
     kv_storage: MemKvStorage,
+
+    log_storage: RockStore<MemKvStorage, MemKvStorage>,
 
     multiraft: Arc<MultiRaft<KVAppType, GRPCTransport>>,
 
@@ -132,7 +137,7 @@ impl KVServer {
         let grpc_transport = GRPCTransport::new(peers.clone());
 
         // create multiraft instance
-        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::spawn(
+        let multiraft = MultiRaft::<KVAppType, GRPCTransport>::new(
             cfg,
             grpc_transport,
             rock_storage.clone(),
@@ -147,92 +152,228 @@ impl KVServer {
             peers: peers.clone(),
             node_id,
             kv_storage,
+            log_storage: rock_storage.clone(),
             multiraft: Arc::new(multiraft),
             jh: None,
         };
+        // // TODO: get from args
+        // let groups = 3;
+        // // every node initial replica desc
+        // if let Some((first_peer, _)) = peers.iter().next() {
+        //     if *first_peer == arg.node_id {
+        //         for group_id in 1..=groups {
+        //             let replica_id = group_id;
+        //             let voters = vec![replica_id];
+        //             let replicas = vec![ReplicaDesc {
+        //                 node_id: *first_peer,
+        //                 group_id,
+        //                 replica_id,
+        //             }];
+        //             let gs = rock_storage
+        //                 .group_storage(group_id, replica_id)
+        //                 .await
+        //                 .unwrap();
+        //             if !gs.initial_state().unwrap().initialized() {
+        //                 println!(
+        //                     "node {}: create replica({}) of group({}) initial voters({:?})",
+        //                     node_id, replica_id, group_id, voters
+        //                 );
+        //                 let mut snap = Snapshot::default();
+        //                 snap.mut_metadata().mut_conf_state().voters = voters.clone();
+        //                 snap.mut_metadata().index = 1;
+        //                 snap.mut_metadata().term = 1;
+        //                 gs.install_snapshot(snap).unwrap();
 
-        // every node initial replica desc
-        let mut replicas = vec![];
-        for (peer_id, _) in peers.iter() {
-            let node_id = *peer_id;
-            let replica_id = *peer_id;
-            for (group_id, _) in peers.iter() {
-                let replica_desc = ReplicaDesc {
-                    node_id,
-                    group_id: *group_id,
-                    replica_id,
-                };
+        //                 if let Err(err) = server
+        //                     .multiraft
+        //                     .create_group(CreateGroupRequest {
+        //                         group_id,
+        //                         replica_id,
+        //                         replicas: replicas.clone(),
+        //                         applied_hint: 0,
+        //                     })
+        //                     .await
+        //                 {
+        //                     println!("{}", err)
+        //                 }
+        //             }
+        //         }
+        //     }
+        // }
 
-                println!(
-                    "group({}) initial replica_desc({:?})",
-                    group_id, replica_desc
-                );
-                replicas.push(replica_desc.clone());
-                rock_storage
-                    .set_replica_desc(*group_id, replica_desc)
-                    .await
-                    .unwrap();
-            }
-        }
+        // let mut replicas = vec![];
+        // for (peer_id, _) in peers.iter() {
+        //     let node_id = *peer_id;
+        //     let replica_id = *peer_id;
+        //     for (group_id, _) in peers.iter() {
+        //         let replica_desc = ReplicaDesc {
+        //             node_id,
+        //             group_id: *group_id,
+        //             replica_id,
+        //         };
 
-        let replica_id = node_id;
-        let voters = (1..=peers.len() as u64).collect::<Vec<_>>();
-        for group_id in 1..=peers.len() as u64 {
-            let gs = rock_storage
-                .group_storage(group_id, replica_id)
-                .await
-                .unwrap();
-            if !gs.initial_state().unwrap().initialized() {
-                println!(
-                    "node {}: create replica({}) of group({}) initial voters({:?})",
-                    node_id, replica_id, group_id, voters
-                );
-                let mut snap = Snapshot::default();
-                snap.mut_metadata().mut_conf_state().voters = voters.clone();
-                snap.mut_metadata().index = 1;
-                snap.mut_metadata().term = 1;
-                gs.install_snapshot(snap).unwrap();
+        //         println!(
+        //             "group({}) initial replica_desc({:?})",
+        //             group_id, replica_desc
+        //         );
+        //         replicas.push(replica_desc.clone());
+        //         rock_storage
+        //             .set_replica_desc(*group_id, replica_desc)
+        //             .await
+        //             .unwrap();
+        //     }
+        // }
 
-                if let Err(err) = server
-                    .multiraft
-                    .create_group(CreateGroupRequest {
-                        group_id,
-                        replica_id,
-                        replicas: replicas.clone(),
-                        applied_hint: 0,
-                    })
-                    .await
-                {
-                    println!("{}", err)
-                }
-            }
-        }
+        // let replica_id = node_id;
+        // let voters = (1..=peers.len() as u64).collect::<Vec<_>>();
+        // for group_id in 1..=peers.len() as u64 {
+        //     let gs = rock_storage
+        //         .group_storage(group_id, replica_id)
+        //         .await
+        //         .unwrap();
+        //     if !gs.initial_state().unwrap().initialized() {
+        //         println!(
+        //             "node {}: create replica({}) of group({}) initial voters({:?})",
+        //             node_id, replica_id, group_id, voters
+        //         );
+        //         let mut snap = Snapshot::default();
+        //         snap.mut_metadata().mut_conf_state().voters = voters.clone();
+        //         snap.mut_metadata().index = 1;
+        //         snap.mut_metadata().term = 1;
+        //         gs.install_snapshot(snap).unwrap();
+
+        //         if let Err(err) = server
+        //             .multiraft
+        //             .create_group(CreateGroupRequest {
+        //                 group_id,
+        //                 replica_id,
+        //                 replicas: replicas.clone(),
+        //                 applied_hint: 0,
+        //             })
+        //             .await
+        //         {
+        //             println!("{}", err)
+        //         }
+        //     }
+        // }
 
         Ok(server)
     }
 
-    // pub async fn add_members(
-    //     &self,
-    //     multiraft: &Weak<MultiRaft<KVAppType, GRPCTransport>>,
-    //     storage: &RockStore<SledStorage, SledStorage>,
-    //     group_id: u64,
-    //     members: Vec<(u64, u64)>,
-    // ) {
-    //     let mut data = MembershipChangeData::default();
-    //     for (node_id, replica_id) in members.iter() {
-    //         let mut change = SingleMembershipChange::default();
-    //         change.set_node_id(*node_id);
-    //         change.set_replica_id(*replica_id);
-    //         change.set_change_type(ConfChangeType::AddNode);
-    //         data.changes.push(change);
-    //     }
-    //     let term = None;
-    //     let context = None;
-    //     self.multiraft
-    //         .membership(group_id, term, context, data)
-    //         .await
-    //         .unwrap();
-    // }
+    async fn init_groups(&self) {
+        // TODO: get from args
+        let groups = 3;
+        // every node initial replica desc
+        if let Some((first_peer, _)) = self.peers.iter().next() {
+            println!("first_peer = {}", first_peer);
+            if *first_peer == self.node_id {
+                let replica_id = *first_peer;
+                for group_id in 1..=groups {
+                    let voters = vec![replica_id];
+                    let replicas = vec![ReplicaDesc {
+                        node_id: *first_peer,
+                        group_id,
+                        replica_id,
+                    }];
+                    println!(
+                        "node {}: create replica({}) of group({}) initial voters({:?})",
+                        self.node_id, replica_id, group_id, voters
+                    );
+                    let gs = self
+                        .log_storage
+                        .group_storage(group_id, replica_id)
+                        .await
+                        .unwrap();
+                    if !gs.initial_state().unwrap().initialized() {
+                        println!(
+                            "node {}: create replica({}) of group({}) initial voters({:?})",
+                            self.node_id, replica_id, group_id, voters
+                        );
+                        let mut snap = Snapshot::default();
+                        snap.mut_metadata().mut_conf_state().voters = voters.clone();
+                        snap.mut_metadata().index = 1;
+                        snap.mut_metadata().term = 1;
+                        gs.install_snapshot(snap).unwrap();
+
+                        if let Err(err) = self
+                            .multiraft
+                            .create_group(CreateGroupRequest {
+                                group_id,
+                                replica_id,
+                                replicas: replicas.clone(),
+                                applied_hint: 0,
+                            })
+                            .await
+                        {
+                            println!("{}", err)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn add_member(
+        &self,
+        node_id: u64,
+        group_id: u64,
+        replica_id: u64,
+    ) -> anyhow::Result<(KVResponse, Option<Vec<u8>>)> {
+        let mut data = MembershipChangeData::default();
+        data.changes.push({
+            let mut change = SingleMembershipChange::default();
+            change.set_node_id(node_id);
+            change.set_replica_id(replica_id);
+            change.set_change_type(oceanraft::prelude::ConfChangeType::AddNode);
+            change
+        });
+
+        let term = None;
+        let context = None;
+        self.multiraft
+            .membership(group_id, term, context, data)
+            .await
+            .map_err(|err| anyhow!("{}", err))
+    }
+
+    pub async fn add_members(&self) -> anyhow::Result<()> {
+        let first_peer = match self.peers.iter().next() {
+            Some((first_peer, _)) => *first_peer,
+            None => return Ok(()),
+        };
+
+        if first_peer != self.node_id {
+            return Ok(());
+        }
+
+        let groups = self.get_group_number();
+        for (node_id, _) in self.peers.iter().skip(1) {
+            let replica_id = *node_id;
+            for group_id in 1..=groups {
+                let gs = self
+                    .log_storage
+                    .group_storage(group_id as u64, first_peer)
+                    .await
+                    .unwrap();
+                // already added memebr
+                let init_state: RaftState = gs.initial_state().unwrap();
+                if init_state.conf_state.voters.contains(&replica_id)
+                    || init_state.conf_state.voters_outgoing.contains(&replica_id)
+                {
+                    continue;
+                }
+
+                println!(
+                    "node({}) add member({}) to group({})",
+                    node_id, replica_id, group_id
+                );
+                self.add_member(*node_id, group_id as u64, replica_id)
+                    .await
+                    .unwrap();
+            }
+        }
+        Ok(())
+    }
 
     pub fn event_consumer(&self) {
         let rx = self.multiraft.subscribe();
@@ -254,9 +395,23 @@ impl KVServer {
     }
 
     /// Start server in spearted tokio task.
-    pub fn start(&mut self) {
-        // self.multiraft.start();
+    pub async fn start(&mut self) {
+        self.multiraft.start();
+        self.init_groups().await;
+        println!("node {} start", self.node_id);
         self.start_server();
+    }
+
+    pub fn get_peers(&self) -> Arc<Vec<(u64, String)>> {
+        self.peers.clone()
+    }
+
+    pub fn get_group_number(&self) -> usize {
+        3 // TODO: get from args
+    }
+
+    pub fn get_node_id(&self) -> u64 {
+        self.node_id
     }
 
     fn start_server(&mut self) {

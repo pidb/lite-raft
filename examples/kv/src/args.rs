@@ -67,13 +67,13 @@ impl ClientArgs {
     }
 }
 
-pub fn parse_nodes(nodes: &str) -> anyhow::Result<HashMap<u64, String>> {
+pub fn parse_nodes(nodes: &str) -> anyhow::Result<Vec<(u64, String)>> {
     let iter = nodes.split(',');
-    let mut nodes = HashMap::new();
+    let mut nodes = Vec::new();
     for s in iter {
         if let Some(pos) = s.find('=') {
             let (k, v) = (s[..pos].parse()?, s[pos + 1..].parse()?);
-            nodes.insert(k, v);
+            nodes.push((k, v));
         }
     }
 

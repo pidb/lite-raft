@@ -532,7 +532,7 @@ where
 
     fn pre_propose_write<WD: ProposeRequest>(
         &mut self,
-        write_data: &WriteRequest<WD, RES>,
+        request: &WriteRequest<WD, RES>,
     ) -> Result<(), Error> {
         // if write_data.data.is_empty() {
         //     return Err(Error::BadParameter(
@@ -549,9 +549,9 @@ where
             }));
         }
 
-        if write_data.term != 0 && self.term() > write_data.term {
+        if request.term != 0 && self.term() > request.term {
             return Err(Error::Propose(ProposeError::Stale(
-                write_data.term,
+                request.term,
                 self.term(),
             )));
         }
@@ -559,36 +559,30 @@ where
         Ok(())
     }
 
-    pub fn propose_write<WD: ProposeRequest>(
+    pub fn propose_write<REQ: ProposeRequest>(
         &mut self,
-        write_request: WriteRequest<WD, RES>,
+        request: WriteRequest<REQ, RES>,
     ) -> Option<ResponseCallback> {
-        if let Err(err) = self.pre_propose_write(&write_request) {
-            return Some(ResponseCallbackQueue::new_error_callback(
-                write_request.tx,
-                err,
-            ));
+        if let Err(err) = self.pre_propose_write(&request) {
+            return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
         }
 
         let term = self.term();
-        let data = match flexbuffer_serialize(&write_request.data) {
+
+        // serialize propose data
+        let data = match flexbuffer_serialize(&request.propose) {
             Err(err) => {
-                return Some(ResponseCallbackQueue::new_error_callback(
-                    write_request.tx,
-                    err,
-                ));
+                return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
             }
             Ok(mut ser) => ser.take_buffer(),
         };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
-        if let Err(err) = self.raft_group.propose(
-            write_request.context.map_or(vec![], |ctx_data| ctx_data),
-            data,
-        ) {
+        let context = request.context.map_or(vec![], |ctx_data| ctx_data);
+        if let Err(err) = self.raft_group.propose(context, data) {
             return Some(ResponseCallbackQueue::new_error_callback(
-                write_request.tx,
+                request.tx,
                 Error::Raft(err),
             ));
         }
@@ -596,7 +590,7 @@ where
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
-                write_request.tx,
+                request.tx,
                 Error::Propose(ProposeError::UnexpectedIndex {
                     node_id: self.node_id,
                     group_id: self.group_id,
@@ -607,14 +601,15 @@ where
             ));
         }
 
+        // save proposal to queue
         let proposal = Proposal {
             index: next_index,
             term,
             is_conf_change: false,
-            tx: Some(write_request.tx),
+            tx: Some(request.tx),
         };
-
         self.proposals.push(proposal);
+
         None
     }
 

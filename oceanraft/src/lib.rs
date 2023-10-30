@@ -710,7 +710,7 @@ mod msg;
 mod multiraft;
 // mod multiraft_handle;
 mod node;
-// mod node_handle;
+mod node_handle;
 mod node_heartbeats;
 mod proposal;
 mod replica_cache;

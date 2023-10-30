@@ -24,22 +24,10 @@ async fn main() {
 
     let mut server = server::KVServer::new(arg).await.unwrap();
     server.event_consumer();
-    server.start();
-    // tokio::time::sleep(Duration::from_secs(5)).await;
-    if server.node_id == 1 {
-        let mut members = vec![];
-        for (peer_id, _) in server.peers.iter() {
-            if *peer_id == server.node_id {
-                continue;
-            }
+    server.start().await;
 
-            members.push((*peer_id, *peer_id));
-        }
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    server.add_members().await.unwrap();
 
-        // for (peer_id, _) in server.peers.iter() {
-        //     println!("group({}) add members({:?})", *peer_id, members);
-        //     server.add_members(*peer_id, members.clone()).await;
-        // }
-    }
     server.join().await;
 }

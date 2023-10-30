@@ -92,8 +92,9 @@ async fn main() {
             }
 
             for i in 1..=server_nums {
-                let addr = peers.get(&i).unwrap();
-                client.connect(addr).await.unwrap();
+                // let addr = peers.get(&i).unwrap();
+                let addr = peers.iter().find(|(k, _)| *k == i).unwrap().1.clone();
+                client.connect(addr.as_str()).await.unwrap();
                 let resp = client
                     .put(key.clone(), val.clone().as_bytes())
                     .await

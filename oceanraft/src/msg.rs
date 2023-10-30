@@ -26,6 +26,7 @@ pub struct MessageWithNotify<T, R> {
     pub tx: oneshot::Sender<R>,
 }
 
+/// WriteRequest propose a write request to raft.
 pub struct WriteRequest<REQ, RES>
 where
     REQ: ProposeRequest,
@@ -33,7 +34,7 @@ where
 {
     pub group_id: u64,
     pub term: u64,
-    pub data: REQ,
+    pub propose: REQ,
     pub context: Option<Vec<u8>>,
     pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }

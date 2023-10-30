@@ -319,7 +319,7 @@ where
         let msg = NodeMessage::Write(WriteRequest {
             group_id,
             term,
-            data,
+            propose: data,
             context,
             tx,
         });
@@ -624,7 +624,10 @@ where
     pub fn message_sender(&self) -> MultiRaftMessageSenderImpl {
         let actor = self.actor.lock().expect("lock actor");
         MultiRaftMessageSenderImpl {
-            tx: actor.as_ref().expect("actor is none").peer_msg_tx.clone(),
+            tx: actor
+                .as_ref()
+                .expect("actor is none")
+                .clone_peer_msg_sender(),
         }
     }
 
