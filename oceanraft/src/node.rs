@@ -20,6 +20,7 @@ use tracing::Span;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
 use crate::multiraft::ProposeResponse;
+use crate::node_handle::GroupWriteRequest;
 use crate::prelude::ConfChangeType;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
@@ -837,35 +838,37 @@ where
             if group_id == NO_GORUP {
                 continue;
             }
-            let group = match self.groups.get_mut(&group_id) {
-                None => {
-                    // TODO: remove pending proposals related to this group
-                    error!(
-                        "node {}: handle group-{} ready, but dropped",
-                        self.node_id, group_id
-                    );
-                    continue;
-                }
-                Some(group) => group,
-            };
-            if !group.has_ready() {
-                continue;
-            }
+            // let group = match self.groups.get_mut(&group_id) {
+            //     None => {
+            //         // TODO: remove pending proposals related to this group
+            //         error!(
+            //             "node {}: handle group-{} ready, but dropped",
+            //             self.node_id, group_id
+            //         );
+            //         continue;
+            //     }
+            //     Some(group) => group,
+            // };
+            // if !group.has_ready() {
+            //     continue;
+            // }
 
-            let res = group
-                .handle_ready(
-                    self.node_id,
-                    &self.transport,
-                    &self.storage,
-                    &mut self.replica_cache,
-                    &mut self.node_manager,
-                    &mut self.event_chan,
-                )
-                .await;
+            // let res = group
+            //     .handle_ready(
+            //         self.node_id,
+            //         &self.transport,
+            //         &self.storage,
+            //         &mut self.replica_cache,
+            //         &mut self.node_manager,
+            //         &mut self.event_chan,
+            //     )
+            //     .await;
+
+            let res = self.handle_group_ready(group_id).await;
 
             let err = match res {
                 Ok((gwr, apply)) => {
-                    writes.insert(group_id, gwr);
+                    gwr.map(|write| writes.insert(group_id, write));
                     apply.map(|apply| applys.insert(group_id, apply));
                     continue;
                 }
@@ -882,8 +885,29 @@ where
                         self.active_groups.insert(group_id);
                         continue;
                     }
+
                     _ => {
                         panic!("node {}: storage unavailable", self.node_id)
+                    }
+                },
+                Error::RaftGroup(raft_group_err) => match raft_group_err {
+                    RaftGroupError::NotExist(node_id, group_id) => {
+                        // TODO: remove pending proposals related to this group
+                        tracing::error!(
+                            "node {}: handle group-{} ready, but not exist",
+                            node_id,
+                            group_id
+                        );
+                        continue;
+                    }
+                    _ => {
+                        tracing::warn!(
+                            "node {}: group {} raft storage to handle_ready got error: {}",
+                            self.node_id,
+                            group_id,
+                            raft_group_err
+                        );
+                        continue;
                     }
                 },
                 _ => {
@@ -900,66 +924,68 @@ where
         self.handle_writes(writes).await;
     }
 
-    async fn handle_writes(&mut self, mut writes: HashMap<u64, RaftGroupWriteRequest>) {
+    async fn handle_writes(&mut self, mut writes: HashMap<u64, GroupWriteRequest>) {
         let mut applys = HashMap::new();
 
         // TODO(yuanchang.xu) Disk write flow control
         for (group_id, gwr) in writes.iter_mut() {
             // TODO: cache storage in related raft group.
-            let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
-                Ok(gs) => gs,
-                Err(err) => {
-                    match err {
-                        super::storage::Error::StorageTemporarilyUnavailable => {
-                            warn!("node {}: group {} handle_write but storage temporarily unavailable ", self.node_id, group_id);
+            // let gs = match self.storage.group_storage(*group_id, gwr.replica_id).await {
+            //     Ok(gs) => gs,
+            //     Err(err) => {
+            //         match err {
+            //             super::storage::Error::StorageTemporarilyUnavailable => {
+            //                 warn!("node {}: group {} handle_write but storage temporarily unavailable ", self.node_id, group_id);
 
-                            self.active_groups.insert(*group_id);
-                            continue;
-                        }
-                        super::storage::Error::StorageUnavailable => {
-                            panic!("node {}: storage unavailable", self.node_id)
-                        }
-                        _ => {
-                            warn!(
-                                "node {}: get raft storage for group {} to handle_writes error: {}",
-                                self.node_id, *group_id, err
-                            );
-                            continue;
-                        }
-                    }
-                }
-            };
+            //                 self.active_groups.insert(*group_id);
+            //                 continue;
+            //             }
+            //             super::storage::Error::StorageUnavailable => {
+            //                 panic!("node {}: storage unavailable", self.node_id)
+            //             }
+            //             _ => {
+            //                 warn!(
+            //                     "node {}: get raft storage for group {} to handle_writes error: {}",
+            //                     self.node_id, *group_id, err
+            //                 );
+            //                 continue;
+            //             }
+            //         }
+            //     }
+            // };
 
-            let group = match self.groups.get_mut(&group_id) {
-                Some(group) => group,
-                None => {
-                    // TODO: remove pending proposals related to this group
-                    // If the group does not exist at this point
-                    // 1. we may have finished sending messages to the group, role changed notifications,
-                    //    committable entires commits
-                    // 2. we may not have completed the new proposal append, there may be multiple scenarios
-                    //     - The current group is the leader, sent AE, but was deleted before it received a
-                    //       response from the follower, so it did not complete the append drop
-                    //     - The current group is the follower, which does not affect the completion of the
-                    //       AE
-                    error!(
-                        "node {}: handle group-{} write ready, but dropped",
-                        self.node_id, group_id
-                    );
-                    continue;
-                }
-            };
+            // let group = match self.groups.get_mut(&group_id) {
+            //     Some(group) => group,
+            //     None => {
+            //         // TODO: remove pending proposals related to this group
+            //         // If the group does not exist at this point
+            //         // 1. we may have finished sending messages to the group, role changed notifications,
+            //         //    committable entires commits
+            //         // 2. we may not have completed the new proposal append, there may be multiple scenarios
+            //         //     - The current group is the leader, sent AE, but was deleted before it received a
+            //         //       response from the follower, so it did not complete the append drop
+            //         //     - The current group is the follower, which does not affect the completion of the
+            //         //       AE
+            //         error!(
+            //             "node {}: handle group-{} write ready, but dropped",
+            //             self.node_id, group_id
+            //         );
+            //         continue;
+            //     }
+            // };
 
-            let res = group
-                .handle_write(
-                    self.node_id,
-                    gwr,
-                    &gs,
-                    &self.transport,
-                    &mut self.replica_cache,
-                    &mut self.node_manager,
-                )
-                .await;
+            // let res = group
+            //     .handle_write(
+            //         self.node_id,
+            //         gwr,
+            //         &gs,
+            //         &self.transport,
+            //         &mut self.replica_cache,
+            //         &mut self.node_manager,
+            //     )
+            //     .await;
+
+            let res = self.handle_write(*group_id, gwr).await;
 
             let write_err = match res {
                 Ok(apply) => {

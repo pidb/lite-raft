@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use raft::prelude::ConfChangeTransition;
 use raft::prelude::Entry;
+use raft::RaftLog;
 use raft::RawNode;
 use raft::ReadState;
 use raft::Ready;
@@ -131,6 +132,61 @@ where
     #[inline]
     pub(crate) fn last_index(&self) -> u64 {
         self.raft_group.raft.raft_log.last_index()
+    }
+
+    #[inline]
+    pub(crate) fn group_id(&self) -> u64 {
+        self.group_id
+    }
+
+    #[inline]
+    pub(crate) fn replica_id(&self) -> u64 {
+        self.raft_group.raft.id
+    }
+
+    #[inline]
+    pub(crate) fn ready(&mut self) -> Ready {
+        self.raft_group.ready()
+    }
+
+    #[inline]
+    pub(crate) fn leader(&self) -> ReplicaDesc {
+        self.leader.clone()
+    }
+
+    #[inline]
+    pub(crate) fn set_leader(&mut self, leader: ReplicaDesc) {
+        self.leader = leader;
+    }
+
+    #[inline]
+    pub(crate) fn raft_log(&self) -> &RaftLog<RS> {
+        &self.raft_group.raft.raft_log
+    }
+
+    #[inline]
+    pub(crate) fn commit_term(&self) -> u64 {
+        self.commit_term
+    }
+
+    #[inline]
+    pub(crate) fn set_commit_term(&mut self, term: u64) {
+        self.commit_term = term;
+    }
+
+    #[inline]
+    pub(crate) fn commit_index(&self) -> u64 {
+        self.commit_index
+    }
+
+    #[inline]
+    pub(crate) fn set_commit_index(&mut self, index: u64) {
+        self.commit_index = index;
+    }
+
+    #[inline]
+    pub(crate) fn proposal_queue_mut(&mut self) -> &mut ProposalQueue<RES> {
+        &mut self.proposals
     }
 
     #[tracing::instrument(
