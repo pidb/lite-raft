@@ -117,9 +117,9 @@ where
             let config = Config {
                 node_id,
                 batch_append: false,
-                election_tick: 2,
+                election_tick: 20,
                 event_capacity: 100,
-                heartbeat_tick: 1,
+                heartbeat_tick: 2,
                 max_size_per_msg: 0,
                 max_inflight_msgs: 256,
                 tick_interval: 10, // hour ms

@@ -32,7 +32,7 @@ async fn test_group_write() {
         let rx = cluster.write_command(1, group_id, data.clone());
         recvs.push(rx);
         write_checker.insert_write(group_id, data);
-        cluster.tickers[0].non_blocking_tick();
+        // cluster.tickers[0].non_blocking_tick();
     }
 
     // for _ in 0..1000 {

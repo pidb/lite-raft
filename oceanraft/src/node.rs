@@ -435,13 +435,16 @@ where
 
         // create default ticker if ticker is None.
         let tick_interval = Duration::from_millis(self.cfg.tick_interval);
-        let mut ticker = ticker.map_or(
-            Box::new(tokio::time::interval_at(
-                tokio::time::Instant::now() + tick_interval,
-                tick_interval,
-            )) as Box<dyn Ticker>,
-            |t| t,
-        );
+        // let mut ticker = ticker.map_or(
+        //     Box::new(tokio::time::interval_at(
+        //         tokio::time::Instant::now() + tick_interval,
+        //         tick_interval,
+        //     )) as Box<dyn Ticker>,
+        //     |t| t,
+        // );
+
+        let mut ticker =
+            tokio::time::interval_at(tokio::time::Instant::now() + tick_interval, tick_interval);
 
         let mut ticks = 0;
         loop {
