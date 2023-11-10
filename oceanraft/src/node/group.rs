@@ -16,8 +16,8 @@ use crate::prelude::ConfChangeV2;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
 
-use super::node::ResponseCallback;
-use super::node::ResponseCallbackQueue;
+use super::actor::ResponseCallback;
+use super::actor::ResponseCallbackQueue;
 use crate::error::Error;
 use crate::error::ProposeError;
 use crate::error::RaftGroupError;

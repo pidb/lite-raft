@@ -46,6 +46,7 @@ impl ReadIndexQueue {
     #[allow(unused)]
     pub fn push_front(&mut self, proposal: ReadIndexProposal) {
         self.queue.push_back(proposal);
+        // retry
         self.ready_cnt += 1;
         self.handle_cnt -= 1;
     }

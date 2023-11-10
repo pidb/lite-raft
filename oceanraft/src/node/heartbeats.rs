@@ -1,73 +1,21 @@
-// use std::cmp;
-// use std::collections::hash_map::HashMap;
-// use std::collections::hash_map::Iter;
-// use std::collections::HashSet;
-// use std::collections::VecDeque;
-// use std::sync::atomic::AtomicBool;
-// use std::sync::Arc;
-// use std::time::Duration;
-
-// use raft::prelude::ConfState;
-// use raft::StateRole;
-// use tokio::sync::mpsc::channel;
-// use tokio::sync::mpsc::unbounded_channel;
-// use tokio::sync::mpsc::Receiver;
-// use tokio::sync::mpsc::Sender;
-// use tokio::sync::mpsc::UnboundedReceiver;
-// use tokio::sync::mpsc::UnboundedSender;
-// use tokio::sync::oneshot;
-// use tracing::debug;
-// use tracing::error;
 use tracing::info;
 use tracing::trace;
 use tracing::warn;
-// use tracing::Level;
-// use tracing::Span;
 
+use super::actor::Inner;
+use crate::error::Error;
 use crate::multiraft::ProposeResponse;
-// use crate::multiraft::NO_LEADER;
-// use crate::prelude::ConfChangeType;
-// use crate::prelude::GroupMetadata;
+use crate::multiraft::NO_GORUP;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
-// use crate::prelude::ReplicaDesc;
-
-// use super::apply::ApplyActor;
-// use super::config::Config;
-// use super::error::ChannelError;
-use crate::error::Error;
-// use super::error::RaftGroupError;
-// use super::event::Event;
-// use super::event::EventChannel;
-// use super::group::RaftGroup;
-// use super::group::RaftGroupWriteRequest;
-// use super::group::Status;
-// use super::msg::ApplyCommitMessage;
-// use super::msg::ApplyData;
-// use super::msg::ApplyMessage;
-// use super::msg::ApplyResultMessage;
-// use super::msg::CommitMembership;
-// use super::msg::ManageMessage;
-// use super::msg::ProposeMessage;
-// use super::msg::QueryGroup;
-use crate::multiraft::NO_GORUP;
-// use super::multiraft::NO_NODE;
-use super::node::NodeWorker;
-// use super::proposal::ProposalQueue;
-// use super::proposal::ReadIndexQueue;
-// use super::replica_cache::ReplicaCache;
-// use super::rsm::StateMachine;
-// use super::state::GroupState;
-// use super::state::GroupStates;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
-// use super::tick::Ticker;
 use crate::transport::Transport;
 use crate::ProposeRequest;
 
-impl<TR, RS, MRS, WD, RES> NodeWorker<TR, RS, MRS, WD, RES>
+impl<TR, RS, MRS, WD, RES> Inner<TR, RS, MRS, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
@@ -115,7 +63,7 @@ where
         let mut fanouted_groups = 0;
         let mut fanouted_followers = 0;
         if let Some(from_node) = self.node_manager.get_node(&from_node_id) {
-            for (group_id, _) in from_node.group_map.iter() {
+            for (group_id, _) in from_node.groups.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
                         warn!("node {}: from node {} failed to fanout to group {} because does not exists", self.node_id, from_node_id, *group_id);
@@ -256,7 +204,7 @@ where
         msg: MultiRaftMessage,
     ) -> Result<MultiRaftMessageResponse, Error> {
         if let Some(node) = self.node_manager.get_node(&msg.from_node) {
-            for (group_id, _) in node.group_map.iter() {
+            for (group_id, _) in node.groups.iter() {
                 let group = match self.groups.get_mut(group_id) {
                     None => {
                         warn!("node {}: from node {} failed to fanout response to group {} because does not exists", self.node_id, msg.from_node, *group_id);

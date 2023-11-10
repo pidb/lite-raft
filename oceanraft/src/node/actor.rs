@@ -1,5 +1,4 @@
 use std::collections::hash_map::HashMap;
-use std::collections::hash_map::Iter;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::atomic::AtomicBool;
@@ -17,7 +16,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use super::handler::GroupWriteRequest;
+use super::handle_ready::GroupWriteRequest;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
 use crate::multiraft::ProposeResponse;
@@ -42,6 +41,7 @@ use crate::msg::ApplyMessage;
 use crate::msg::ApplyResultRequest;
 use crate::msg::CommitMembership;
 use crate::multiraft::NO_GORUP;
+use crate::node::NodeManager;
 use crate::replica_cache::ReplicaCache;
 use crate::rsm::StateMachine;
 use crate::state::GroupStates;
@@ -122,72 +122,6 @@ impl ResponseCallbackQueue {
 }
 
 /// Node represents a physical node and contains a group of rafts.
-#[derive(Debug)]
-pub struct Node {
-    pub node_id: u64,
-    pub group_map: HashMap<u64, ()>,
-}
-
-pub struct NodeManager {
-    pub nodes: HashMap<u64, Node>,
-}
-
-impl NodeManager {
-    pub fn new() -> Self {
-        Self {
-            nodes: HashMap::new(),
-        }
-    }
-
-    #[inline]
-    pub fn iter(&self) -> Iter<'_, u64, Node> {
-        self.nodes.iter()
-    }
-
-    #[inline]
-    pub fn contains_node(&self, node_id: &u64) -> bool {
-        self.nodes.contains_key(node_id)
-    }
-
-    #[inline]
-    pub fn get_node(&self, node_id: &u64) -> Option<&Node> {
-        self.nodes.get(node_id)
-    }
-
-    pub fn add_node(&mut self, node_id: u64) {
-        if self.nodes.get_mut(&node_id).is_none() {
-            self.nodes.insert(
-                node_id,
-                Node {
-                    node_id,
-                    group_map: HashMap::new(),
-                },
-            );
-        }
-    }
-
-    pub(crate) fn add_group(&mut self, node_id: u64, group_id: u64) {
-        let node = match self.nodes.get_mut(&node_id) {
-            None => self.nodes.entry(node_id).or_insert(Node {
-                node_id,
-                group_map: HashMap::new(),
-            }),
-            Some(node) => node,
-        };
-
-        assert_ne!(group_id, 0);
-        node.group_map.insert(group_id, ());
-    }
-
-    pub fn remove_group(&mut self, node_id: u64, group_id: u64) {
-        let node = match self.nodes.get_mut(&node_id) {
-            None => return,
-            Some(node) => node,
-        };
-
-        node.group_map.remove(&group_id);
-    }
-}
 
 pub struct NodeActor<W, R>
 where
@@ -248,7 +182,7 @@ where
             stopped.clone(),
         );
 
-        let mut worker = NodeWorker::<TR, RS, MRS, W, R>::new(
+        let mut worker = Inner::<TR, RS, MRS, W, R>::new(
             cfg,
             transport,
             storage,
@@ -303,7 +237,7 @@ where
     }
 }
 
-pub struct NodeWorker<TR, RS, MRS, W, R>
+pub struct Inner<TR, RS, MRS, W, R>
 where
     TR: Transport,
     RS: RaftStorage,
@@ -326,20 +260,10 @@ where
         MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
     >,
     pub(crate) apply_msg_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
-    // pub(crate) multiraft_message_rx: Receiver<(
-    //     MultiRaftMessage,
-    //     oneshot::Sender<Result<MultiRaftMessageResponse, Error>>,
-    // )>,
-    // pub(crate) propose_rx: Receiver<ProposeMessage<W, R>>,
-    // pub(crate) manage_rx: Receiver<ManageMessage>,
-    // pub(crate) campaign_rx: Receiver<(u64, oneshot::Sender<Result<(), Error>>)>,
-    // pub(crate) commit_rx: UnboundedReceiver<ApplyCommitRequest>,
-    // pub(crate) apply_result_rx: UnboundedReceiver<ApplyResultRequest>,
-    // pub(crate) query_group_rx: UnboundedReceiver<QueryGroup>,
     pub(crate) shared_states: GroupStates,
 }
 
-impl<TR, RS, MRS, WD, RES> NodeWorker<TR, RS, MRS, WD, RES>
+impl<TR, RS, MRS, WD, RES> Inner<TR, RS, MRS, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
@@ -359,7 +283,7 @@ where
         event_chan: &EventChannel,
         shared_states: GroupStates,
     ) -> Self {
-        NodeWorker::<TR, RS, MRS, WD, RES> {
+        Inner::<TR, RS, MRS, WD, RES> {
             cfg: cfg.clone(),
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
@@ -840,35 +764,8 @@ where
             if group_id == NO_GORUP {
                 continue;
             }
-            // let group = match self.groups.get_mut(&group_id) {
-            //     None => {
-            //         // TODO: remove pending proposals related to this group
-            //         error!(
-            //             "node {}: handle group-{} ready, but dropped",
-            //             self.node_id, group_id
-            //         );
-            //         continue;
-            //     }
-            //     Some(group) => group,
-            // };
-            // if !group.has_ready() {
-            //     continue;
-            // }
 
-            // let res = group
-            //     .handle_ready(
-            //         self.node_id,
-            //         &self.transport,
-            //         &self.storage,
-            //         &mut self.replica_cache,
-            //         &mut self.node_manager,
-            //         &mut self.event_chan,
-            //     )
-            //     .await;
-
-            let res = self.handle_group_ready(group_id).await;
-
-            let err = match res {
+            let err = match self.handle_group_ready(group_id).await {
                 Ok((gwr, apply)) => {
                     gwr.map(|write| writes.insert(group_id, write));
                     apply.map(|apply| applys.insert(group_id, apply));
@@ -1058,7 +955,7 @@ where
 mod tests {
     use std::sync::Arc;
 
-    use super::NodeWorker;
+    use super::Inner;
     use crate::proposal::ProposalQueue;
     use crate::proposal::ReadIndexQueue;
     use crate::storage::MemStorage;
@@ -1075,7 +972,7 @@ mod tests {
 
     use super::NodeManager;
     use crate::state::GroupState;
-    type TestMultiRaftActorRuntime = NodeWorker<
+    type TestMultiRaftActorRuntime = Inner<
         LocalTransport<MultiRaftMessageSenderImpl>,
         MemStorage,
         MultiRaftMemoryStorage,
@@ -1143,7 +1040,7 @@ mod tests {
             let node_id = i;
             let replica_id = i;
             let node = node_manager.get_node(&node_id).unwrap();
-            assert_eq!(node.group_map.contains_key(&group_id), true);
+            assert_eq!(node.groups.contains_key(&group_id), true);
 
             let rep = replica_cache
                 .replica_desc(group_id, replica_id)
@@ -1182,7 +1079,7 @@ mod tests {
             let replica_id = i;
             // TODO: if node group is empty, should remove node item from map
             let node = node_manager.get_node(&node_id).unwrap();
-            assert_eq!(node.group_map.contains_key(&group_id), false);
+            assert_eq!(node.groups.contains_key(&group_id), false);
 
             assert_eq!(
                 replica_cache
@@ -1228,7 +1125,7 @@ mod tests {
             let node_id = i;
             let replica_id = i;
             let node = node_manager.get_node(&node_id).unwrap();
-            assert_eq!(node.group_map.contains_key(&group_id), true);
+            assert_eq!(node.groups.contains_key(&group_id), true);
 
             let rep = replica_cache
                 .replica_desc(group_id, replica_id)
@@ -1269,7 +1166,7 @@ mod tests {
             let replica_id = i;
             // TODO: if node group is empty, should remove node item from map
             let node = node_manager.get_node(&node_id).unwrap();
-            assert_eq!(node.group_map.contains_key(&group_id), false);
+            assert_eq!(node.groups.contains_key(&group_id), false);
 
             assert_eq!(
                 replica_cache

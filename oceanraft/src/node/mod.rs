@@ -1,8 +1,10 @@
+mod actor;
 mod group;
-mod handler;
+mod handle_msg;
+mod handle_ready;
 mod heartbeats;
-mod node;
+mod manager;
 
-pub use node::NodeActor;
-pub use node::NodeManager;
-pub use node::NodeWorker;
+pub use actor::Inner;
+pub use actor::NodeActor;
+pub use manager::NodeManager;
