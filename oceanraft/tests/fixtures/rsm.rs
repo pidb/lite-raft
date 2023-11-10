@@ -1,5 +1,6 @@
 use futures::Future;
 use oceanraft::prelude::StoreData;
+use oceanraft::rsm::LeaderElectionEvent;
 use oceanraft::storage::StateMachineStore;
 use oceanraft::Apply;
 use oceanraft::ApplyNormal;
@@ -10,12 +11,15 @@ use oceanraft::StateMachine;
 use tokio::sync::mpsc::Sender;
 use tracing::info;
 
+use super::port::StateMachineEvent;
+
 #[derive(Clone)]
 pub struct MemStoreStateMachine<W>
 where
     W: ProposeRequest,
 {
     tx: Sender<Vec<Apply<W, ()>>>,
+    event_tx: Sender<StateMachineEvent<W, ()>>,
 }
 
 impl<W> StateMachine<W, ()> for MemStoreStateMachine<W>
@@ -52,14 +56,24 @@ where
             tx.send(applys).await;
         }
     }
+
+    type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+    fn on_leader_election<'life0>(
+        &'life0 self,
+        event: LeaderElectionEvent,
+    ) -> Self::OnLeaderElectionFuture<'life0> {
+        async move {}
+    }
 }
 
 impl<W> MemStoreStateMachine<W>
 where
     W: ProposeRequest,
 {
-    pub fn new(tx: Sender<Vec<Apply<W, ()>>>) -> Self {
-        Self { tx }
+    pub fn new(tx: Sender<Vec<Apply<W, ()>>>, event_tx: Sender<StateMachineEvent<W, ()>>) -> Self {
+        Self { tx, event_tx }
     }
 }
 
@@ -67,11 +81,20 @@ where
 pub struct RockStoreStateMachine {
     kv_store: StateMachineStore<()>,
     tx: Sender<Vec<Apply<StoreData, ()>>>,
+    event_tx: Sender<StateMachineEvent<StoreData, ()>>,
 }
 
 impl RockStoreStateMachine {
-    pub fn new(kv_store: StateMachineStore<()>, tx: Sender<Vec<Apply<StoreData, ()>>>) -> Self {
-        Self { kv_store, tx }
+    pub fn new(
+        kv_store: StateMachineStore<()>,
+        tx: Sender<Vec<Apply<StoreData, ()>>>,
+        event_tx: Sender<StateMachineEvent<StoreData, ()>>,
+    ) -> Self {
+        Self {
+            kv_store,
+            tx,
+            event_tx,
+        }
     }
 }
 
@@ -127,6 +150,21 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
             }
 
             if let Err(_) = tx.send(applys).await {}
+        }
+    }
+
+    type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0
+    where
+        Self: 'life0;
+    fn on_leader_election<'life0>(
+        &'life0 self,
+        event: LeaderElectionEvent,
+    ) -> Self::OnLeaderElectionFuture<'life0> {
+        async move {
+            info!(
+                "group({}), replica({}) become leader, term = {}",
+                event.group_id, event.replica_id, event.term
+            );
         }
     }
 }

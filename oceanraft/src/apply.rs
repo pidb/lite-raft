@@ -773,6 +773,7 @@ mod test {
     use std::collections::HashMap;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::rsm::LeaderElectionEvent;
     use crate::state::GroupState;
     use crate::state::GroupStates;
     use crate::storage::MemStorage;
@@ -802,6 +803,13 @@ mod test {
             _: &GroupState,
             _: Vec<Apply<(), ()>>,
         ) -> Self::ApplyFuture<'_> {
+            async move {}
+        }
+
+        type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+        fn on_leader_election(&self, _: LeaderElectionEvent) -> Self::OnLeaderElectionFuture<'_> {
             async move {}
         }
     }

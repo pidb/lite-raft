@@ -11,6 +11,7 @@ use oceanraft::Config;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftTypeSpecialization;
 
+use super::port::StateMachineEvent;
 use super::Cluster;
 
 pub struct ClusterBuilder<T>
@@ -21,6 +22,7 @@ where
     election_ticks: usize,
     storages: Vec<T::MS>,
     apply_rxs: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
+    event_rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
     state_machines: Vec<Option<T::M>>,
 }
 
@@ -35,6 +37,7 @@ where
             storages: Vec::new(),
             state_machines: Vec::new(),
             apply_rxs: Vec::new(),
+            event_rxs: Vec::new(),
         }
     }
 
@@ -61,6 +64,19 @@ where
         );
 
         self.apply_rxs = rxs;
+        self
+    }
+
+    pub fn event_rsxs(mut self, rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>) -> Self {
+        assert_eq!(
+            rxs.len(),
+            self.node_size,
+            "expect node {}, got nums {} of state machines",
+            self.node_size,
+            rxs.len(),
+        );
+
+        self.event_rxs = rxs;
         self
     }
 
@@ -162,6 +178,7 @@ where
             nodes,
             transport,
             tickers,
+            events: take(&mut self.event_rxs),
             election_ticks: self.election_ticks,
             groups: HashMap::new(),
         }

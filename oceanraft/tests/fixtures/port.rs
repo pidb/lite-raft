@@ -2,6 +2,8 @@ use std::mem::take;
 use std::path::Path;
 use std::path::PathBuf;
 
+use oceanraft::rsm::LeaderElectionEvent;
+use oceanraft::ProposeRequest;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 
@@ -38,6 +40,15 @@ define_multiraft! {
         M= MemStoreStateMachine<StoreData>,
         S= MemStorage,
         MS = MultiRaftMemoryStorage
+}
+
+pub enum StateMachineEvent<W, R>
+where
+    W: ProposeRequest,
+    R: ProposeResponse,
+{
+    LeaderElection(LeaderElectionEvent),
+    Apply(Vec<Apply<W, R>>),
 }
 
 pub fn new_rock_kv_store<P>(node_id: u64, path: P) -> StateMachineStore<()>
@@ -103,6 +114,7 @@ where
 /// Provides a mem storage and state machine environment for cluster.
 pub struct MemStoreEnv {
     pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
+    pub rxs2: Vec<Option<Receiver<StateMachineEvent<StoreData, ()>>>>,
     pub storages: Vec<MultiRaftMemoryStorage>,
     pub state_machines: Vec<MemStoreStateMachine<StoreData>>,
 }
@@ -114,17 +126,21 @@ impl MemStoreEnv {
     /// - and state_machines (memory state machine implementation).
     pub fn new(nodes: usize) -> Self {
         let mut rxs = vec![];
+        let mut rxs2 = vec![];
         let mut storages = vec![];
         let mut state_machines = vec![];
         for i in 0..nodes {
             let (tx, rx) = channel(100);
+            let (event_tx, event_rx) = channel(100);
             rxs.push(Some(rx));
-            state_machines.push(MemStoreStateMachine::new(tx));
+            rxs2.push(Some(event_rx));
+            state_machines.push(MemStoreStateMachine::new(tx, event_tx));
             storages.push(MultiRaftMemoryStorage::new((i + 1) as u64));
         }
 
         Self {
             rxs,
+            rxs2,
             storages,
             state_machines,
         }
@@ -134,6 +150,7 @@ impl MemStoreEnv {
 /// Provides a rocksdb storage and state machine environment for cluster.
 pub struct RockStoreEnv {
     pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
+    pub rxs2: Vec<Option<Receiver<StateMachineEvent<StoreData, ()>>>>,
     pub storages: Vec<RockStore<StateMachineStore<()>, StateMachineStore<()>>>,
     pub rock_kv_stores: Vec<StateMachineStore<()>>,
     pub state_machines: Vec<RockStoreStateMachine>,
@@ -151,6 +168,7 @@ impl RockStoreEnv {
     /// - state_machine_paths (rocksdbs of rock_kv_stores storage path, destory when test end)
     pub fn new(nodes: usize) -> Self {
         let mut rxs = vec![];
+        let mut rxs2 = vec![];
         let mut storage_paths = vec![];
         let mut state_machine_paths = vec![];
         let mut rock_kv_stores = vec![];
@@ -171,12 +189,15 @@ impl RockStoreEnv {
                 kv_store.clone(),
             ));
             let (tx, rx) = channel(100);
-            state_machines.push(RockStoreStateMachine::new(kv_store, tx));
+            let (event_tx, event_rx) = channel(100);
+            state_machines.push(RockStoreStateMachine::new(kv_store, tx, event_tx));
             rxs.push(Some(rx));
+            rxs2.push(Some(event_rx));
         }
 
         Self {
             rxs,
+            rxs2,
             state_machines,
             storages,
             storage_paths,

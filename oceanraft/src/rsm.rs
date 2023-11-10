@@ -80,6 +80,14 @@ where
     }
 }
 
+pub struct LeaderElectionEvent {
+    pub node_id: u64,
+    pub group_id: u64,
+    pub leader_id: u64,
+    pub replica_id: u64,
+    pub term: u64,
+}
+
 pub trait StateMachine<W, R>: Send + Sync + 'static
 where
     W: ProposeRequest,
@@ -96,4 +104,14 @@ where
         state: &GroupState,
         applys: Vec<Apply<W, R>>,
     ) -> Self::ApplyFuture<'life0>;
+
+    type OnLeaderElectionFuture<'life0>: Send + Future<Output = ()> + 'life0
+    where
+        Self: 'life0;
+
+    /// Called when a new leader is elected.
+    fn on_leader_election<'life0>(
+        &'life0 self,
+        event: LeaderElectionEvent,
+    ) -> Self::OnLeaderElectionFuture<'life0>;
 }

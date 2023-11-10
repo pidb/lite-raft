@@ -714,7 +714,7 @@ mod node;
 // mod node_heartbeats;
 mod proposal;
 mod replica_cache;
-mod rsm;
+pub mod rsm;
 mod state;
 pub mod storage;
 pub mod tick;

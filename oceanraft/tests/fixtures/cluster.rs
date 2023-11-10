@@ -33,6 +33,8 @@ use oceanraft::LeaderElectionEvent;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftMessageSenderImpl;
 
+use super::port::StateMachineEvent;
+
 /// Generates a random string of n size
 pub fn rand_string(n: usize) -> String {
     rand::thread_rng()
@@ -62,6 +64,7 @@ where
     pub election_ticks: usize,
     pub nodes: Vec<Arc<MultiRaft<T, LocalTransport<MultiRaftMessageSenderImpl>>>>,
     pub apply_events: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
+    pub events: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
