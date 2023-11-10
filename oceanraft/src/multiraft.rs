@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
+use crate::node::NodeActor;
 use crate::prelude::CreateGroupRequest;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
@@ -32,7 +33,6 @@ use super::msg::MembershipRequest;
 use super::msg::ReadIndexContext;
 use super::msg::ReadIndexRequest;
 use super::msg::WriteRequest;
-use super::node::NodeActor;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;

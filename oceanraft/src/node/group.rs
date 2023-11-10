@@ -16,23 +16,23 @@ use crate::prelude::ConfChangeV2;
 use crate::prelude::MembershipChangeData;
 use crate::prelude::ReplicaDesc;
 
-use super::error::Error;
-use super::error::ProposeError;
-use super::error::RaftGroupError;
-use super::msg::ApplyResultRequest;
-use super::msg::MembershipRequest;
-use super::msg::ReadIndexRequest;
-use super::msg::WriteRequest;
 use super::node::ResponseCallback;
 use super::node::ResponseCallbackQueue;
-use super::proposal::Proposal;
-use super::proposal::ProposalQueue;
-use super::proposal::ReadIndexProposal;
-use super::proposal::ReadIndexQueue;
-use super::state::GroupState;
-use super::storage::RaftStorage;
-use super::utils::flexbuffer_serialize;
-use super::ProposeRequest;
+use crate::error::Error;
+use crate::error::ProposeError;
+use crate::error::RaftGroupError;
+use crate::msg::ApplyResultRequest;
+use crate::msg::MembershipRequest;
+use crate::msg::ReadIndexRequest;
+use crate::msg::WriteRequest;
+use crate::proposal::Proposal;
+use crate::proposal::ProposalQueue;
+use crate::proposal::ReadIndexProposal;
+use crate::proposal::ReadIndexQueue;
+use crate::state::GroupState;
+use crate::storage::RaftStorage;
+use crate::utils::flexbuffer_serialize;
+use crate::ProposeRequest;
 
 pub enum Status {
     None,
@@ -269,9 +269,10 @@ where
 
     fn pre_propose_membership(&mut self, request: &MembershipRequest<RES>) -> Result<(), Error> {
         if self.raft_group.raft.has_pending_conf() {
-            return Err(Error::Propose(
-                super::error::ProposeError::MembershipPending(self.node_id, self.group_id),
-            ));
+            return Err(Error::Propose(ProposeError::MembershipPending(
+                self.node_id,
+                self.group_id,
+            )));
         }
 
         if request.group_id == 0 {

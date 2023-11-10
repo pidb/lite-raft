@@ -17,10 +17,10 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
+use super::handler::GroupWriteRequest;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
 use crate::multiraft::ProposeResponse;
-use crate::node_handle::GroupWriteRequest;
 use crate::prelude::ConfChangeType;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
@@ -29,28 +29,27 @@ use crate::prelude::ReplicaDesc;
 use crate::utils;
 use crate::utils::mpsc;
 
-use super::apply::ApplyActor;
-use super::config::Config;
-use super::error::ChannelError;
-use super::error::Error;
-use super::error::RaftGroupError;
-use super::event::EventChannel;
 use super::group::RaftGroup;
-use super::group::RaftGroupWriteRequest;
-use super::msg::ApplyCommitRequest;
-use super::msg::ApplyData;
-use super::msg::ApplyMessage;
-use super::msg::ApplyResultRequest;
-use super::msg::CommitMembership;
-use super::multiraft::NO_GORUP;
-use super::replica_cache::ReplicaCache;
-use super::rsm::StateMachine;
-use super::state::GroupStates;
-use super::storage::MultiRaftStorage;
-use super::storage::RaftStorage;
-use super::tick::Ticker;
-use super::transport::Transport;
-use super::ProposeRequest;
+use crate::apply::ApplyActor;
+use crate::config::Config;
+use crate::error::ChannelError;
+use crate::error::Error;
+use crate::error::RaftGroupError;
+use crate::event::EventChannel;
+use crate::msg::ApplyCommitRequest;
+use crate::msg::ApplyData;
+use crate::msg::ApplyMessage;
+use crate::msg::ApplyResultRequest;
+use crate::msg::CommitMembership;
+use crate::multiraft::NO_GORUP;
+use crate::replica_cache::ReplicaCache;
+use crate::rsm::StateMachine;
+use crate::state::GroupStates;
+use crate::storage::MultiRaftStorage;
+use crate::storage::RaftStorage;
+use crate::tick::Ticker;
+use crate::transport::Transport;
+use crate::ProposeRequest;
 /// Shrink queue if queue capacity more than and len less than
 /// this value.
 const SHRINK_CACHE_CAPACITY: usize = 64;
@@ -880,7 +879,7 @@ where
 
             match err {
                 Error::Storage(storage_err) => match storage_err {
-                    super::storage::Error::StorageTemporarilyUnavailable => {
+                    crate::storage::Error::StorageTemporarilyUnavailable => {
                         warn!(
                             "node {}: group {} storage temporarily unavailable",
                             self.node_id, group_id
@@ -1003,15 +1002,15 @@ where
                 // if it is, temporary storage unavailability causes write log entries and
                 // status failure, this is a recoverable failure, we will consider retrying
                 // later.
-                super::storage::Error::LogTemporarilyUnavailable
-                | super::storage::Error::SnapshotTemporarilyUnavailable
-                | super::storage::Error::StorageTemporarilyUnavailable => {
+                crate::storage::Error::LogTemporarilyUnavailable
+                | crate::storage::Error::SnapshotTemporarilyUnavailable
+                | crate::storage::Error::StorageTemporarilyUnavailable => {
                     self.active_groups.insert(*group_id);
                     continue;
                 }
 
-                super::storage::Error::LogUnavailable
-                | super::storage::Error::SnapshotUnavailable => {
+                crate::storage::Error::LogUnavailable
+                | crate::storage::Error::SnapshotUnavailable => {
                     panic!(
                         "node {}: group {} storage unavailable",
                         self.node_id, *group_id
@@ -1065,8 +1064,8 @@ mod tests {
     use crate::storage::MemStorage;
     use crate::storage::MultiRaftMemoryStorage;
 
-    use crate::group::RaftGroup;
-    use crate::group::Status;
+    use crate::node::group::RaftGroup;
+    use crate::node::group::Status;
 
     use crate::prelude::ReplicaDesc;
     use crate::replica_cache::ReplicaCache;

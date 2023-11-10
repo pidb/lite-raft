@@ -2,12 +2,12 @@ use tracing::error;
 use tracing::trace;
 use tracing::Level;
 
+use crate::node::NodeManager;
 use crate::prelude::Message;
 use crate::prelude::MessageType;
 use crate::prelude::MultiRaftMessage;
 
 use super::error::Error;
-use super::node::NodeManager;
 use super::replica_cache::ReplicaCache;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;

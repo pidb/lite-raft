@@ -25,22 +25,22 @@ use crate::transport;
 use crate::utils;
 use crate::LeaderElectionEvent;
 
-use super::error::Error;
-use super::error::RaftGroupError;
-use super::event::Event;
 use super::group::RaftGroup;
 use super::group::Status;
-use super::multiraft::NO_NODE;
 use super::node::NodeWorker;
 use super::node::ResponseCallback;
 use super::node::ResponseCallbackQueue;
-use super::proposal::ProposalQueue;
-use super::proposal::ReadIndexQueue;
-use super::state::GroupState;
-use super::storage::MultiRaftStorage;
-use super::storage::RaftStorage;
-use super::transport::Transport;
-use super::ProposeRequest;
+use crate::error::Error;
+use crate::error::RaftGroupError;
+use crate::event::Event;
+use crate::multiraft::NO_NODE;
+use crate::proposal::ProposalQueue;
+use crate::proposal::ReadIndexQueue;
+use crate::state::GroupState;
+use crate::storage::MultiRaftStorage;
+use crate::storage::RaftStorage;
+use crate::transport::Transport;
+use crate::ProposeRequest;
 
 impl<TR, RS, MRS, REQ, RES> NodeWorker<TR, RS, MRS, REQ, RES>
 where
@@ -690,7 +690,7 @@ where
         // gs: &RS,
         replica_id: u64,
         entries: Vec<Entry>,
-    ) -> Result<ApplyData<RES>, super::storage::Error> {
+    ) -> Result<ApplyData<RES>, crate::storage::Error> {
         let group = self.groups.get_mut(&group_id).unwrap();
         let group_id = group.group_id();
         tracing::debug!(
@@ -727,7 +727,7 @@ where
         group_id: u64,
         replica_id: u64,
         entries: Vec<Entry>,
-    ) -> Result<ApplyData<RES>, super::storage::Error> {
+    ) -> Result<ApplyData<RES>, crate::storage::Error> {
         let group = self.groups.get_mut(&group_id).unwrap();
         // TODO: cache storage in related raft group.
         let gs = self
@@ -801,17 +801,17 @@ where
         }
     }
 
-    pub(crate) async fn handle_write(
+    pub(super) async fn handle_write(
         &mut self,
         group_id: u64,
         // group: &mut RaftGroup<RS, RES>,
         write: &mut GroupWriteRequest,
         // gs: &RS, // TODO: cache storage in RaftGroup
-    ) -> Result<Option<ApplyData<RES>>, super::storage::Error> {
+    ) -> Result<Option<ApplyData<RES>>, crate::storage::Error> {
         let gs = match self.storage.group_storage(group_id, write.replica_id).await {
             Ok(gs) => gs,
             Err(err) => match err {
-                super::storage::Error::StorageTemporarilyUnavailable => {
+                crate::storage::Error::StorageTemporarilyUnavailable => {
                     tracing::warn!(
                         "node {}: group {} handle_write but storage temporarily unavailable ",
                         self.node_id,
@@ -821,7 +821,7 @@ where
                     self.active_groups.insert(group_id);
                     return Err(err);
                 }
-                super::storage::Error::StorageUnavailable => {
+                crate::storage::Error::StorageUnavailable => {
                     panic!("node {}: storage unavailable", self.node_id)
                 }
                 _ => {
