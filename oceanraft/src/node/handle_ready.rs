@@ -10,6 +10,7 @@ use crate::prelude::Snapshot;
 use crate::transport;
 use crate::utils;
 use crate::LeaderElectionEvent;
+use crate::StateMachine;
 
 use super::actor::Inner;
 
@@ -28,11 +29,12 @@ pub(super) struct GroupWriteRequest {
     pub ready: Option<Ready>,
 }
 
-impl<TR, RS, MRS, REQ, RES> Inner<TR, RS, MRS, REQ, RES>
+impl<TR, RS, MRS, M, REQ, RES> Inner<TR, RS, MRS, M, REQ, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    M: StateMachine<REQ, RES>,
     REQ: ProposeRequest,
     RES: ProposeResponse,
 {
@@ -209,6 +211,15 @@ where
             ss.leader_id
         );
 
+        self.rsm
+            .on_leader_election(crate::rsm::LeaderElectionEvent {
+                node_id: self.node_id,
+                group_id,
+                leader_id: ss.leader_id,
+                replica_id,
+                term: group.term(),
+            })
+            .await;
         self.event_chan
             .push(Event::LederElection(LeaderElectionEvent {
                 group_id,

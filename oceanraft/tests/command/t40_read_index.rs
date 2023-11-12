@@ -37,7 +37,7 @@ async fn test_group_read_index() {
     let mut applied_kvs = HashMap::<String, StoreData>::new();
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
 

@@ -25,7 +25,7 @@ async fn test_no_leader() {
     let mut cluster = ClusterBuilder::<MemType>::new(nodes)
         .election_ticks(2)
         .state_machines(env.state_machines.clone())
-        .apply_rxs(take(&mut env.rxs))
+        .event_rxs(take(&mut env.rxs2))
         .storages(env.storages.clone())
         .build()
         .await;
@@ -40,7 +40,7 @@ async fn test_no_leader() {
     // all replicas should no elected.
     for i in 0..3 {
         let node_id = i + 1;
-        if let Ok(ev) = cluster.wait_leader_elect_event(node_id).await {
+        if let Ok(ev) = cluster.wait_leader_elect_event(node_id, None).await {
             panic!("expected no leader elected, got {:?}", ev);
         }
     }
@@ -96,7 +96,7 @@ async fn test_bad_group() {
     // now, trigger leader elect and it's should became leader.
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(1, plan.group_id).await;
-    let _ = cluster.wait_leader_elect_event(1).await.unwrap();
+    let _ = cluster.wait_leader_elect_event(1, None).await.unwrap();
 
     for i in 1..3 {
         let node_id = i + 1;

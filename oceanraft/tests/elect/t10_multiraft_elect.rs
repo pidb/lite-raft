@@ -19,7 +19,10 @@ async fn check_replica_should_elected(
 ) {
     // trigger an election for the replica in the group of the node where leader nodes.
     cluster.campaign_group(node_id, group_id).await;
-    let election = cluster.wait_leader_elect_event(node_id).await.unwrap();
+    let election = cluster
+        .wait_leader_elect_event(node_id, Some(Duration::from_millis(1000)))
+        .await
+        .unwrap();
 
     assert_eq!(election.group_id, group_id);
     assert_eq!(election.leader_id, expected_leaeder_id);
@@ -41,7 +44,7 @@ async fn test_initial_leader_elect() {
             .election_ticks(2)
             .state_machines(env.state_machines.clone())
             .storages(env.storages.clone())
-            .apply_rxs(take(&mut env.rxs))
+            .event_rxs(take(&mut env.rxs2))
             .build()
             .await;
 

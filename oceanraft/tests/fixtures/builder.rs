@@ -21,7 +21,6 @@ where
     node_size: usize,
     election_ticks: usize,
     storages: Vec<T::MS>,
-    apply_rxs: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
     event_rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
     state_machines: Vec<Option<T::M>>,
 }
@@ -36,7 +35,6 @@ where
             election_ticks: 0,
             storages: Vec::new(),
             state_machines: Vec::new(),
-            apply_rxs: Vec::new(),
             event_rxs: Vec::new(),
         }
     }
@@ -54,20 +52,20 @@ where
         self
     }
 
-    pub fn apply_rxs(mut self, rxs: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>) -> Self {
-        assert_eq!(
-            rxs.len(),
-            self.node_size,
-            "expect node {}, got nums {} of state machines",
-            self.node_size,
-            rxs.len(),
-        );
+    // pub fn apply_rxs(mut self, rxs: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>) -> Self {
+    //     assert_eq!(
+    //         rxs.len(),
+    //         self.node_size,
+    //         "expect node {}, got nums {} of state machines",
+    //         self.node_size,
+    //         rxs.len(),
+    //     );
 
-        self.apply_rxs = rxs;
-        self
-    }
+    //     self.apply_rxs = rxs;
+    //     self
+    // }
 
-    pub fn event_rsxs(mut self, rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>) -> Self {
+    pub fn event_rxs(mut self, rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>) -> Self {
         assert_eq!(
             rxs.len(),
             self.node_size,
@@ -108,11 +106,11 @@ where
         );
 
         assert_eq!(
-            self.apply_rxs.len(),
+            self.event_rxs.len(),
             self.node_size,
             "expect node {}, got nums {} of state machines",
             self.node_size,
-            self.apply_rxs.len(),
+            self.event_rxs.len(),
         );
 
         assert_eq!(
@@ -174,7 +172,7 @@ where
         }
         Cluster {
             storages: self.storages,
-            apply_events: take(&mut self.apply_rxs),
+            // apply_events: take(&mut self.apply_rxs),
             nodes,
             transport,
             tickers,

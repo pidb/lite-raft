@@ -170,9 +170,10 @@ where
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
         // let (apply_response_tx, apply_response_rx) = unbounded_channel();
         // let (group_query_tx, group_query_rx) = unbounded_channel();
+        let rsm = Arc::new(rsm);
         let apply = ApplyActor::spawn(
             cfg,
-            rsm,
+            &rsm,
             storage.clone(),
             states.clone(),
             tx.clone(),
@@ -182,10 +183,11 @@ where
             stopped.clone(),
         );
 
-        let mut worker = Inner::<TR, RS, MRS, W, R>::new(
+        let mut worker = Inner::<TR, RS, MRS, RSM, W, R>::new(
             cfg,
             transport,
             storage,
+            rsm,
             rx,
             // propose_rx,
             // campaign_rx,
@@ -237,11 +239,12 @@ where
     }
 }
 
-pub struct Inner<TR, RS, MRS, W, R>
+pub struct Inner<TR, RS, MRS, M, W, R>
 where
     TR: Transport,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    M: StateMachine<W, R>,
     W: ProposeRequest,
     R: ProposeResponse,
 {
@@ -261,13 +264,15 @@ where
     >,
     pub(crate) apply_msg_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
     pub(crate) shared_states: GroupStates,
+    pub(crate) rsm: Arc<M>,
 }
 
-impl<TR, RS, MRS, WD, RES> Inner<TR, RS, MRS, WD, RES>
+impl<TR, RS, MRS, M, WD, RES> Inner<TR, RS, MRS, M, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    M: StateMachine<WD, RES>,
     WD: ProposeRequest,
     RES: ProposeResponse,
 {
@@ -275,6 +280,7 @@ where
         cfg: &Config,
         transport: &TR,
         storage: &MRS,
+        rsm: Arc<M>,
         rx: utils::mpsc::WrapReceiver<NodeMessage<WD, RES>>,
         peer_msg_rx: mpsc::WrapReceiver<
             MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
@@ -283,13 +289,14 @@ where
         event_chan: &EventChannel,
         shared_states: GroupStates,
     ) -> Self {
-        Inner::<TR, RS, MRS, WD, RES> {
+        Inner::<TR, RS, MRS, M, WD, RES> {
             cfg: cfg.clone(),
             node_id: cfg.node_id,
             node_manager: NodeManager::new(),
             groups: HashMap::new(),
             node_msg_rx: rx,
             peer_msg_rx,
+            rsm,
             storage: storage.clone(),
             transport: transport.clone(),
             apply_msg_tx: apply_request_tx,
@@ -955,11 +962,16 @@ where
 mod tests {
     use std::sync::Arc;
 
+    use futures::Future;
+
     use super::Inner;
     use crate::proposal::ProposalQueue;
     use crate::proposal::ReadIndexQueue;
+    use crate::rsm::LeaderElectionEvent;
     use crate::storage::MemStorage;
     use crate::storage::MultiRaftMemoryStorage;
+    use crate::Apply;
+    use crate::StateMachine;
 
     use crate::node::group::RaftGroup;
     use crate::node::group::Status;
@@ -972,10 +984,35 @@ mod tests {
 
     use super::NodeManager;
     use crate::state::GroupState;
+
+    struct NoOpStateMachine {}
+    impl StateMachine<(), ()> for NoOpStateMachine {
+        type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+        fn apply(
+            &self,
+            _: u64,
+            _: u64,
+            _: &GroupState,
+            _: Vec<Apply<(), ()>>,
+        ) -> Self::ApplyFuture<'_> {
+            async move {}
+        }
+
+        type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+        fn on_leader_election(&self, _: LeaderElectionEvent) -> Self::OnLeaderElectionFuture<'_> {
+            async move {}
+        }
+    }
+
     type TestMultiRaftActorRuntime = Inner<
         LocalTransport<MultiRaftMessageSenderImpl>,
         MemStorage,
         MultiRaftMemoryStorage,
+        NoOpStateMachine,
         (),
         (),
     >;

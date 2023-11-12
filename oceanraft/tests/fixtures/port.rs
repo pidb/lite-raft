@@ -1,6 +1,7 @@
 use std::mem::take;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use oceanraft::rsm::LeaderElectionEvent;
 use oceanraft::ProposeRequest;
@@ -113,7 +114,7 @@ where
 
 /// Provides a mem storage and state machine environment for cluster.
 pub struct MemStoreEnv {
-    pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
+    // pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
     pub rxs2: Vec<Option<Receiver<StateMachineEvent<StoreData, ()>>>>,
     pub storages: Vec<MultiRaftMemoryStorage>,
     pub state_machines: Vec<MemStoreStateMachine<StoreData>>,
@@ -125,21 +126,21 @@ impl MemStoreEnv {
     /// - storages (multi-raft memory storage),
     /// - and state_machines (memory state machine implementation).
     pub fn new(nodes: usize) -> Self {
-        let mut rxs = vec![];
+        // let mut rxs = vec![];
         let mut rxs2 = vec![];
         let mut storages = vec![];
         let mut state_machines = vec![];
         for i in 0..nodes {
-            let (tx, rx) = channel(100);
+            // let (tx, rx) = channel(100);
             let (event_tx, event_rx) = channel(100);
-            rxs.push(Some(rx));
+            // rxs.push(Some(rx));
             rxs2.push(Some(event_rx));
-            state_machines.push(MemStoreStateMachine::new(tx, event_tx));
+            state_machines.push(MemStoreStateMachine::new(event_tx));
             storages.push(MultiRaftMemoryStorage::new((i + 1) as u64));
         }
 
         Self {
-            rxs,
+            // rxs,
             rxs2,
             storages,
             state_machines,
@@ -149,7 +150,7 @@ impl MemStoreEnv {
 
 /// Provides a rocksdb storage and state machine environment for cluster.
 pub struct RockStoreEnv {
-    pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
+    // pub rxs: Vec<Option<Receiver<Vec<Apply<StoreData, ()>>>>>,
     pub rxs2: Vec<Option<Receiver<StateMachineEvent<StoreData, ()>>>>,
     pub storages: Vec<RockStore<StateMachineStore<()>, StateMachineStore<()>>>,
     pub rock_kv_stores: Vec<StateMachineStore<()>>,
@@ -167,7 +168,6 @@ impl RockStoreEnv {
     /// - storage_paths (rocksdbs of storages storage path, destory when test end)
     /// - state_machine_paths (rocksdbs of rock_kv_stores storage path, destory when test end)
     pub fn new(nodes: usize) -> Self {
-        let mut rxs = vec![];
         let mut rxs2 = vec![];
         let mut storage_paths = vec![];
         let mut state_machine_paths = vec![];
@@ -188,15 +188,12 @@ impl RockStoreEnv {
                 storage_path.clone(),
                 kv_store.clone(),
             ));
-            let (tx, rx) = channel(100);
             let (event_tx, event_rx) = channel(100);
-            state_machines.push(RockStoreStateMachine::new(kv_store, tx, event_tx));
-            rxs.push(Some(rx));
+            state_machines.push(RockStoreStateMachine::new(kv_store, event_tx));
             rxs2.push(Some(event_rx));
         }
 
         Self {
-            rxs,
             rxs2,
             state_machines,
             storages,
@@ -231,7 +228,7 @@ pub async fn quickstart_rockstore_multi_groups(
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(take(&mut rockstore_env.rxs))
+        .event_rxs(take(&mut rockstore_env.rxs2))
         .build()
         .await;
     // create multi groups
@@ -246,9 +243,13 @@ pub async fn quickstart_rockstore_multi_groups(
         cluster.campaign_group(1, plan.group_id).await;
 
         for j in 0..3 {
-            let leader_event = Cluster::wait_leader_elect_event(&mut cluster, j + 1)
-                .await
-                .unwrap();
+            let leader_event = Cluster::wait_leader_elect_event(
+                &mut cluster,
+                j + 1,
+                Some(Duration::from_millis(1000)),
+            )
+            .await
+            .unwrap();
             assert_eq!(
                 (1..groups as u64 + 1).contains(&leader_event.group_id),
                 true,
@@ -274,7 +275,7 @@ pub async fn quickstart_rockstore_group(
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(std::mem::take(&mut rockstore_env.rxs))
+        .event_rxs(std::mem::take(&mut rockstore_env.rxs2))
         .build()
         .await;
 
@@ -292,9 +293,13 @@ pub async fn quickstart_rockstore_group(
 
     // check each replica should recv leader election event
     for i in 0..nodes {
-        let leader_event = Cluster::wait_leader_elect_event(&mut cluster, i as u64 + 1)
-            .await
-            .unwrap();
+        let leader_event = Cluster::wait_leader_elect_event(
+            &mut cluster,
+            i as u64 + 1,
+            Some(Duration::from_millis(1000)),
+        )
+        .await
+        .unwrap();
         assert_eq!(leader_event.group_id, 1);
         assert_eq!(leader_event.replica_id, 1);
     }
@@ -309,7 +314,7 @@ pub async fn quickstart_memstorage_group(env: &mut MemStoreEnv, nodes: usize) ->
         .election_ticks(2)
         .state_machines(env.state_machines.clone())
         .storages(env.storages.clone())
-        .apply_rxs(std::mem::take(&mut env.rxs))
+        .event_rxs(std::mem::take(&mut env.rxs2))
         .build()
         .await;
 
@@ -327,9 +332,13 @@ pub async fn quickstart_memstorage_group(env: &mut MemStoreEnv, nodes: usize) ->
 
     // check each replica should recv leader election event
     for i in 0..nodes {
-        let leader_event = Cluster::wait_leader_elect_event(&mut cluster, i as u64 + 1)
-            .await
-            .unwrap();
+        let leader_event = Cluster::wait_leader_elect_event(
+            &mut cluster,
+            i as u64 + 1,
+            Some(Duration::from_millis(1000)),
+        )
+        .await
+        .unwrap();
         assert_eq!(leader_event.group_id, 1);
         assert_eq!(leader_event.replica_id, 1);
     }

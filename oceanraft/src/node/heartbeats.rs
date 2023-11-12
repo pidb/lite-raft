@@ -14,12 +14,14 @@ use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
 use crate::transport::Transport;
 use crate::ProposeRequest;
+use crate::StateMachine;
 
-impl<TR, RS, MRS, WD, RES> Inner<TR, RS, MRS, WD, RES>
+impl<TR, RS, MRS, M, WD, RES> Inner<TR, RS, MRS, M, WD, RES>
 where
     TR: Transport + Clone,
     RS: RaftStorage,
     MRS: MultiRaftStorage<RS>,
+    M: StateMachine<WD, RES>,
     WD: ProposeRequest,
     RES: ProposeResponse,
 {

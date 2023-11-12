@@ -51,7 +51,7 @@ async fn test_log_storeage_unavailable() {
     }
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(100))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(100)))
         .await;
     assert_eq!(events.is_err(), true);
 
@@ -74,7 +74,7 @@ async fn test_log_storeage_unavailable() {
     }
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
 
@@ -122,7 +122,7 @@ async fn test_multi_storeage_unavailable() {
     }
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(100))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(100)))
         .await;
     assert_eq!(events.is_err(), true);
 
@@ -152,7 +152,7 @@ async fn test_multi_storeage_unavailable() {
     }
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
 

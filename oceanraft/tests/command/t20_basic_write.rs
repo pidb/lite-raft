@@ -41,7 +41,7 @@ async fn test_group_write() {
     // }
 
     let events = cluster
-        .wait_for_commands_apply(1, command_nums as usize, Duration::from_millis(1000))
+        .wait_for_commands_apply(1, command_nums as usize, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
 
@@ -95,7 +95,7 @@ async fn test_multigroup_write() {
         .wait_for_commands_apply(
             1,
             (groups * command_nums) as usize,
-            Duration::from_millis(5000),
+            Some(Duration::from_millis(5000)),
         )
         .await
         .unwrap();

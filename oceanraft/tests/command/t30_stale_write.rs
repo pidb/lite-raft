@@ -43,9 +43,13 @@ async fn test_group_stale_write() {
 
     cluster.campaign_group(2, group_id).await;
     for i in 1..3 {
-        let el = Cluster::wait_leader_elect_event(&mut cluster, i + 1)
-            .await
-            .unwrap();
+        let el = Cluster::wait_leader_elect_event(
+            &mut cluster,
+            i + 1,
+            Some(Duration::from_millis(1000)),
+        )
+        .await
+        .unwrap();
         assert_eq!(el.leader_id, 2);
     }
 
@@ -78,7 +82,7 @@ async fn test_group_stale_write() {
 
     // check normal
     let apply_events = cluster
-        .wait_for_commands_apply(2, command_size, Duration::from_millis(1000))
+        .wait_for_commands_apply(2, command_size, Some(Duration::from_millis(1000)))
         .await
         .unwrap();
     write_checker.check(&apply_events);

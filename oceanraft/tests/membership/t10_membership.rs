@@ -33,7 +33,7 @@ async fn test_single_step() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(take(&mut rockstore_env.rxs))
+        .event_rxs(take(&mut rockstore_env.rxs2))
         .build()
         .await;
 
@@ -48,9 +48,10 @@ async fn test_single_step() {
 
     // triger group to leader election.
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
-        .await
-        .unwrap();
+    let _ =
+        Cluster::wait_leader_elect_event(&mut cluster, node_id, Some(Duration::from_millis(1000)))
+            .await
+            .unwrap();
 
     let leader = cluster.nodes[0].clone();
 
@@ -148,7 +149,7 @@ async fn test_initial_joint_consensus() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(take(&mut rockstore_env.rxs))
+        .event_rxs(take(&mut rockstore_env.rxs2))
         .build()
         .await;
 
@@ -162,9 +163,10 @@ async fn test_initial_joint_consensus() {
     };
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
-        .await
-        .unwrap();
+    let _ =
+        Cluster::wait_leader_elect_event(&mut cluster, node_id, Some(Duration::from_millis(1000)))
+            .await
+            .unwrap();
 
     let leader = &cluster.nodes[0];
 
@@ -298,7 +300,7 @@ async fn test_joint_consensus() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(take(&mut rockstore_env.rxs))
+        .event_rxs(take(&mut rockstore_env.rxs2))
         .build()
         .await;
 
@@ -312,9 +314,10 @@ async fn test_joint_consensus() {
     };
     let _ = cluster.make_group(&mut plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
-        .await
-        .unwrap();
+    let _ =
+        Cluster::wait_leader_elect_event(&mut cluster, node_id, Some(Duration::from_millis(1000)))
+            .await
+            .unwrap();
     let leader = &cluster.nodes[0];
 
     // write some commands
@@ -553,9 +556,10 @@ async fn test_remove() {
     };
     let _ = cluster.make_group(&plan).await.unwrap();
     cluster.campaign_group(node_id, plan.group_id).await;
-    let _ = Cluster::wait_leader_elect_event(&mut cluster, node_id)
-        .await
-        .unwrap();
+    let _ =
+        Cluster::wait_leader_elect_event(&mut cluster, node_id, Some(Duration::from_millis(1000)))
+            .await
+            .unwrap();
 
     let leader = cluster.nodes[0].clone();
     // remove 3..5 nodes

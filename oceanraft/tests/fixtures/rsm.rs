@@ -18,7 +18,7 @@ pub struct MemStoreStateMachine<W>
 where
     W: ProposeRequest,
 {
-    tx: Sender<Vec<Apply<W, ()>>>,
+    // tx: Sender<Vec<Apply<W, ()>>>,
     event_tx: Sender<StateMachineEvent<W, ()>>,
 }
 
@@ -36,7 +36,7 @@ where
         state: &GroupState,
         mut applys: Vec<Apply<W, ()>>,
     ) -> Self::ApplyFuture<'life0> {
-        let tx = self.tx.clone();
+        let tx = self.event_tx.clone();
         async move {
             for apply in applys.iter_mut() {
                 match apply {
@@ -53,7 +53,7 @@ where
                 }
             }
 
-            tx.send(applys).await;
+            tx.send(StateMachineEvent::Apply(applys)).await;
         }
     }
 
@@ -72,29 +72,23 @@ impl<W> MemStoreStateMachine<W>
 where
     W: ProposeRequest,
 {
-    pub fn new(tx: Sender<Vec<Apply<W, ()>>>, event_tx: Sender<StateMachineEvent<W, ()>>) -> Self {
-        Self { tx, event_tx }
+    pub fn new(event_tx: Sender<StateMachineEvent<W, ()>>) -> Self {
+        Self { event_tx }
     }
 }
 
 #[derive(Clone)]
 pub struct RockStoreStateMachine {
     kv_store: StateMachineStore<()>,
-    tx: Sender<Vec<Apply<StoreData, ()>>>,
     event_tx: Sender<StateMachineEvent<StoreData, ()>>,
 }
 
 impl RockStoreStateMachine {
     pub fn new(
         kv_store: StateMachineStore<()>,
-        tx: Sender<Vec<Apply<StoreData, ()>>>,
         event_tx: Sender<StateMachineEvent<StoreData, ()>>,
     ) -> Self {
-        Self {
-            kv_store,
-            tx,
-            event_tx,
-        }
+        Self { kv_store, event_tx }
     }
 }
 
@@ -109,7 +103,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
         _state: &GroupState,
         mut applys: Vec<Apply<StoreData, ()>>,
     ) -> Self::ApplyFuture<'life0> {
-        let tx = self.tx.clone();
+        let tx = self.event_tx.clone();
         async move {
             let mut batch = self.kv_store.write_batch_for_apply(group_id);
             for apply in applys.iter_mut() {
@@ -149,7 +143,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
                 }
             }
 
-            if let Err(_) = tx.send(applys).await {}
+            if let Err(_) = tx.send(StateMachineEvent::Apply(applys)).await {}
         }
     }
 
@@ -160,11 +154,15 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
         &'life0 self,
         event: LeaderElectionEvent,
     ) -> Self::OnLeaderElectionFuture<'life0> {
+        let tx = self.event_tx.clone();
         async move {
             info!(
                 "group({}), replica({}) become leader, term = {}",
                 event.group_id, event.replica_id, event.term
             );
+            if let Err(_) = tx.send(StateMachineEvent::LeaderElection(event)).await {
+                info!("send leader election event failed");
+            }
         }
     }
 }

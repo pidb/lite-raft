@@ -80,6 +80,7 @@ where
     }
 }
 
+#[derive(Debug)]
 pub struct LeaderElectionEvent {
     pub node_id: u64,
     pub group_id: u64,

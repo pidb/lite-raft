@@ -63,7 +63,7 @@ where
 {
     pub election_ticks: usize,
     pub nodes: Vec<Arc<MultiRaft<T, LocalTransport<MultiRaftMessageSenderImpl>>>>,
-    pub apply_events: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
+    // pub apply_events: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
     pub events: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
@@ -223,32 +223,42 @@ where
 
     /// Wait elected.
     pub async fn wait_leader_elect_event(
-        // cluster: &mut FixtureCluster<R, S, MS>,
         &mut self,
         node_id: u64,
-        // rx: &mut Option<Receiver<Vec<Event>>>,
-    ) -> Result<LeaderElectionEvent, String> {
+        timeout: Option<Duration>,
+    ) -> Result<oceanraft::rsm::LeaderElectionEvent, String> {
         // let rx = cluster.mut_event_rx(node_id);
-        let rx = self.nodes[to_index(node_id)].subscribe();
-
+        // let rx = self.nodes[to_index(node_id)].subscribe();
+        let rx = self.events[to_index(node_id)].as_mut().unwrap();
         let wait_loop_fut = async {
             loop {
-                let event = match rx.recv().await {
-                    Err(err) => return Err(err.to_string()), // TODO: handle lagged
-                    Ok(event) => event,
-                };
+                if let Some(event) = rx.recv().await {
+                    match event {
+                        StateMachineEvent::LeaderElection(leader_elect) => return Ok(leader_elect),
+                        _ => {}
+                    }
+                }
+                // let event = match rx.recv().await {
+                //     Err(err) => return Err(err.to_string()), // TODO: handle lagged
+                //     Ok(event) => event,
+                // };
 
                 // for event in events {
-                match event {
-                    Event::LederElection(leader_elect) => return Ok(leader_elect),
-                    _ => {}
-                }
+                // match event {
+                //     Event::LederElection(leader_elect) => return Ok(leader_elect),
+                //     _ => {}
+                // }
                 // }
             }
         };
-        match timeout_at(Instant::now() + Duration::from_millis(1000), wait_loop_fut).await {
-            Err(_) => Err(format!("wait for leader elect event timeouted")),
-            Ok(res) => res,
+
+        if let Some(timeout) = timeout {
+            match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+                Err(_) => Err(format!("wait for leader elect event timeouted")),
+                Ok(res) => res,
+            }
+        } else {
+            wait_loop_fut.await
         }
     }
 
@@ -256,9 +266,10 @@ where
         &mut self,
         node_id: u64,
         wait_size: usize,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<Vec<ApplyNormal<T::D, T::R>>, String> {
-        let rx = self.apply_events[to_index(node_id)].as_mut().unwrap();
+        // let rx = self.apply_events[to_index(node_id)].as_mut().unwrap();
+        let rx = self.events[to_index(node_id)].as_mut().unwrap();
         let mut results_len = 0;
         let wait_loop_fut = async {
             let mut results = vec![];
@@ -267,26 +278,36 @@ where
                 if results.len() == wait_size {
                     return Ok(results);
                 }
-                let events = match rx.recv().await {
+                let event = match rx.recv().await {
                     None => return Err(String::from("the event sender dropped")),
                     Some(evs) => evs,
                 };
 
+                let apply_events = match event {
+                    StateMachineEvent::Apply(events) => events,
+                    _ => continue,
+                };
+
                 // check all events type should apply
-                for event in events {
-                    match event {
+                for apply_event in apply_events {
+                    match apply_event {
                         Apply::Normal(data) => results.push(data),
                         _ => {}
                     }
                 }
             }
         };
-        match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
-            Err(_) => Err(format!(
-                "wait for apply normal event timeouted, waited nums = {}",
-                results_len
-            )),
-            Ok(res) => res,
+
+        if let Some(timeout) = timeout {
+            match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+                Err(_) => Err(format!(
+                    "wait for apply normal event timeouted, waited nums = {}",
+                    results_len
+                )),
+                Ok(res) => res,
+            }
+        } else {
+            wait_loop_fut.await
         }
     }
 
@@ -294,28 +315,60 @@ where
     pub async fn wait_membership_change_apply_event(
         cluster: &mut Cluster<T>,
         node_id: u64,
-        timeout: Duration,
+        timeout: Option<Duration>,
     ) -> Result<ApplyMembership<T::R>, String> {
-        let rx = cluster.apply_events[to_index(node_id)].as_mut().unwrap();
+        let rx = cluster.events[to_index(node_id)].as_mut().unwrap();
         let wait_loop_fut = async {
             loop {
-                let events = match rx.recv().await {
+                let event = match rx.recv().await {
                     None => return Err(String::from("the event sender dropped")),
                     Some(evs) => evs,
                 };
 
-                for event in events {
-                    match event {
+                let apply_events = match event {
+                    StateMachineEvent::Apply(events) => events,
+                    _ => continue,
+                };
+
+                // check all events type should apply
+                for apply_event in apply_events {
+                    match apply_event {
                         Apply::Membership(membership) => return Ok(membership),
                         _ => {}
                     }
                 }
             }
         };
-        match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
-            Err(_) => Err(format!("wait for apply change event timeouted")),
-            Ok(res) => res,
+
+        if let Some(timeout) = timeout {
+            match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+                Err(_) => Err(format!("wait for apply change event timeouted")),
+                Ok(res) => res,
+            }
+        } else {
+            wait_loop_fut.await
         }
+
+        // let rx = cluster.apply_events[to_index(node_id)].as_mut().unwrap();
+        // let wait_loop_fut = async {
+        //     loop {
+        //         let events = match rx.recv().await {
+        //             None => return Err(String::from("the event sender dropped")),
+        //             Some(evs) => evs,
+        //         };
+
+        //         for event in events {
+        //             match event {
+        //                 Apply::Membership(membership) => return Ok(membership),
+        //                 _ => {}
+        //             }
+        //         }
+        //     }
+        // };
+        // match timeout_at(Instant::now() + timeout, wait_loop_fut).await {
+        //     Err(_) => Err(format!("wait for apply change event timeouted")),
+        //     Ok(res) => res,
+        // }
     }
 
     /// Write data to raft. return a onshot::Receiver to recv apply result.

@@ -60,7 +60,7 @@ pub struct ApplyActor;
 impl ApplyActor {
     pub(crate) fn spawn<W, R, RSM, S, MS>(
         cfg: &Config,
-        rsm: RSM,
+        rsm: &Arc<RSM>,
         storage: MS,
         shared_states: GroupStates,
         node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
@@ -262,7 +262,7 @@ where
 
     fn new(
         cfg: &Config,
-        rsm: RSM,
+        rsm: &Arc<RSM>,
         storage: MS,
         shared_states: GroupStates,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
@@ -383,7 +383,7 @@ where
 {
     node_id: u64,
     pending_senders: PendingSenderQueue<R>,
-    rsm: RSM,
+    rsm: Arc<RSM>,
     // commit_tx: UnboundedSender<ApplyCommitRequest>,
     node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
     _m1: PhantomData<W>,
@@ -398,14 +398,14 @@ where
 {
     fn new(
         node_id: u64,
-        rsm: RSM,
+        rsm: &Arc<RSM>,
         node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
         // commit_tx: UnboundedSender<ApplyCommitRequest>,
     ) -> Self {
         Self {
             node_id,
             pending_senders: PendingSenderQueue::new(),
-            rsm,
+            rsm: rsm.clone(),
             node_msg_tx,
             _m1: PhantomData,
             _m2: PhantomData,
@@ -771,6 +771,7 @@ fn parse_conf_change(
 mod test {
     use futures::Future;
     use std::collections::HashMap;
+    use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
     use crate::rsm::LeaderElectionEvent;
@@ -865,11 +866,11 @@ mod test {
         };
 
         let storage = MultiRaftMemoryStorage::new(1);
-        let rsm = NoOpStateMachine {};
+        let rsm = Arc::new(NoOpStateMachine {});
         let shared_states = GroupStates::new();
         ApplyWorker::new(
             &cfg,
-            rsm,
+            &rsm,
             storage,
             shared_states,
             request_rx,
