@@ -34,7 +34,7 @@ use crate::config::Config;
 use crate::error::ChannelError;
 use crate::error::Error;
 use crate::error::RaftGroupError;
-use crate::event::EventChannel;
+// use crate::event::EventChannel;
 use crate::msg::ApplyCommitRequest;
 use crate::msg::ApplyData;
 use crate::msg::ApplyMessage;
@@ -967,11 +967,9 @@ mod tests {
     use super::Inner;
     use crate::proposal::ProposalQueue;
     use crate::proposal::ReadIndexQueue;
-    use crate::rsm::GroupCreateEvent;
-    use crate::rsm::LeaderElectionEvent;
+    use crate::rsm_event;
     use crate::storage::MemStorage;
     use crate::storage::MultiRaftMemoryStorage;
-    use crate::Apply;
     use crate::StateMachine;
 
     use crate::node::group::RaftGroup;
@@ -991,27 +989,24 @@ mod tests {
         type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn apply(
-            &self,
-            _: u64,
-            _: u64,
-            _: &GroupState,
-            _: Vec<Apply<(), ()>>,
-        ) -> Self::ApplyFuture<'_> {
+        fn apply(&self, _: rsm_event::ApplyEvent<(), ()>) -> Self::ApplyFuture<'_> {
             async move {}
         }
 
         type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn on_leader_election(&self, _: LeaderElectionEvent) -> Self::OnLeaderElectionFuture<'_> {
+        fn on_leader_election(
+            &self,
+            _: rsm_event::LeaderElectionEvent,
+        ) -> Self::OnLeaderElectionFuture<'_> {
             async move {}
         }
 
         type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn on_group_create(&self, _: GroupCreateEvent) -> Self::OnGroupCreateFuture<'_> {
+        fn on_group_create(&self, _: rsm_event::GroupCreateEvent) -> Self::OnGroupCreateFuture<'_> {
             async move {}
         }
     }

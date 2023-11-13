@@ -3,19 +3,19 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use oceanraft::rsm::LeaderElectionEvent;
 use oceanraft::ProposeRequest;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::Receiver;
 
 use oceanraft::define_multiraft;
 use oceanraft::prelude::StoreData;
+use oceanraft::rsm_event::Apply;
+use oceanraft::rsm_event::LeaderElectionEvent;
 use oceanraft::storage::MemStorage;
 use oceanraft::storage::MultiRaftMemoryStorage;
 use oceanraft::storage::RockStore;
 use oceanraft::storage::RockStoreCore;
 use oceanraft::storage::StateMachineStore;
-use oceanraft::Apply;
 use oceanraft::ProposeResponse;
 
 use super::rand_temp_dir;

@@ -6,7 +6,6 @@ use tokio::sync::mpsc::Receiver;
 
 use oceanraft::tick::ManualTick;
 use oceanraft::transport::LocalTransport;
-use oceanraft::Apply;
 use oceanraft::Config;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftTypeSpecialization;

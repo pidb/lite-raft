@@ -2480,11 +2480,11 @@ mod tests {
     use crate::prelude::ReplicaDesc;
     use crate::prelude::Snapshot;
     use crate::protos::StoreData;
+    use crate::rsm_event::Apply;
+    use crate::rsm_event::ApplyNormal;
     use crate::storage::MultiRaftStorage;
     use crate::storage::RaftSnapshotWriter;
     use crate::storage::StorageExt;
-    use crate::Apply;
-    use crate::ApplyNormal;
 
     fn rand_temp_dir() -> PathBuf {
         let rand_str: String = rand::thread_rng()

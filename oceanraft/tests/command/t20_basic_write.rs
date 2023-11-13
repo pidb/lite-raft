@@ -12,7 +12,7 @@ use crate::fixtures::WriteChecker;
 #[async_entry::test(
     flavor = "multi_thread",
     init = "init_default_ut_tracing()",
-    tracing_span = "debug"
+    tracing_span = "info"
 )]
 async fn test_group_write() {
     let nodes = 3;

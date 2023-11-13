@@ -19,10 +19,12 @@ use tracing::Span;
 
 use crate::msg::NodeMessage;
 use crate::utils::mpsc;
-use crate::Apply;
-use crate::ApplyMembership;
-use crate::ApplyNoOp;
-use crate::ApplyNormal;
+// use crate::Apply;
+// use crate::ApplyMembership;
+// use crate::ApplyNoOp;
+// use crate::ApplyNormal;
+use crate::rsm::StateMachine;
+use crate::rsm_event;
 use crate::Config;
 use crate::Error;
 use crate::GroupState;
@@ -30,7 +32,6 @@ use crate::GroupStates;
 use crate::ProposeError;
 use crate::ProposeRequest;
 use crate::ProposeResponse;
-use crate::StateMachine;
 
 use crate::msg::MembershipRequestContext;
 use crate::prelude::ConfChange;
@@ -509,7 +510,11 @@ where
         Ok(conf_state)
     }
 
-    async fn handle_conf_change(&mut self, group_id: u64, ent: Entry) -> Option<Apply<W, R>> {
+    async fn handle_conf_change(
+        &mut self,
+        group_id: u64,
+        ent: Entry,
+    ) -> Option<rsm_event::Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
 
@@ -517,7 +522,7 @@ where
         // 联合点, 所以需要处理这种情况.
         if ent.data.is_empty() && ent.entry_type() != EntryType::EntryConfChangeV2 {
             // if ent.data.is_empty()  {
-            return Some(Apply::NoOp(ApplyNoOp {
+            return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
                 group_id,
                 index,
                 term,
@@ -580,7 +585,7 @@ where
             .map_or(None, |request_ctx| Some(request_ctx.data));
         let user_ctx = request_ctx.map_or(None, |ctx| ctx.user_ctx);
 
-        Some(Apply::Membership(ApplyMembership {
+        Some(rsm_event::Apply::Membership(rsm_event::ApplyMembership {
             group_id,
             index,
             term,
@@ -591,7 +596,7 @@ where
         }))
     }
 
-    fn handle_normal(&mut self, group_id: u64, ent: Entry) -> Option<Apply<W, R>> {
+    fn handle_normal(&mut self, group_id: u64, ent: Entry) -> Option<rsm_event::Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
         if ent.data.is_empty() {
@@ -603,7 +608,7 @@ where
                 self.node_id, group_id, index, term
             );
             self.pending_senders.remove_stales(index, term);
-            return Some(Apply::NoOp(ApplyNoOp {
+            return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
                 group_id,
                 index,
                 term,
@@ -623,7 +628,7 @@ where
         // TODO: handle this error
         let write_data = flexbuffer_deserialize(&ent.data).unwrap();
 
-        Some(Apply::Normal(ApplyNormal {
+        Some(rsm_event::Apply::Normal(rsm_event::ApplyNormal {
             group_id,
             is_conf_change: false,
             // entry,
@@ -705,9 +710,16 @@ where
         // Edge case: If index is 1, no logging has been applied, and applied is set to 0
 
         // TODO: handle apply error: setting applied to error before
-        self.rsm
-            .apply(group_id, apply.replica_id, &GroupState::default(), applys)
-            .await;
+        let apply_event = rsm_event::ApplyEvent {
+            node_id: self.node_id,
+            group_id,
+            replica_id: apply.replica_id,
+            commit_index: curr_commit_index,
+            commit_term: curr_commit_term,
+            leader_id: 0, // TODO: get leader id from raft group
+            applys,
+        };
+        self.rsm.apply(apply_event).await;
         // gs.set_applied(last_index, last_term).unwrap();
         state.applied_index = last_index;
         state.applied_term = last_term;
@@ -774,6 +786,7 @@ mod test {
     use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::rsm_event;
     use crate::rsm_event::GroupCreateEvent;
     use crate::rsm_event::LeaderElectionEvent;
     use crate::state::GroupState;
@@ -786,7 +799,6 @@ mod test {
     use crate::prelude::Entry;
     use crate::prelude::EntryType;
     use crate::utils::mpsc;
-    use crate::Apply;
     use crate::StateMachine;
 
     use super::ApplyData;
@@ -798,13 +810,7 @@ mod test {
         type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0
         where
             Self: 'life0;
-        fn apply(
-            &self,
-            _: u64,
-            _: u64,
-            _: &GroupState,
-            _: Vec<Apply<(), ()>>,
-        ) -> Self::ApplyFuture<'_> {
+        fn apply(&self, _: rsm_event::ApplyEvent<(), ()>) -> Self::ApplyFuture<'_> {
             async move {}
         }
 

@@ -729,5 +729,6 @@ pub use multiraft::{
     MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl, MultiRaftTypeSpecialization,
     ProposeRequest, ProposeResponse,
 };
-pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
+// pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
+pub use rsm::StateMachine;
 pub use state::{GroupState, GroupStates};

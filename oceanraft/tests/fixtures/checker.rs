@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use oceanraft::ApplyNormal;
 use oceanraft::prelude::StoreData;
-
-// use super::cluster::FixtureWriteData;
-
+use oceanraft::rsm_event::ApplyNormal;
 
 #[derive(Default)]
 struct Commands(HashMap<u64, Vec<StoreData>>);
@@ -21,7 +18,7 @@ impl Commands {
     }
 }
 
-#[derive(Default,Debug)]
+#[derive(Default, Debug)]
 pub struct WriteChecker {
     writes: Commands,
     applys: Commands,
@@ -29,7 +26,7 @@ pub struct WriteChecker {
 
 impl WriteChecker {
     pub fn insert_write(&mut self, group_id: u64, data: StoreData) {
-       self.writes.insert(group_id, data);
+        self.writes.insert(group_id, data);
     }
 
     pub fn check(&mut self, applys: &Vec<ApplyNormal<StoreData, ()>>) {
@@ -54,7 +51,6 @@ impl Debug for Commands {
         write!(f, "]")
     }
 }
-
 
 impl PartialEq for Commands {
     fn eq(&self, other: &Self) -> bool {

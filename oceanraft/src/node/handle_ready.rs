@@ -7,6 +7,7 @@ use crate::msg::ApplyData;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
+use crate::rsm_event;
 use crate::transport;
 use crate::utils;
 use crate::StateMachine;
@@ -210,7 +211,7 @@ where
         );
 
         self.rsm
-            .on_leader_election(crate::rsm::LeaderElectionEvent {
+            .on_leader_election(rsm_event::LeaderElectionEvent {
                 node_id: self.node_id,
                 group_id,
                 leader_id: ss.leader_id,
@@ -218,12 +219,6 @@ where
                 term: group.term(),
             })
             .await;
-        // self.event_chan
-        //     .push(Event::LederElection(LeaderElectionEvent {
-        //         group_id,
-        //         leader_id: ss.leader_id,
-        //         replica_id,
-        //     }));
     }
 
     async fn handle_apply_entries(
@@ -345,9 +340,7 @@ where
     pub(super) async fn handle_write(
         &mut self,
         group_id: u64,
-        // group: &mut RaftGroup<RS, RES>,
         write: &mut GroupWriteRequest,
-        // gs: &RS, // TODO: cache storage in RaftGroup
     ) -> Result<Option<ApplyData<RES>>, crate::storage::Error> {
         let gs = match self.storage.group_storage(group_id, write.replica_id).await {
             Ok(gs) => gs,

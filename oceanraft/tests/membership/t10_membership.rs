@@ -7,9 +7,9 @@ use oceanraft::prelude::ConfState;
 use oceanraft::prelude::MembershipChangeData;
 use oceanraft::prelude::SingleMembershipChange;
 use oceanraft::prelude::StoreData;
+use oceanraft::rsm_event::Apply;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::Storage;
-use oceanraft::Apply;
 use tokio::time::sleep;
 
 use crate::fixtures::init_default_ut_tracing;

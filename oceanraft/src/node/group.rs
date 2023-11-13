@@ -165,11 +165,6 @@ where
         self.commit_index = index;
     }
 
-    #[inline]
-    pub(crate) fn proposal_queue_mut(&mut self) -> &mut ProposalQueue<RES> {
-        &mut self.proposals
-    }
-
     fn pre_propose_write<WD: ProposeRequest>(
         &mut self,
         request: &WriteRequest<WD, RES>,

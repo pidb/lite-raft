@@ -1,10 +1,7 @@
 use futures::Future;
 use oceanraft::prelude::StoreData;
-use oceanraft::rsm::GroupCreateEvent;
-use oceanraft::rsm::LeaderElectionEvent;
+use oceanraft::rsm_event;
 use oceanraft::storage::StateMachineStore;
-use oceanraft::Apply;
-use oceanraft::ApplyNormal;
 use oceanraft::GroupState;
 use oceanraft::ProposeRequest;
 use oceanraft::ProposeResponse;
@@ -32,18 +29,15 @@ where
             Self: 'life0;
     fn apply<'life0>(
         &'life0 self,
-        group_id: u64,
-        preplica_id: u64,
-        state: &GroupState,
-        mut applys: Vec<Apply<W, ()>>,
+        mut event: rsm_event::ApplyEvent<W, ()>,
     ) -> Self::ApplyFuture<'life0> {
         let tx = self.event_tx.clone();
         async move {
-            for apply in applys.iter_mut() {
+            for apply in event.applys.iter_mut() {
                 match apply {
-                    Apply::NoOp(noop) => {}
-                    Apply::Normal(normal) => {}
-                    Apply::Membership(membership) => {
+                    rsm_event::Apply::NoOp(noop) => {}
+                    rsm_event::Apply::Normal(normal) => {}
+                    rsm_event::Apply::Membership(membership) => {
                         // TODO: if group is leader, we need save conf state to kv store.
                         // FIXME: don't use default trait
                         membership
@@ -54,7 +48,7 @@ where
                 }
             }
 
-            tx.send(StateMachineEvent::Apply(applys)).await;
+            tx.send(StateMachineEvent::Apply(event.applys)).await;
         }
     }
 
@@ -63,7 +57,7 @@ where
             Self: 'life0;
     fn on_leader_election<'life0>(
         &'life0 self,
-        event: LeaderElectionEvent,
+        event: rsm_event::LeaderElectionEvent,
     ) -> Self::OnLeaderElectionFuture<'life0> {
         async move {}
     }
@@ -73,7 +67,7 @@ where
         Self: 'life0;
     fn on_group_create<'life0>(
         &'life0 self,
-        _: GroupCreateEvent,
+        _: rsm_event::GroupCreateEvent,
     ) -> Self::OnGroupCreateFuture<'life0> {
         async move {}
     }
@@ -109,26 +103,23 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
         Self: 'life0;
     fn apply<'life0>(
         &'life0 self,
-        group_id: u64,
-        replica_id: u64,
-        _state: &GroupState,
-        mut applys: Vec<Apply<StoreData, ()>>,
+        mut event: rsm_event::ApplyEvent<StoreData, ()>,
     ) -> Self::ApplyFuture<'life0> {
         let tx = self.event_tx.clone();
         async move {
-            let mut batch = self.kv_store.write_batch_for_apply(group_id);
-            for apply in applys.iter_mut() {
+            let mut batch = self.kv_store.write_batch_for_apply(event.group_id);
+            for apply in event.applys.iter_mut() {
                 match apply {
-                    Apply::NoOp(noop) => {
+                    rsm_event::Apply::NoOp(noop) => {
                         batch.set_applied_index(noop.index);
                         batch.set_applied_term(noop.term);
                     }
-                    Apply::Normal(normal) => {
+                    rsm_event::Apply::Normal(normal) => {
                         batch.put_data(&normal.data);
                         batch.set_applied_index(normal.index);
                         batch.set_applied_term(normal.term);
                     }
-                    Apply::Membership(membership) => {
+                    rsm_event::Apply::Membership(membership) => {
                         // membership.done().await.unwrap();
                         // TODO: if group is leader, we need save conf state to kv store.
                         batch.set_applied_index(membership.index);
@@ -137,15 +128,17 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
                     }
                 }
             }
-            self.kv_store.write_apply_bath(group_id, batch).unwrap();
+            self.kv_store
+                .write_apply_bath(event.group_id, batch)
+                .unwrap();
 
-            for apply in applys.iter_mut() {
+            for apply in event.applys.iter_mut() {
                 match apply {
-                    Apply::NoOp(_) => {}
-                    Apply::Normal(normal) => {
+                    rsm_event::Apply::NoOp(_) => {}
+                    rsm_event::Apply::Normal(normal) => {
                         normal.tx.take().map(|tx| tx.send(Ok(((), None))));
                     }
-                    Apply::Membership(membership) => {
+                    rsm_event::Apply::Membership(membership) => {
                         membership
                             .tx
                             .take()
@@ -154,7 +147,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
                 }
             }
 
-            if let Err(_) = tx.send(StateMachineEvent::Apply(applys)).await {}
+            if let Err(_) = tx.send(StateMachineEvent::Apply(event.applys)).await {}
         }
     }
 
@@ -163,7 +156,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
         Self: 'life0;
     fn on_leader_election<'life0>(
         &'life0 self,
-        event: LeaderElectionEvent,
+        event: rsm_event::LeaderElectionEvent,
     ) -> Self::OnLeaderElectionFuture<'life0> {
         let tx = self.event_tx.clone();
         async move {
@@ -182,7 +175,7 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
         Self: 'life0;
     fn on_group_create<'life0>(
         &'life0 self,
-        _: GroupCreateEvent,
+        _: rsm_event::GroupCreateEvent,
     ) -> Self::OnGroupCreateFuture<'life0> {
         async move {}
     }

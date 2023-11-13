@@ -10,6 +10,7 @@ use oceanraft::prelude::CreateGroupRequest;
 
 use oceanraft::MultiRaftTypeSpecialization;
 
+use oceanraft::rsm_event;
 use rand::distributions::Alphanumeric;
 use rand::Rng;
 use tokio::sync::mpsc::Receiver;
@@ -20,16 +21,14 @@ use tokio::time::Instant;
 use oceanraft::prelude::ConfState;
 use oceanraft::prelude::ReplicaDesc;
 use oceanraft::prelude::Snapshot;
+use oceanraft::rsm_event::Apply;
+use oceanraft::rsm_event::ApplyMembership;
+use oceanraft::rsm_event::ApplyNormal;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::StorageExt;
 use oceanraft::tick::ManualTick;
 use oceanraft::transport::LocalTransport;
-use oceanraft::Apply;
-use oceanraft::ApplyMembership;
-use oceanraft::ApplyNormal;
 use oceanraft::Error;
-use oceanraft::Event;
-use oceanraft::LeaderElectionEvent;
 use oceanraft::MultiRaft;
 use oceanraft::MultiRaftMessageSenderImpl;
 
@@ -226,7 +225,7 @@ where
         &mut self,
         node_id: u64,
         timeout: Option<Duration>,
-    ) -> Result<oceanraft::rsm::LeaderElectionEvent, String> {
+    ) -> Result<rsm_event::LeaderElectionEvent, String> {
         // let rx = cluster.mut_event_rx(node_id);
         // let rx = self.nodes[to_index(node_id)].subscribe();
         let rx = self.events[to_index(node_id)].as_mut().unwrap();
