@@ -147,7 +147,7 @@ where
         transport: &TR,
         storage: &MRS,
         rsm: RSM,
-        event_bcast: &EventChannel,
+        // event_bcast: &EventChannel,
         ticker: Option<Box<dyn Ticker>>,
         states: GroupStates,
         stopped: Arc<AtomicBool>,
@@ -195,7 +195,7 @@ where
             apply_request_tx,
             // apply_response_rx,
             // manage_rx,
-            event_bcast,
+            // event_bcast,
             // commit_rx,
             // group_query_rx,
             states,
@@ -257,7 +257,7 @@ where
     pub(crate) groups: HashMap<u64, RaftGroup<RS, R>>,
     pub(crate) active_groups: HashSet<u64>,
     pub(crate) pending_responses: ResponseCallbackQueue,
-    pub(crate) event_chan: EventChannel,
+    // pub(crate) event_chan: EventChannel,
     pub(crate) node_msg_rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
     pub(crate) peer_msg_rx: mpsc::WrapReceiver<
         MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
@@ -286,7 +286,7 @@ where
             MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
         >,
         apply_request_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
-        event_chan: &EventChannel,
+        // event_chan: &EventChannel,
         shared_states: GroupStates,
     ) -> Self {
         Inner::<TR, RS, MRS, M, WD, RES> {
@@ -302,7 +302,7 @@ where
             apply_msg_tx: apply_request_tx,
             active_groups: HashSet::new(),
             replica_cache: ReplicaCache::new(storage.clone()),
-            event_chan: event_chan.clone(),
+            // event_chan: event_chan.clone(),
             pending_responses: ResponseCallbackQueue::new(),
             shared_states,
         }
@@ -383,7 +383,7 @@ where
                 break;
             }
 
-            self.event_chan.flush();
+            // self.event_chan.flush();
             tokio::select! {
                 // Note: see https://github.com/tokio-rs/tokio/discussions/4019 for more
                 // information about why mut here.
@@ -967,6 +967,7 @@ mod tests {
     use super::Inner;
     use crate::proposal::ProposalQueue;
     use crate::proposal::ReadIndexQueue;
+    use crate::rsm::GroupCreateEvent;
     use crate::rsm::LeaderElectionEvent;
     use crate::storage::MemStorage;
     use crate::storage::MultiRaftMemoryStorage;
@@ -1004,6 +1005,13 @@ mod tests {
         where
             Self: 'life0;
         fn on_leader_election(&self, _: LeaderElectionEvent) -> Self::OnLeaderElectionFuture<'_> {
+            async move {}
+        }
+
+        type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+        fn on_group_create(&self, _: GroupCreateEvent) -> Self::OnGroupCreateFuture<'_> {
             async move {}
         }
     }

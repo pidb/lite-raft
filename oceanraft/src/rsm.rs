@@ -3,13 +3,14 @@ extern crate raft_proto;
 use futures::Future;
 use tokio::sync::oneshot;
 
-use crate::multiraft::ProposeResponse;
-use crate::prelude::ConfState;
-use crate::prelude::MembershipChangeData;
-
 use super::error::Error;
 use super::GroupState;
 use super::ProposeRequest;
+use crate::multiraft::ProposeResponse;
+use crate::prelude::ConfState;
+use crate::prelude::MembershipChangeData;
+use crate::rsm_event::GroupCreateEvent;
+use crate::rsm_event::LeaderElectionEvent;
 
 #[derive(Debug)]
 pub struct ApplyNoOp {
@@ -80,15 +81,6 @@ where
     }
 }
 
-#[derive(Debug)]
-pub struct LeaderElectionEvent {
-    pub node_id: u64,
-    pub group_id: u64,
-    pub leader_id: u64,
-    pub replica_id: u64,
-    pub term: u64,
-}
-
 pub trait StateMachine<W, R>: Send + Sync + 'static
 where
     W: ProposeRequest,
@@ -115,4 +107,14 @@ where
         &'life0 self,
         event: LeaderElectionEvent,
     ) -> Self::OnLeaderElectionFuture<'life0>;
+
+    type OnGroupCreateFuture<'life0>: Send + Future<Output = ()> + 'life0
+    where
+        Self: 'life0;
+
+    /// Called when a new group is created.
+    fn on_group_create<'life0>(
+        &'life0 self,
+        event: GroupCreateEvent,
+    ) -> Self::OnGroupCreateFuture<'life0>;
 }

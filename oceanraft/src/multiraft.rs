@@ -24,8 +24,6 @@ use crate::utils::mpsc;
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
-use super::event::EventChannel;
-use super::event::EventReceiver;
 // use super::msg::ManageMessage;
 use super::msg::MembershipRequest;
 // use super::msg::ProposeMessage;
@@ -131,7 +129,7 @@ where
     stopped: Arc<AtomicBool>,
     actor: Mutex<Option<NodeActor<T::D, T::R>>>,
     shared_states: GroupStates,
-    event_bcast: EventChannel,
+    // event_bcast: EventChannel,
     storage: T::MS,
     transport: TR,
     state_machine: Mutex<Option<T::M>>,
@@ -154,7 +152,7 @@ where
         cfg.validate()?;
         let node_id = cfg.node_id;
         let states = GroupStates::new();
-        let event_bcast = EventChannel::new(cfg.event_capacity);
+        // let event_bcast = EventChannel::new(cfg.event_capacity);
         let stopped = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
@@ -164,7 +162,7 @@ where
             state_machine: Mutex::new(Some(state_machine)),
             ticker: Mutex::new(ticker),
             node_id,
-            event_bcast,
+            // event_bcast,
             actor: Mutex::new(None),
             shared_states: states,
             stopped,
@@ -187,7 +185,7 @@ where
             &self.transport,
             &self.storage,
             state_machine,
-            &self.event_bcast,
+            // &self.event_bcast,
             ticker,
             self.shared_states.clone(),
             self.stopped.clone(),
@@ -206,14 +204,14 @@ where
         cfg.validate()?;
         let node_id = cfg.node_id;
         let states = GroupStates::new();
-        let event_bcast = EventChannel::new(cfg.event_capacity);
+        // let event_bcast = EventChannel::new(cfg.event_capacity);
         let stopped = Arc::new(AtomicBool::new(false));
         let actor = NodeActor::spawn(
             &cfg,
             &transport,
             &storage,
             state_machine,
-            &event_bcast,
+            // &event_bcast,
             ticker,
             states.clone(),
             stopped.clone(),
@@ -226,7 +224,7 @@ where
             state_machine: Mutex::new(None),
             ticker: Mutex::new(None),
             node_id,
-            event_bcast,
+            // event_bcast,
             actor: Mutex::new(Some(actor)),
             shared_states: states,
             stopped,
@@ -631,12 +629,12 @@ where
         }
     }
 
-    #[inline]
-    /// Creates a new Receiver connected to event channel Sender.
-    /// Note: The Receiver **does not** turn this channel into a broadcast channel.
-    pub fn subscribe(&self) -> EventReceiver {
-        self.event_bcast.subscribe()
-    }
+    // #[inline]
+    // /// Creates a new Receiver connected to event channel Sender.
+    // /// Note: The Receiver **does not** turn this channel into a broadcast channel.
+    // pub fn subscribe(&self) -> EventReceiver {
+    //     self.event_bcast.subscribe()
+    // }
 
     pub async fn stop(&self) {
         self.stopped

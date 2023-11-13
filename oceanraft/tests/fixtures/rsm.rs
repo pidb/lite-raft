@@ -1,5 +1,6 @@
 use futures::Future;
 use oceanraft::prelude::StoreData;
+use oceanraft::rsm::GroupCreateEvent;
 use oceanraft::rsm::LeaderElectionEvent;
 use oceanraft::storage::StateMachineStore;
 use oceanraft::Apply;
@@ -64,6 +65,16 @@ where
         &'life0 self,
         event: LeaderElectionEvent,
     ) -> Self::OnLeaderElectionFuture<'life0> {
+        async move {}
+    }
+
+    type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0
+    where
+        Self: 'life0;
+    fn on_group_create<'life0>(
+        &'life0 self,
+        _: GroupCreateEvent,
+    ) -> Self::OnGroupCreateFuture<'life0> {
         async move {}
     }
 }
@@ -164,6 +175,16 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
                 info!("send leader election event failed");
             }
         }
+    }
+
+    type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0
+    where
+        Self: 'life0;
+    fn on_group_create<'life0>(
+        &'life0 self,
+        _: GroupCreateEvent,
+    ) -> Self::OnGroupCreateFuture<'life0> {
+        async move {}
     }
 }
 

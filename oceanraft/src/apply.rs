@@ -774,7 +774,8 @@ mod test {
     use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
-    use crate::rsm::LeaderElectionEvent;
+    use crate::rsm_event::GroupCreateEvent;
+    use crate::rsm_event::LeaderElectionEvent;
     use crate::state::GroupState;
     use crate::state::GroupStates;
     use crate::storage::MemStorage;
@@ -811,6 +812,13 @@ mod test {
         where
             Self: 'life0;
         fn on_leader_election(&self, _: LeaderElectionEvent) -> Self::OnLeaderElectionFuture<'_> {
+            async move {}
+        }
+
+        type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0
+        where
+            Self: 'life0;
+        fn on_group_create(&self, _: GroupCreateEvent) -> Self::OnGroupCreateFuture<'_> {
             async move {}
         }
     }

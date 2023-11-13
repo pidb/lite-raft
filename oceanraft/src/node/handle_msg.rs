@@ -12,7 +12,6 @@ use super::group::Status;
 
 use crate::error::Error;
 use crate::error::RaftGroupError;
-use crate::event::Event;
 use crate::msg::MembershipRequest;
 use crate::msg::ReadIndexRequest;
 use crate::msg::WriteRequest;
@@ -27,6 +26,7 @@ use crate::proposal::ProposalQueue;
 use crate::proposal::ReadIndexQueue;
 use crate::protos::CreateGroupRequest;
 use crate::protos::RemoveGroupRequest;
+use crate::rsm_event;
 use crate::state::GroupState;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
@@ -462,10 +462,18 @@ where
         }
         self.groups.insert(group_id, group);
 
-        self.event_chan.push(Event::GroupCreate {
-            group_id,
-            replica_id,
-        });
+        // self.event_chan.push(Event::GroupCreate {
+        //     group_id,
+        //     replica_id,
+        // });
+
+        self.rsm
+            .on_group_create(rsm_event::GroupCreateEvent {
+                node_id: self.node_id,
+                group_id,
+                replica_id,
+            })
+            .await;
 
         let prev_shard_state = self.shared_states.insert(group_id, shared_state);
 

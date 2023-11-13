@@ -703,7 +703,7 @@ pub mod prelude {
 mod apply;
 mod config;
 mod error;
-mod event;
+// mod event;
 // mod group;
 pub mod log;
 mod msg;
@@ -715,6 +715,7 @@ mod node;
 mod proposal;
 mod replica_cache;
 pub mod rsm;
+pub mod rsm_event;
 mod state;
 pub mod storage;
 pub mod tick;
@@ -723,7 +724,7 @@ pub mod utils;
 
 pub use config::Config;
 pub use error::{Error, MultiRaftStorageError, ProposeError, RaftCoreError, RaftGroupError};
-pub use event::{Event, LeaderElectionEvent};
+// pub use event::{Event, LeaderElectionEvent};
 pub use multiraft::{
     MultiRaft, MultiRaftMessageSender, MultiRaftMessageSenderImpl, MultiRaftTypeSpecialization,
     ProposeRequest, ProposeResponse,

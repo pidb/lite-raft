@@ -9,14 +9,12 @@ use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
 use crate::transport;
 use crate::utils;
-use crate::LeaderElectionEvent;
 use crate::StateMachine;
 
 use super::actor::Inner;
 
 use crate::error::Error;
 use crate::error::RaftGroupError;
-use crate::event::Event;
 use crate::multiraft::NO_NODE;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
@@ -220,12 +218,12 @@ where
                 term: group.term(),
             })
             .await;
-        self.event_chan
-            .push(Event::LederElection(LeaderElectionEvent {
-                group_id,
-                leader_id: ss.leader_id,
-                replica_id,
-            }));
+        // self.event_chan
+        //     .push(Event::LederElection(LeaderElectionEvent {
+        //         group_id,
+        //         leader_id: ss.leader_id,
+        //         replica_id,
+        //     }));
     }
 
     async fn handle_apply_entries(
