@@ -701,6 +701,7 @@ pub mod prelude {
 }
 
 mod apply;
+mod apply_delegate;
 mod config;
 mod error;
 // mod event;

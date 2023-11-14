@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use prost::Message;
@@ -139,6 +140,58 @@ where
         };
     }
 
+    async fn main_loop(mut self, stopped: Arc<AtomicBool>) {
+        info!("node {}: start apply main_loop", self.node_id);
+        let mut pending_msgs = Vec::with_capacity(self.cfg.max_batch_apply_msgs);
+
+        loop {
+            if stopped.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::select! {
+                // TODO: handle if the node actor stopped
+                Some((_span, msg)) = self.rx.recv() =>  {
+                    if pending_msgs.len() < self.cfg.max_batch_apply_msgs {
+                        pending_msgs.push(msg);
+                    }
+                },
+                else => {}
+            }
+
+            if pending_msgs.len() == self.cfg.max_batch_apply_msgs {
+                self.handle_msgs(pending_msgs.drain(..)).await;
+            }
+        }
+    }
+
+    async fn handle_msgs(&mut self, msgs: std::vec::Drain<'_, ApplyMessage<R>>) {
+        let pending_applys = self.batch_msgs(msgs);
+        for ((group_id, replica_id), applys) in pending_applys {
+            let apply_state = self
+                .local_apply_states
+                .entry(group_id)
+                .or_insert(LocalApplyState::default());
+
+            let _ = self
+                .delegate
+                .handle_applys(group_id, replica_id, applys, apply_state)
+                .await;
+
+            let res = ApplyResultRequest {
+                group_id,
+                applied_index: apply_state.applied_index,
+                applied_term: apply_state.applied_term,
+            };
+
+            if let Err(_) = self.node_msg_tx.send(NodeMessage::ApplyResult(res)).await {
+                error!(
+                    "node {}: send response failed, the node actor dropped",
+                    self.node_id
+                );
+            }
+        }
+    }
+
     // This method performs a batch of apply from the same group in multiple requests,
     // if batch is successful, multiple requests from the same group are batched into one apply,
     // otherwise pending in FIFO order.
@@ -201,64 +254,6 @@ where
         }
 
         pending_applys
-    }
-
-    async fn handle_msgs(&mut self, msgs: std::vec::Drain<'_, ApplyMessage<R>>) {
-        let pending_applys = self.batch_msgs(msgs);
-        for ((group_id, replica_id), applys) in pending_applys {
-            let gs = self
-                .storage
-                .group_storage(group_id, replica_id)
-                .await
-                .unwrap();
-
-            let apply_state = self
-                .local_apply_states
-                .entry(group_id)
-                .or_insert(LocalApplyState::default());
-
-            let _ = self
-                .delegate
-                .handle_applys(group_id, replica_id, applys, apply_state, &gs)
-                .await;
-
-            let res = ApplyResultRequest {
-                group_id,
-                applied_index: apply_state.applied_index,
-                applied_term: apply_state.applied_term,
-            };
-
-            if let Err(_) = self.node_msg_tx.send(NodeMessage::ApplyResult(res)).await {
-                error!(
-                    "node {}: send response failed, the node actor dropped",
-                    self.node_id
-                );
-            }
-        }
-    }
-
-    async fn main_loop(mut self, stopped: Arc<AtomicBool>) {
-        info!("node {}: start apply main_loop", self.node_id);
-        let mut pending_msgs = Vec::with_capacity(self.cfg.max_batch_apply_msgs);
-
-        loop {
-            if stopped.load(std::sync::atomic::Ordering::SeqCst) {
-                break;
-            }
-            tokio::select! {
-                // TODO: handle if the node actor stopped
-                Some((_span, msg)) = self.rx.recv() =>  {
-                    if pending_msgs.len() < self.cfg.max_batch_apply_msgs {
-                        pending_msgs.push(msg);
-                    }
-                },
-                else => {}
-            }
-
-            if pending_msgs.len() == self.cfg.max_batch_apply_msgs {
-                self.handle_msgs(pending_msgs.drain(..)).await;
-            }
-        }
     }
 
     fn new(
@@ -644,12 +639,7 @@ where
         }))
     }
 
-    async fn handle_apply<S: RaftStorage>(
-        &mut self,
-        mut apply: ApplyData<R>,
-        state: &mut LocalApplyState,
-        gs: &S,
-    ) {
+    async fn handle_apply(&mut self, mut apply: ApplyData<R>, state: &mut LocalApplyState) {
         let group_id = apply.group_id;
         let (prev_applied_index, prev_applied_term) = (state.applied_index, state.applied_term);
         let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
@@ -725,16 +715,15 @@ where
         state.applied_term = last_term;
     }
 
-    async fn handle_applys<S: RaftStorage>(
+    async fn handle_applys(
         &mut self,
         group_id: u64,
         replica_id: u64,
         applys: Vec<ApplyData<R>>,
         apply_state: &mut LocalApplyState,
-        gs: &S,
     ) {
         for apply in applys {
-            self.handle_apply(apply, apply_state, gs).await;
+            self.handle_apply(apply, apply_state).await;
         }
     }
 }
