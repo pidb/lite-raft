@@ -19,7 +19,7 @@ use crate::fixtures::ClusterBuilder;
 use crate::fixtures::MakeGroupPlan;
 use crate::fixtures::RockStoreEnv;
 use crate::fixtures::RockType;
-
+use crate::fixtures::StateMachineEvent;
 #[async_entry::test(
     flavor = "multi_thread",
     init = "init_default_ut_tracing()",
@@ -243,7 +243,7 @@ async fn test_initial_joint_consensus() {
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }
-    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+    for (_, rx) in cluster.events.iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {
             let mut matched = false;
@@ -251,20 +251,23 @@ async fn test_initial_joint_consensus() {
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(mut membership) => {
-                                membership.conf_state.voters.sort();
-                                if membership.conf_state == expected {
-                                    matched = true;
-                                    break;
+                Ok(event) => match event {
+                    StateMachineEvent::Apply(applys) => {
+                        for apply in applys {
+                            match apply {
+                                Apply::Membership(mut membership) => {
+                                    membership.conf_state.voters.sort();
+                                    if membership.conf_state == expected {
+                                        matched = true;
+                                        break;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
+                    _ => continue,
+                },
             }
             if matched {
                 break;
@@ -376,7 +379,7 @@ async fn test_joint_consensus() {
         learners_next: vec![],
         auto_leave: false,
     };
-    for (_, rx) in cluster.apply_events[0..3].iter_mut().enumerate() {
+    for (_, rx) in cluster.events[0..3].iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {
             let mut matched = false;
@@ -384,20 +387,23 @@ async fn test_joint_consensus() {
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(mut membership) => {
-                                membership.conf_state.voters.sort();
-                                if membership.conf_state == expected_entered {
-                                    matched = true;
-                                    break;
+                Ok(event) => match event {
+                    StateMachineEvent::Apply(applys) => {
+                        for apply in applys {
+                            match apply {
+                                Apply::Membership(mut membership) => {
+                                    membership.conf_state.voters.sort();
+                                    if membership.conf_state == expected_entered {
+                                        matched = true;
+                                        break;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
+                    _ => continue,
+                },
             }
             if matched {
                 break;
@@ -417,50 +423,56 @@ async fn test_joint_consensus() {
         cluster.tickers[0].non_blocking_tick();
     }
 
-    let rx = cluster.apply_events[0].as_mut().unwrap();
+    let rx = cluster.events[0].as_mut().unwrap();
     let mut matched = false;
     loop {
         match rx.try_recv() {
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            Ok(applys) => {
-                for apply in applys {
-                    match apply {
-                        Apply::Normal(apply) => {
-                            if data == apply.data {
-                                matched = true;
-                                break;
+            Ok(event) => match event {
+                StateMachineEvent::Apply(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Normal(apply) => {
+                                if data == apply.data {
+                                    matched = true;
+                                    break;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
+                _ => continue,
+            },
         }
         if matched {
             break;
         }
     }
 
-    let rx = cluster.apply_events[3].as_mut().unwrap();
+    let rx = cluster.events[3].as_mut().unwrap();
     let mut matched = false;
     loop {
         match rx.try_recv() {
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
             Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-            Ok(applys) => {
-                for apply in applys {
-                    match apply {
-                        Apply::Normal(apply) => {
-                            if data == apply.data {
-                                matched = true;
-                                break;
+            Ok(event) => match event {
+                StateMachineEvent::Apply(applys) => {
+                    for apply in applys {
+                        match apply {
+                            Apply::Normal(apply) => {
+                                if data == apply.data {
+                                    matched = true;
+                                    break;
+                                }
                             }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
-            }
+                _ => continue,
+            },
         }
         if matched {
             break;
@@ -486,7 +498,7 @@ async fn test_joint_consensus() {
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }
-    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+    for (_, rx) in cluster.events.iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {
             let mut matched = false;
@@ -494,20 +506,23 @@ async fn test_joint_consensus() {
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(mut membership) => {
-                                membership.conf_state.voters.sort();
-                                if membership.conf_state == expected {
-                                    matched = true;
-                                    break;
+                Ok(event) => match event {
+                    StateMachineEvent::Apply(applys) => {
+                        for apply in applys {
+                            match apply {
+                                Apply::Membership(mut membership) => {
+                                    membership.conf_state.voters.sort();
+                                    if membership.conf_state == expected {
+                                        matched = true;
+                                        break;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
+                    _ => continue,
+                },
             }
             if matched {
                 break;
@@ -542,7 +557,7 @@ async fn test_remove() {
         .election_ticks(2)
         .state_machines(rockstore_env.state_machines.clone())
         .storages(rockstore_env.storages.clone())
-        .apply_rxs(take(&mut rockstore_env.rxs))
+        .event_rxs(take(&mut rockstore_env.rxs2))
         .build()
         .await;
 
@@ -594,7 +609,7 @@ async fn test_remove() {
         auto_leave: false,
     };
 
-    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+    for (_, rx) in cluster.events.iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {
             let mut matched = false;
@@ -602,20 +617,23 @@ async fn test_remove() {
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(mut membership) => {
-                                membership.conf_state.voters.sort();
-                                if membership.conf_state.voters == expected.voters {
-                                    matched = true;
-                                    break;
+                Ok(event) => match event {
+                    StateMachineEvent::Apply(applys) => {
+                        for apply in applys {
+                            match apply {
+                                Apply::Membership(mut membership) => {
+                                    membership.conf_state.voters.sort();
+                                    if membership.conf_state == expected {
+                                        matched = true;
+                                        break;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
+                    _ => continue,
+                },
             }
             if matched {
                 break;
@@ -634,7 +652,7 @@ async fn test_remove() {
     for _ in 0..10 {
         cluster.tickers[0].non_blocking_tick();
     }
-    for (_, rx) in cluster.apply_events.iter_mut().enumerate() {
+    for (_, rx) in cluster.events.iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {
             let mut matched = false;
@@ -642,20 +660,23 @@ async fn test_remove() {
             match rx.try_recv() {
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => unreachable!(),
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
-                Ok(applys) => {
-                    for apply in applys {
-                        match apply {
-                            Apply::Membership(mut membership) => {
-                                membership.conf_state.voters.sort();
-                                if membership.conf_state == expected {
-                                    matched = true;
-                                    break;
+                Ok(event) => match event {
+                    StateMachineEvent::Apply(applys) => {
+                        for apply in applys {
+                            match apply {
+                                Apply::Membership(mut membership) => {
+                                    membership.conf_state.voters.sort();
+                                    if membership.conf_state == expected {
+                                        matched = true;
+                                        break;
+                                    }
                                 }
+                                _ => {}
                             }
-                            _ => {}
                         }
                     }
-                }
+                    _ => continue,
+                },
             }
             if matched {
                 break;

@@ -17,5 +17,5 @@ pub use checker::WriteChecker;
 pub use port::{
     new_rock_kv_stores, new_rocks_storeages, quickstart_memstorage_group,
     quickstart_rockstore_group, quickstart_rockstore_multi_groups, MemStoreEnv, MemType,
-    RockStoreEnv, RockType,
+    RockStoreEnv, RockType, StateMachineEvent,
 };
