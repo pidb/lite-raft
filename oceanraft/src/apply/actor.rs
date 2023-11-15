@@ -50,7 +50,7 @@ use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
 use crate::utils::flexbuffer_deserialize;
 
-use crate::apply::delegate::ApplyDelegate;
+use crate::apply::delegate::Delegate;
 
 #[derive(Debug, Default)]
 pub(super) struct LocalApplyState {
@@ -111,7 +111,7 @@ where
     // tx: UnboundedSender<ApplyResultRequest>,
     node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
 
-    delegate: ApplyDelegate<W, R, RSM>,
+    delegate: Delegate<W, R, RSM>,
     local_apply_states: HashMap<u64, LocalApplyState>,
     shared_states: GroupStates,
     storage: MS,
@@ -173,10 +173,7 @@ where
                 .entry(group_id)
                 .or_insert(LocalApplyState::default());
 
-            let _ = self
-                .delegate
-                .handle_applys(group_id, replica_id, applys, apply_state)
-                .await;
+            let _ = self.delegate.handle_applys(applys, apply_state).await;
 
             let res = ApplyResultRequest {
                 group_id,
@@ -213,7 +210,7 @@ where
                             Self::insert_pending_apply(
                                 &mut pending_applys,
                                 group_id,
-                                apply.replica_id,
+                                apply.meta.replica_id,
                                 apply,
                             );
                         } else {
@@ -226,7 +223,7 @@ where
                                             Self::insert_pending_apply(
                                                 &mut pending_applys,
                                                 group_id,
-                                                apply.replica_id,
+                                                apply.meta.replica_id,
                                                 batch_apply.take().expect("unreachable"),
                                             );
                                         }
@@ -248,7 +245,7 @@ where
                 Self::insert_pending_apply(
                     &mut pending_applys,
                     group_id,
-                    batch_apply.replica_id,
+                    batch_apply.meta.replica_id,
                     batch_apply,
                 );
             }
@@ -274,9 +271,9 @@ where
             rx: request_rx,
             node_msg_tx: node_msg_tx.clone(),
             // tx: response_tx,
-            shared_states,
+            shared_states: shared_states.clone(),
             storage,
-            delegate: ApplyDelegate::new(cfg.node_id, rsm, node_msg_tx),
+            delegate: Delegate::new(cfg.node_id, rsm, node_msg_tx),
             _m: PhantomData,
         }
     }
@@ -289,6 +286,8 @@ mod test {
     use std::sync::Arc;
     use tokio::sync::mpsc::unbounded_channel;
 
+    use crate::msg::ApplyDataMeta;
+    use crate::multiraft::NO_LEADER;
     use crate::rsm_event;
     use crate::rsm_event::GroupCreateEvent;
     use crate::rsm_event::LeaderElectionEvent;
@@ -358,12 +357,15 @@ mod test {
     ) -> ApplyData<()> {
         let entries = new_entries(ent_start, ent_end, term, entry_size);
         ApplyData {
-            group_id,
-            replica_id,
-            term,
-            commit_index: entries[entries.len() - 1].index,
-            commit_term: entries[entries.len() - 1].term,
-            entries_size: entries.iter().map(|ent| compute_entry_size(ent)).sum(),
+            meta: ApplyDataMeta {
+                group_id,
+                replica_id,
+                leader_id: NO_LEADER,
+                term,
+                commit_index: entries[entries.len() - 1].index,
+                commit_term: entries[entries.len() - 1].term,
+                entries_size: entries.iter().map(|ent| compute_entry_size(ent)).sum(),
+            },
             proposals: Vec::default(),
             entries,
         }

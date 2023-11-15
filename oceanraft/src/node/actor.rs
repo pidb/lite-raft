@@ -16,6 +16,7 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
+use super::confchange::ApplyConfDelegate;
 use super::handle_ready::GroupWriteRequest;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
@@ -543,7 +544,35 @@ where
         match commit {
             ApplyCommitRequest::None => return,
             ApplyCommitRequest::Membership((commit, tx)) => {
-                let res = self.commit_membership_change(commit).await;
+                let group_id = commit.group_id;
+                let group = match self.groups.get_mut(&group_id) {
+                    Some(group) => group,
+                    None => {
+                        error!(
+                            "node {}: commit membership change failed: group {} deleted",
+                            self.node_id, group_id,
+                        );
+                        return;
+                    }
+                };
+
+                let group_storage =
+                    match self.storage.group_storage(group_id, group.replica_id).await {
+                        Ok(gs) => gs,
+                        Err(err) => return,
+                    };
+
+                let mut delegate = ApplyConfDelegate::new(
+                    self.node_id,
+                    group,
+                    &group_storage,
+                    &mut self.node_manager,
+                    &mut self.replica_cache,
+                );
+
+                let res = delegate.handle(commit).await;
+
+                // let res = self.commit_membership_change(commit).await;
                 self.pending_responses
                     .push_back(ResponseCallbackQueue::new_callback(tx, res))
             }
@@ -577,6 +606,22 @@ where
             }
         };
 
+        // The leader communicates with the new member after the membership change,
+        // sends the snapshot contains the member configuration, and then follower
+        // install snapshot.
+        // The Append Entries are then received by followers and committed, but the
+        // new member configuration is already applied to the followers when the
+        // snapshot is installed. In raft-rs, duplicate joint consensus is not allowed,
+        // so we catch the error and skip.
+        let conf = group.raft_group.raft.prs().conf().to_conf_state();
+        if view.conf_change.enter_joint().is_some() && !conf.voters_outgoing.is_empty() {
+            debug!(
+                "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
+                self.node_id, group_id, group.replica_id, view.conf_change
+            );
+            return Ok(conf);
+        }
+
         // apply to inner state
         for (conf_change, change_request) in view.conf_change.changes.iter().zip(changes.iter()) {
             match conf_change.change_type() {
@@ -607,47 +652,18 @@ where
             }
         }
 
-        // The leader communicates with the new member after the membership change,
-        // sends the snapshot contains the member configuration, and then follower
-        // install snapshot.
-        // The Append Entries are then received by followers and committed, but the
-        // new member configuration is already applied to the followers when the
-        // snapshot is installed. In raft-rs, duplicate joint consensus is not allowed,
-        // so we catch the error and skip.
-        if !view.conf_change.leave_joint() && view.conf_change.enter_joint().is_some() {
-            debug!(
-                "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
-                self.node_id, group_id, group.replica_id, view.conf_change
-            );
-            let conf_state = group.raft_group.raft.prs().conf().to_conf_state();
-            if !conf_state.voters_outgoing.is_empty() {
-                return Ok(conf_state);
-            }
-        }
+        // if !view.conf_change.leave_joint() && view.conf_change.enter_joint().is_some() {
+        //     debug!(
+        //         "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
+        //         self.node_id, group_id, group.replica_id, view.conf_change
+        //     );
+        //     let conf_state = group.raft_group.raft.prs().conf().to_conf_state();
+        //     if !conf_state.voters_outgoing.is_empty() {
+        //         return Ok(conf_state);
+        //     }
+        // }
 
         return self.apply_conf_change(view).await;
-        // apply to raft
-        // let conf_state = match group.raft_group.apply_conf_change(&view.conf_change) {
-        //     Err(err) => {
-        //         error!(
-        //             "node {}: commit membership change error: group = {}, err = {}",
-        //             self.node_id, group_id, err,
-        //         );
-        //         return Err(Error::Raft(err));
-        //     }
-        //     Ok(conf_state) => conf_state,
-        // };
-
-        // let gs = &self
-        //     .storage
-        //     .group_storage(group_id, group.replica_id)
-        //     .await?;
-        // gs.set_confstate(conf_state.clone())?;
-        // debug!(
-        //     "node {}: applied conf_state {:?} for group {} replica{}",
-        //     self.node_id, conf_state, group_id, group.replica_id
-        // );
-        // return Ok(conf_state);
     }
 
     async fn apply_conf_change(

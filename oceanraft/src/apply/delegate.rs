@@ -17,6 +17,7 @@ use crate::error::ChannelError;
 use crate::error::DeserializationError;
 use crate::msg::ApplyCommitRequest;
 use crate::msg::ApplyData;
+use crate::msg::ApplyDataMeta;
 use crate::msg::CommitMembership;
 use crate::msg::MembershipRequestContext;
 use crate::msg::NodeMessage;
@@ -29,6 +30,7 @@ use crate::rsm_event;
 use crate::utils::flexbuffer_deserialize;
 use crate::utils::mpsc;
 use crate::Error;
+use crate::GroupStates;
 use crate::ProposeError;
 use crate::ProposeRequest;
 use crate::ProposeResponse;
@@ -112,18 +114,16 @@ where
         self.conf_change.take()
     }
 
-    fn remove_stales(&mut self, index: u64, term: u64) {
+    fn pop_stales(&mut self, index: u64, term: u64) -> Vec<PendingSender<RES>> {
+        let mut stales = vec![];
         while let Some(p) = self.pop_normal(index, term) {
-            p.tx.map(|tx| {
-                tx.send(Err(Error::Propose(ProposeError::Stale(
-                    p.term, 0, /*FIXME: with term */
-                ))))
-            });
+            stales.push(p);
         }
+        stales
     }
 }
 
-pub struct ApplyDelegate<W, R, RSM>
+pub struct Delegate<W, R, RSM>
 where
     W: ProposeRequest,
     R: ProposeResponse,
@@ -137,7 +137,7 @@ where
     _m2: PhantomData<R>,
 }
 
-impl<W, R, RSM> ApplyDelegate<W, R, RSM>
+impl<W, R, RSM> Delegate<W, R, RSM>
 where
     W: ProposeRequest,
     R: ProposeResponse,
@@ -254,20 +254,165 @@ where
         Ok(conf_state)
     }
 
+    pub(super) async fn handle_applys(
+        &mut self,
+        applys: Vec<ApplyData<R>>,
+        apply_state: &mut LocalApplyState,
+    ) {
+        for apply in applys {
+            self.handle_apply(apply, apply_state).await;
+        }
+    }
+
+    async fn handle_apply(&mut self, mut apply: ApplyData<R>, state: &mut LocalApplyState) {
+        let group_id = apply.meta.group_id;
+        let (prev_applied_index, prev_applied_term) = (state.applied_index, state.applied_term);
+        let (curr_commit_index, curr_commit_term) =
+            (apply.meta.commit_index, apply.meta.commit_term);
+
+        // check if the state machine is backword
+        if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
+            panic!(
+                "commit state jump backward {:?} -> {:?}",
+                (prev_applied_index, prev_applied_term),
+                (curr_commit_index, curr_commit_term)
+            );
+        }
+
+        if apply.entries.is_empty() {
+            return;
+        }
+
+        // Helps applications establish monotonically increasing apply constraints for each batch.
+        //
+        // Notes:
+        // If the `LocalApplyState` applied_index is equal to 0, it means the `Storage` **is not**
+        // created with a configuration, and its last index and term should be equal to 0. This
+        // case can happen when a consensus group is started with a membership change.
+        // In this case, we give up continue check and then catch up leader state.
+        // if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
+        //     panic!(
+        //         "node {}: group {} apply entries index does not match, expect {}, but got {}",
+        //         self.node_id,
+        //         group_id,
+        //         prev_applied_index + 1,
+        //         apply.entries[0].index
+        //     );
+        // }
+
+        self.push_pending_proposals(std::mem::take(&mut apply.proposals));
+        let last_index = apply.entries.last().expect("unreachable").index;
+        let last_term = apply.entries.last().expect("unreachable").term;
+
+        let mut applys = vec![];
+        for ent in apply.entries.into_iter() {
+            let apply = match ent.entry_type() {
+                EntryType::EntryNormal => self.handle_normal(&apply.meta, ent),
+                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
+                    self.handle_conf_change(&apply.meta, ent).await
+                }
+            };
+
+            if let Some(apply) = apply {
+                applys.push(apply)
+            }
+        }
+
+        // Since we feed the state machine probably a batch of entry logs, represented by IntoIter,
+        // processing applied can be divided into the following scenarios:
+        // 1. If maybe_failed_iter returns None, all entries have been applied successfully, and
+        //    applied is set to commit_index
+        // 2. If maybe_failed_iter returns Some, but next of maybe_failed_iter is None, this equals case 1
+        // 3. Otherwise, maybe_failed_iter.next() -1 fails. We set applied as the index of the successful application log
+        //
+        // Edge case: If index is 1, no logging has been applied, and applied is set to 0
+
+        // TODO: handle apply error: setting applied to error before
+        let apply_event = rsm_event::ApplyEvent {
+            node_id: self.node_id,
+            group_id,
+            replica_id: apply.meta.replica_id,
+            commit_index: curr_commit_index,
+            commit_term: curr_commit_term,
+            leader_id: apply.meta.leader_id,
+            applys,
+        };
+        self.rsm.apply(apply_event).await;
+        // gs.set_applied(last_index, last_term).unwrap();
+        state.applied_index = last_index;
+        state.applied_term = last_term;
+    }
+
+    fn handle_normal(
+        &mut self,
+        meta: &ApplyDataMeta,
+        ent: Entry,
+    ) -> Option<rsm_event::Apply<W, R>> {
+        let index = ent.index;
+        let term = ent.term;
+        if ent.data.is_empty() {
+            // When the new leader online, a no-op log will be send and commit.
+            // we will skip this log for the application and set index and term after
+            // apply.
+            info!(
+                "node {}: group = {} skip no-op entry index = {}, term = {}",
+                self.node_id, meta.group_id, index, term
+            );
+
+            // If there are still pending proposals, these should be removed because a
+            // new leader elected.
+            let stales = self.pending_senders.pop_stales(index, term);
+            for p in stales {
+                p.tx.map(|tx| tx.send(Err(Error::Propose(ProposeError::Stale(p.term, meta.term)))));
+            }
+            return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
+                group_id: meta.group_id,
+                index,
+                term,
+            }));
+        }
+
+        trace!(
+            "staging pending apply entry log ({}, {})",
+            ent.index,
+            ent.term
+        );
+
+        let tx = self
+            .find_pending(ent.term, ent.index, false)
+            .map_or(None, |p| p.tx);
+
+        // TODO: handle this error
+        let data = flexbuffer_deserialize(&ent.data).unwrap();
+
+        Some(rsm_event::Apply::Normal(rsm_event::ApplyNormal {
+            group_id: meta.group_id,
+            is_conf_change: false,
+            index,
+            term,
+            data,
+            context: if ent.context.is_empty() {
+                None
+            } else {
+                Some(ent.context)
+            },
+            tx,
+        }))
+    }
+
     async fn handle_conf_change(
         &mut self,
-        group_id: u64,
+        meta: &ApplyDataMeta,
         ent: Entry,
     ) -> Option<rsm_event::Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
 
-        // 当 ConfChangeV2 的转换类型为 Explicit/Auto 时，会发送一个空的 v2 变更来让联合共识离开
-        // 联合点, 所以需要处理这种情况.
-        if ent.data.is_empty() && ent.entry_type() != EntryType::EntryConfChangeV2 {
-            // if ent.data.is_empty()  {
+        // When ConfChangeV2's transition type is Explicit/Auto, an empty v2 change is sent to
+        // get the union consensus to leave the union point, so this case needs to be handled.
+        if ent.data.is_empty() && ent.entry_type() == EntryType::EntryConfChangeV2 {
             return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
-                group_id,
+                group_id: meta.group_id,
                 index,
                 term,
             }));
@@ -302,7 +447,7 @@ where
         // we make the commit an idempotent operation (TODO).
         let conf_state = match self
             .commit_membership_change(CommitMembership {
-                group_id,
+                group_id: meta.group_id,
                 index,
                 term,
                 conf_change,
@@ -330,7 +475,7 @@ where
         let user_ctx = request_ctx.map_or(None, |ctx| ctx.user_ctx);
 
         Some(rsm_event::Apply::Membership(rsm_event::ApplyMembership {
-            group_id,
+            group_id: meta.group_id,
             index,
             term,
             conf_state,
@@ -338,142 +483,6 @@ where
             ctx: user_ctx,
             tx,
         }))
-    }
-
-    fn handle_normal(&mut self, group_id: u64, ent: Entry) -> Option<rsm_event::Apply<W, R>> {
-        let index = ent.index;
-        let term = ent.term;
-        if ent.data.is_empty() {
-            // When the new leader online, a no-op log will be send and commit.
-            // we will skip this log for the application and set index and term after
-            // apply.
-            info!(
-                "node {}: group = {} skip no-op entry index = {}, term = {}",
-                self.node_id, group_id, index, term
-            );
-            self.pending_senders.remove_stales(index, term);
-            return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
-                group_id,
-                index,
-                term,
-            }));
-        }
-
-        trace!(
-            "staging pending apply entry log ({}, {})",
-            ent.index,
-            ent.term
-        );
-
-        let tx = self
-            .find_pending(ent.term, ent.index, false)
-            .map_or(None, |p| p.tx);
-
-        // TODO: handle this error
-        let write_data = flexbuffer_deserialize(&ent.data).unwrap();
-
-        Some(rsm_event::Apply::Normal(rsm_event::ApplyNormal {
-            group_id,
-            is_conf_change: false,
-            // entry,
-            index,
-            term,
-            data: write_data,
-            context: if ent.context.is_empty() {
-                None
-            } else {
-                Some(ent.context)
-            },
-            tx,
-        }))
-    }
-
-    async fn handle_apply(&mut self, mut apply: ApplyData<R>, state: &mut LocalApplyState) {
-        let group_id = apply.group_id;
-        let (prev_applied_index, prev_applied_term) = (state.applied_index, state.applied_term);
-        let (curr_commit_index, curr_commit_term) = (apply.commit_index, apply.commit_term);
-        // check if the state machine is backword
-        if prev_applied_index > curr_commit_index || prev_applied_term > curr_commit_term {
-            panic!(
-                "commit state jump backward {:?} -> {:?}",
-                (prev_applied_index, prev_applied_term),
-                (curr_commit_index, curr_commit_term)
-            );
-        }
-
-        if apply.entries.is_empty() {
-            return;
-        }
-
-        // Helps applications establish monotonically increasing apply constraints for each batch.
-        //
-        // Notes:
-        // If the `LocalApplyState` applied_index is equal to 0, it means the `Storage` **is not**
-        // created with a configuration, and its last index and term should be equal to 0. This
-        // case can happen when a consensus group is started with a membership change.
-        // In this case, we give up continue check and then catch up leader state.
-        // if prev_applied_index != 0 && apply.entries[0].index != prev_applied_index + 1 {
-        //     panic!(
-        //         "node {}: group {} apply entries index does not match, expect {}, but got {}",
-        //         self.node_id,
-        //         group_id,
-        //         prev_applied_index + 1,
-        //         apply.entries[0].index
-        //     );
-        // }
-
-        self.push_pending_proposals(std::mem::take(&mut apply.proposals));
-        let last_index = apply.entries.last().expect("unreachable").index;
-        let last_term = apply.entries.last().expect("unreachable").term;
-        let mut applys = vec![];
-        for ent in apply.entries.into_iter() {
-            let apply = match ent.entry_type() {
-                EntryType::EntryNormal => self.handle_normal(group_id, ent),
-                EntryType::EntryConfChange | EntryType::EntryConfChangeV2 => {
-                    self.handle_conf_change(group_id, ent).await
-                }
-            };
-
-            if let Some(apply) = apply {
-                applys.push(apply)
-            }
-        }
-
-        // Since we feed the state machine probably a batch of entry logs, represented by IntoIter,
-        //processing applied can be divided into the following scenarios:
-        // 1. If maybe_failed_iter returns None, all entries have been applied successfully, and
-        //    applied is set to commit_index
-        // 2. If maybe_failed_iter returns Some, but next of maybe_failed_iter is None, this equals case 1
-        // 3. Otherwise, maybe_failed_iter.next() -1 fails. We set applied as the index of the successful application log
-        //
-        // Edge case: If index is 1, no logging has been applied, and applied is set to 0
-
-        // TODO: handle apply error: setting applied to error before
-        let apply_event = rsm_event::ApplyEvent {
-            node_id: self.node_id,
-            group_id,
-            replica_id: apply.replica_id,
-            commit_index: curr_commit_index,
-            commit_term: curr_commit_term,
-            leader_id: 0, // TODO: get leader id from raft group
-            applys,
-        };
-        self.rsm.apply(apply_event).await;
-        // gs.set_applied(last_index, last_term).unwrap();
-        state.applied_index = last_index;
-        state.applied_term = last_term;
-    }
-
-    pub(super) async fn handle_applys(
-        &mut self,
-        group_id: u64,
-        replica_id: u64,
-        applys: Vec<ApplyData<R>>,
-        apply_state: &mut LocalApplyState,
-    ) {
-        for apply in applys {
-            self.handle_apply(apply, apply_state).await;
-        }
     }
 }
 

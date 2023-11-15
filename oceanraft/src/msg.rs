@@ -124,17 +124,23 @@ where
 pub const SUGGEST_MAX_APPLY_BATCH_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug)]
+pub struct ApplyDataMeta {
+    pub replica_id: u64,
+    pub group_id: u64,
+    pub leader_id: u64,
+    pub term: u64,
+    pub commit_index: u64,
+    pub commit_term: u64,
+    pub entries_size: usize,
+}
+
+#[derive(Debug)]
 pub struct ApplyData<R>
 where
     R: ProposeResponse,
 {
-    pub replica_id: u64,
-    pub group_id: u64,
-    pub term: u64,
-    pub commit_index: u64,
-    pub commit_term: u64,
+    pub meta: ApplyDataMeta,
     pub entries: Vec<Entry>,
-    pub entries_size: usize,
     pub proposals: Vec<Proposal<R>>,
 }
 
@@ -143,19 +149,19 @@ where
     R: ProposeResponse,
 {
     pub fn try_batch(&mut self, that: &mut ApplyData<R>, max_batch_size: usize) -> bool {
-        assert_eq!(self.replica_id, that.replica_id);
-        assert_eq!(self.group_id, that.group_id);
-        assert!(that.term >= self.term);
-        assert!(that.commit_index >= self.commit_index);
-        assert!(that.commit_term >= self.commit_term);
-        if max_batch_size == 0 || self.entries_size + that.entries_size > max_batch_size {
+        assert_eq!(self.meta.replica_id, that.meta.replica_id);
+        assert_eq!(self.meta.group_id, that.meta.group_id);
+        assert!(that.meta.term >= self.meta.term);
+        assert!(that.meta.commit_index >= self.meta.commit_index);
+        assert!(that.meta.commit_term >= self.meta.commit_term);
+        if max_batch_size == 0 || self.meta.entries_size + that.meta.entries_size > max_batch_size {
             return false;
         }
-        self.term = that.term;
-        self.commit_index = that.commit_index;
-        self.commit_term = that.commit_term;
+        self.meta.term = that.meta.term;
+        self.meta.commit_index = that.meta.commit_index;
+        self.meta.commit_term = that.meta.commit_term;
         self.entries.append(&mut that.entries);
-        self.entries_size += that.entries_size;
+        self.meta.entries_size += that.meta.entries_size;
         self.proposals.append(&mut that.proposals);
         return true;
     }

@@ -41,30 +41,43 @@ pub struct GroupState {
 
 impl Default for GroupState {
     fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl From<(u64, u64, u64, u64, StateRole)> for GroupState {
-    fn from(value: (u64, u64, u64, u64, StateRole)) -> Self {
-        Self {
-            replica_id: AtomicU64::new(value.0),
-            commit_index: AtomicU64::new(value.1),
-            commit_term: AtomicU64::new(value.2),
-            leader_id: AtomicU64::new(value.3),
-            role: AtomicUsize::new(WrapStateRole::from(&value.4).0),
-        }
-    }
-}
-
-impl GroupState {
-    pub fn new() -> Self {
         Self {
             replica_id: AtomicU64::new(0),
             commit_index: AtomicU64::new(0),
             commit_term: AtomicU64::new(0),
             leader_id: AtomicU64::new(0),
             role: AtomicUsize::new(0),
+        }
+    }
+}
+
+// impl From<(u64, u64, u64, u64, StateRole)> for GroupState {
+//     fn from(value: (u64, u64, u64, u64, StateRole)) -> Self {
+//         Self {
+//             replica_id: AtomicU64::new(value.0),
+//             term: AtomicU64::new(value.1),
+//             commit_index: AtomicU64::new(value.1),
+//             commit_term: AtomicU64::new(value.2),
+//             leader_id: AtomicU64::new(value.3),
+//             role: AtomicUsize::new(WrapStateRole::from(&value.4).0),
+//         }
+//     }
+// }
+
+impl GroupState {
+    pub fn new(
+        replica_id: u64,
+        leader_id: u64,
+        role: StateRole,
+        commit_index: u64,
+        commit_term: u64,
+    ) -> Self {
+        Self {
+            replica_id: AtomicU64::new(replica_id),
+            commit_index: AtomicU64::new(commit_index),
+            commit_term: AtomicU64::new(commit_term),
+            leader_id: AtomicU64::new(leader_id),
+            role: AtomicUsize::new(WrapStateRole::from(&role).0),
         }
     }
 

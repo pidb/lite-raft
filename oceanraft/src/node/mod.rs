@@ -1,4 +1,5 @@
 mod actor;
+mod confchange;
 mod group;
 mod handle_msg;
 mod handle_ready;

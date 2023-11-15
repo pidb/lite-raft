@@ -405,13 +405,13 @@ where
         }
 
         //  initialize shared_state of group
-        let shared_state = Arc::new(GroupState::from((
+        let shared_state = Arc::new(GroupState::new(
             replica_id,
-            rs.hard_state.commit, /* commit_index */
-            rs.hard_state.term,   /* commit_term */
             NO_LEADER,
             StateRole::Follower,
-        )));
+            rs.hard_state.commit, /* commit_index */
+            rs.hard_state.term,   /* commit_term */
+        ));
         let mut group = RaftGroup {
             node_id: self.cfg.node_id,
             group_id,

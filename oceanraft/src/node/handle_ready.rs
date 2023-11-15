@@ -4,6 +4,7 @@ use raft::Ready;
 use raft::SoftState;
 
 use crate::msg::ApplyData;
+use crate::msg::ApplyDataMeta;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ReplicaDesc;
 use crate::prelude::Snapshot;
@@ -318,13 +319,16 @@ where
             .sum::<usize>();
 
         Ok(ApplyData {
-            replica_id,
-            group_id: group.group_id(),
-            term: current_term,
-            commit_index,
-            commit_term,
+            meta: ApplyDataMeta {
+                replica_id,
+                group_id,
+                leader_id: group.leader.replica_id,
+                term: current_term,
+                commit_index,
+                commit_term,
+                entries_size,
+            },
             entries,
-            entries_size,
             proposals: apply_proposals,
         })
     }
