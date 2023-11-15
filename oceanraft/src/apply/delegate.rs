@@ -410,13 +410,16 @@ where
 
         // When ConfChangeV2's transition type is Explicit/Auto, an empty v2 change is sent to
         // get the union consensus to leave the union point, so this case needs to be handled.
-        if ent.data.is_empty() && ent.entry_type() == EntryType::EntryConfChangeV2 {
-            return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
-                group_id: meta.group_id,
-                index,
-                term,
-            }));
-        }
+
+        // if ent.data.is_empty() && ent.entry_type() == EntryType::EntryConfChangeV2 {
+        //     let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
+        //     assert_eq!(tx.is_none(), true);
+        //     return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
+        //         group_id: meta.group_id,
+        //         index,
+        //         term,
+        //     }));
+        // }
 
         let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
         let (conf_change, mut request_ctx) = match parse_conf_change(&ent) {
@@ -484,6 +487,8 @@ where
             tx,
         }))
     }
+
+    async fn leave_joint(&mut self, meta: &ApplyDataMeta, ent: Entry) {}
 }
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.
@@ -498,30 +503,22 @@ fn parse_conf_change(
                 .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
             let ctx = flexbuffer_deserialize(&ent.context)?;
-            // let change_data = MembershipChangeData::decode(ent.context.as_ref())
-            //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
-
             Ok((conf_change.into_v2(), ctx))
         }
         EntryType::EntryConfChangeV2 => {
             let ccv2 = ConfChangeV2::decode(ent.data.as_ref())
                 .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?;
 
-            tracing::info!("v2 is leaved {:?}", ccv2);
-            // 这种情况下, 如果 transition 是 auto leave 并且是一个空的变更, 说明正在进行 raft joint consensus
-            // 该 entry 是由 raft-rs 构造的, 当该 entry 提交到 raft-rs 之后，变更会 auto leave 联合共识，即整个
-            // 变更结束。
-            if ccv2.get_transition() == ConfChangeTransition::Auto && ccv2.changes.is_empty() {
+            // In this case, if the transition is auto leave and an empty change, there are two cases
+            // 1. auto is used in the previous joint consensus, and this entry constructed by raft-rs
+            // is used to leave joint.
+            // 2. The previous joint consensus uses explicit, and then manually constructs an entry for
+            // the leave joint.
+            if ccv2.leave_joint() {
                 return Ok((ccv2, None));
             }
 
-            Ok((
-                ccv2,
-                // TODO: use flexbuffer
-                // MembershipChangeData::decode(ent.context.as_ref())
-                //     .map_err(|err| Error::Deserialization(DeserializationError::Prost(err)))?,
-                Some(flexbuffer_deserialize(&ent.context)?),
-            ))
+            Ok((ccv2, Some(flexbuffer_deserialize(&ent.context)?)))
         }
     }
 }

@@ -116,6 +116,7 @@ where
     Campaign(MessageWithNotify<u64, Result<(), Error>>),
     CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
+    Inner(InnerMessage),
     ApplyResult(ApplyResultRequest),
     ApplyCommit(ApplyCommitRequest),
 }
@@ -202,8 +203,18 @@ pub struct CommitMembership {
 /// An internal structure to query raft internal status in
 /// a memory communicative way.
 #[derive(Debug)]
-pub enum QueryGroup {
+pub enum InnerMessage {
     /// Queries if there has a pending configuration,
     /// returns true or false
-    HasPendingConf(u64, oneshot::Sender<Result<bool, Error>>),
+    HasPendingConfChange(u64, oneshot::Sender<Result<bool, Error>>),
+}
+
+impl std::fmt::Display for InnerMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InnerMessage::HasPendingConfChange(group_id, _) => {
+                write!(f, "InnerMessage::HasPendingConfChange({})", group_id)
+            }
+        }
+    }
 }

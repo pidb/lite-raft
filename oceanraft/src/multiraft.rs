@@ -11,6 +11,7 @@ use serde::Serialize;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::msg::InnerMessage;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
 use crate::node::NodeActor;
@@ -607,15 +608,17 @@ where
     }
 
     /// Return true if it is can to submit membership change to givend group_id.
-    pub async fn can_submmit_membership_change(&self, group_id: u64) -> Result<bool, Error> {
-        todo!()
-        // let (tx, rx) = oneshot::channel();
-        // self.actor
-        //     .query_group_tx
-        //     .send(QueryGroup::HasPendingConf(group_id, tx))
-        //     .unwrap();
-        // let res = rx.await.unwrap()?;
-        // Ok(!res)
+    pub async fn has_pending_conf_change(&self, group_id: u64) -> Result<bool, Error> {
+        let (tx, rx) = oneshot::channel();
+        let actor = self.actor.lock().expect("lock actor");
+        actor
+            .as_ref()
+            .expect("actor is none")
+            .try_send_node_msg(NodeMessage::Inner(InnerMessage::HasPendingConfChange(
+                group_id, tx,
+            )))?;
+        let res = rx.await.unwrap()?;
+        Ok(!res)
     }
 
     #[inline]

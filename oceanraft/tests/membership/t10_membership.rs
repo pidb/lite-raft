@@ -77,11 +77,7 @@ async fn test_single_step() {
     // execute single step membership change from 3..5
     for i in 3..=5 {
         loop {
-            if leader
-                .can_submmit_membership_change(group_id)
-                .await
-                .unwrap()
-            {
+            if leader.has_pending_conf_change(group_id).await.unwrap() {
                 let mut change = SingleMembershipChange::default();
                 change.set_change_type(ConfChangeType::AddNode);
                 change.node_id = i;
@@ -339,9 +335,9 @@ async fn test_joint_consensus() {
             .unwrap();
     }
 
-    for _ in 0..10 {
-        cluster.tickers[0].non_blocking_tick();
-    }
+    // for _ in 0..10 {
+    //     cluster.tickers[0].non_blocking_tick();
+    // }
 
     // create joint consenus to add nodes 4..5.
     let mut changes = vec![];
@@ -363,9 +359,9 @@ async fn test_joint_consensus() {
         .unwrap();
 
     // wait all replicas apply membership change.
-    for _ in 0..10 {
-        cluster.tickers[0].non_blocking_tick();
-    }
+    // for _ in 0..10 {
+    //     cluster.tickers[0].non_blocking_tick();
+    // }
 
     // Note:
     // C_old is [1, 2, 3], when entering the joint consensus point,
@@ -417,11 +413,13 @@ async fn test_joint_consensus() {
         key: format!("command",),
         value: format!("data").into(),
     };
+
+    tracing::info!("write guard");
     let _ = leader.write(group_id, 0, None, data.clone()).await.unwrap();
 
-    for _ in 0..10 {
-        cluster.tickers[0].non_blocking_tick();
-    }
+    // for _ in 0..10 {
+    //     cluster.tickers[0].non_blocking_tick();
+    // }
 
     let rx = cluster.events[0].as_mut().unwrap();
     let mut matched = false;
@@ -435,6 +433,7 @@ async fn test_joint_consensus() {
                         match apply {
                             Apply::Normal(apply) => {
                                 if data == apply.data {
+                                    tracing::info!("write guard matched at c_old");
                                     matched = true;
                                     break;
                                 }
@@ -463,6 +462,7 @@ async fn test_joint_consensus() {
                         match apply {
                             Apply::Normal(apply) => {
                                 if data == apply.data {
+                                    tracing::info!("write guard matched at c_new");
                                     matched = true;
                                     break;
                                 }
@@ -491,13 +491,14 @@ async fn test_joint_consensus() {
     let mut change = MembershipChangeData::default();
     change.set_changes(vec![]);
     change.set_replicas(vec![]);
+    change.set_transition(ConfChangeTransition::Auto);
     let _ = leader
         .membership(group_id, None, None, change)
         .await
         .unwrap();
-    for _ in 0..10 {
-        cluster.tickers[0].non_blocking_tick();
-    }
+    // for _ in 0..10 {
+    //     cluster.tickers[0].non_blocking_tick();
+    // }
     for (_, rx) in cluster.events.iter_mut().enumerate() {
         let rx = rx.as_mut().unwrap();
         loop {

@@ -111,10 +111,26 @@ impl StateMachine<StoreData, ()> for RockStoreStateMachine {
             for apply in event.applys.iter_mut() {
                 match apply {
                     rsm_event::Apply::NoOp(noop) => {
+                        tracing::info!(
+                            "node {}: group-{} replica-{} apply no-op ({}, {})",
+                            event.node_id,
+                            event.group_id,
+                            event.replica_id,
+                            noop.index,
+                            noop.term,
+                        );
                         batch.set_applied_index(noop.index);
                         batch.set_applied_term(noop.term);
                     }
                     rsm_event::Apply::Normal(normal) => {
+                        tracing::info!(
+                            "node {}: group-{} replica-{} apply normal ({}, {})",
+                            event.node_id,
+                            event.group_id,
+                            event.replica_id,
+                            normal.index,
+                            normal.term,
+                        );
                         batch.put_data(&normal.data);
                         batch.set_applied_index(normal.index);
                         batch.set_applied_term(normal.term);

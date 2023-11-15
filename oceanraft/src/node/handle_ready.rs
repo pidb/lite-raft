@@ -274,6 +274,7 @@ where
 
         // this is different from `commit_index` and `commit_term` for self local,
         // we need a commit state that has been advanced to the state machine.
+        let is_leader = group.is_leader();
         let raft_log = group.raft_log();
         let commit_index = std::cmp::min(raft_log.committed, raft_log.persisted);
         let commit_term = gs.term(commit_index)?;
@@ -295,12 +296,19 @@ where
                 // FIXME: O(N)
                 match proposal_queue.find_proposal(ent.term, ent.index, current_term) {
                     None => {
-                        tracing::warn!(
-                            "can't find entry ({}, {}) related proposal on replica {}",
-                            ent.index,
-                            ent.term,
-                            replica_id
-                        );
+                        if !ent.data.is_empty() && is_leader {
+                            // we lost the proposal related to this entry, so we need record it.
+                            tracing::warn!(
+                                "node {}: group-{} can't find entry ({}, {}, {:?}) related proposal on replica-{}",
+                                self.node_id,
+                                group_id,
+                                ent.index,
+                                ent.term,
+                                ent.entry_type(),
+                                replica_id
+                            );
+                        }
+
                         None
                     }
 

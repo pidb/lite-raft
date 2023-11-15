@@ -450,6 +450,7 @@ where
             }
             NodeMessage::ApplyResult(msg) => self.handle_apply_result(msg).await,
             NodeMessage::ApplyCommit(msg) => self.handle_apply_commit(msg).await,
+            NodeMessage::Inner(msg) => self.handle_inner_msg(msg).await,
         }
     }
 

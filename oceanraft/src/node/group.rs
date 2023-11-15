@@ -165,6 +165,11 @@ where
         self.commit_index = index;
     }
 
+    #[inline]
+    pub(crate) fn has_pending_conf(&self) -> bool {
+        self.raft_group.raft.has_pending_conf()
+    }
+
     fn pre_propose_write<WD: ProposeRequest>(
         &mut self,
         request: &WriteRequest<WD, RES>,
@@ -244,7 +249,13 @@ where
             tx: Some(request.tx),
         };
         self.proposals.push(proposal);
-
+        tracing::info!(
+            "node {}: group-{} replica-{} propose {}",
+            self.node_id,
+            self.group_id,
+            self.replica_id,
+            next_index
+        );
         None
     }
 

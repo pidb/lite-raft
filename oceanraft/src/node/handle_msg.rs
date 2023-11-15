@@ -12,6 +12,7 @@ use super::group::Status;
 
 use crate::error::Error;
 use crate::error::RaftGroupError;
+use crate::msg::InnerMessage;
 use crate::msg::MembershipRequest;
 use crate::msg::ReadIndexRequest;
 use crate::msg::WriteRequest;
@@ -485,5 +486,31 @@ where
         );
 
         Ok(())
+    }
+
+    pub(super) async fn handle_inner_msg(&mut self, msg: InnerMessage) {
+        match msg {
+            InnerMessage::HasPendingConfChange(group_id, tx) => {
+                let group = match self.groups.get_mut(&group_id) {
+                    None => {
+                        let _ = tx.send(Err(Error::RaftGroup(RaftGroupError::Deleted(
+                            self.node_id,
+                            group_id,
+                        ))));
+                        return;
+                    }
+                    Some(group) => group,
+                };
+
+                let has = group.has_pending_conf();
+                if let Err(_) = tx.send(Ok(has)) {
+                    tracing::error!(
+                        "node {}: Response HasPendingConfChange({}) result to client failed, receiver already dropped.",
+                        self.node_id,
+                        group_id,   
+                    );
+                }
+            }
+        }
     }
 }
