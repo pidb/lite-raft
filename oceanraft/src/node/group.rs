@@ -9,7 +9,11 @@ use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
 
-use crate::msg::MembershipRequestContext;
+use crate::msg::ApplyResult;
+use crate::msg::ConfChangeContext;
+use crate::msg::ConfChangeMessageWithSender;
+use crate::msg::ReadIndexMessageWithSender;
+use crate::msg::WriteMessageWithSender;
 use crate::multiraft::ProposeResponse;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeSingle;
@@ -22,10 +26,8 @@ use super::actor::ResponseCallbackQueue;
 use crate::error::Error;
 use crate::error::ProposeError;
 use crate::error::RaftGroupError;
-use crate::msg::ApplyResultRequest;
-use crate::msg::MembershipRequest;
-use crate::msg::ReadIndexRequest;
-use crate::msg::WriteRequest;
+use crate::msg::ConfChangeMessage;
+use crate::msg::WriteMessage;
 use crate::proposal::Proposal;
 use crate::proposal::ProposalQueue;
 use crate::proposal::ReadIndexProposal;
@@ -173,7 +175,7 @@ where
 
     fn pre_propose_write<WD: ProposeRequest>(
         &mut self,
-        request: &WriteRequest<WD, RES>,
+        request: &WriteMessage<WD>,
     ) -> Result<(), Error> {
         // if write_data.data.is_empty() {
         //     return Err(Error::BadParameter(
@@ -202,28 +204,28 @@ where
 
     pub fn propose_write<REQ: ProposeRequest>(
         &mut self,
-        request: WriteRequest<REQ, RES>,
+        msg: WriteMessageWithSender<REQ, RES>,
     ) -> Option<ResponseCallback> {
-        if let Err(err) = self.pre_propose_write(&request) {
-            return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
+        if let Err(err) = self.pre_propose_write(&msg.msg) {
+            return Some(ResponseCallbackQueue::new_error_callback(msg.tx, err));
         }
 
         let term = self.term();
 
         // serialize propose data
-        let data = match flexbuffer_serialize(&request.propose) {
+        let data = match flexbuffer_serialize(&msg.msg.propose) {
             Err(err) => {
-                return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
+                return Some(ResponseCallbackQueue::new_error_callback(msg.tx, err));
             }
             Ok(mut ser) => ser.take_buffer(),
         };
 
         // propose to raft group
         let next_index = self.last_index() + 1;
-        let context = request.context.map_or(vec![], |ctx_data| ctx_data);
+        let context = msg.msg.context.map_or(vec![], |ctx_data| ctx_data);
         if let Err(err) = self.raft_group.propose(context, data) {
             return Some(ResponseCallbackQueue::new_error_callback(
-                request.tx,
+                msg.tx,
                 Error::Raft(err),
             ));
         }
@@ -231,7 +233,7 @@ where
         let index = self.last_index() + 1;
         if next_index == index {
             return Some(ResponseCallbackQueue::new_error_callback(
-                request.tx,
+                msg.tx,
                 Error::Propose(ProposeError::UnexpectedIndex {
                     node_id: self.node_id,
                     group_id: self.group_id,
@@ -247,7 +249,7 @@ where
             index: next_index,
             term,
             is_conf_change: false,
-            tx: Some(request.tx),
+            tx: Some(msg.tx),
         };
         self.proposals.push(proposal);
         tracing::info!(
@@ -260,21 +262,34 @@ where
         None
     }
 
-    pub fn read_index_propose(&mut self, data: ReadIndexRequest) -> Option<ResponseCallback> {
-        let mut flexs = flexbuffer_serialize(&data.context).expect("invalid ReadIndexContext type");
+    pub fn read_index_propose(
+        &mut self,
+        mut msg: ReadIndexMessageWithSender,
+    ) -> Option<ResponseCallback> {
+        let uuid = match msg.msg.context.uuid {
+            Some(uuid) => uuid.clone(),
+            None => {
+                let new_uuid = *Uuid::new_v4().as_bytes();
+                msg.msg.context.uuid = Some(new_uuid.clone());
+                new_uuid
+            }
+        };
+
+        let mut flexs =
+            flexbuffer_serialize(&msg.msg.context).expect("invalid ReadIndexContext type");
         self.raft_group.read_index(flexs.take_buffer());
 
         let proposal = ReadIndexProposal {
-            uuid: Uuid::from_bytes(data.context.uuid),
+            uuid: Uuid::from_bytes(uuid),
             read_index: None,
             context: None,
-            tx: Some(data.tx),
+            tx: Some(msg.tx),
         };
         self.read_index_queue.push_back(proposal);
         None
     }
 
-    fn pre_propose_conf_change(&mut self, request: &MembershipRequest<RES>) -> Result<(), Error> {
+    fn pre_propose_conf_change(&mut self, msg: &ConfChangeMessage) -> Result<(), Error> {
         if self.raft_group.raft.has_pending_conf() {
             return Err(Error::Propose(ProposeError::MembershipPending(
                 self.node_id,
@@ -282,7 +297,7 @@ where
             )));
         }
 
-        if request.group_id == 0 {
+        if msg.group_id == 0 {
             return Err(Error::BadParameter(
                 "group id must be more than 0".to_owned(),
             ));
@@ -296,11 +311,8 @@ where
             }));
         }
 
-        if !request.term.is_none() && self.term() > request.term.unwrap() {
-            return Err(Error::Propose(ProposeError::Stale(
-                request.term.unwrap(),
-                self.term(),
-            )));
+        if !msg.term != 0 && self.term() > msg.term {
+            return Err(Error::Propose(ProposeError::Stale(msg.term, self.term())));
         }
 
         Ok(())
@@ -310,25 +322,25 @@ where
         name = "RaftGroup::propose_conf_change",
         level = tracing::Level::TRACE,
         skip_all,
-        fields(node_id=self.node_id, group_id=request.group_id),
+        fields(node_id=self.node_id, group_id=msg.msg.group_id),
    )]
     pub(crate) fn propose_conf_change(
         &mut self,
-        request: MembershipRequest<RES>,
+        msg: ConfChangeMessageWithSender<RES>,
     ) -> Option<ResponseCallback> {
-        if let Err(err) = self.pre_propose_conf_change(&request) {
-            return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
+        if let Err(err) = self.pre_propose_conf_change(&msg.msg) {
+            return Some(ResponseCallbackQueue::new_error_callback(msg.tx, err));
         }
 
         let term = self.term();
         let next_index = self.last_index() + 1;
 
-        let res = if request.data.changes.len() == 1 {
-            let (ctx, cc) = to_cc(request.data, request.context); // TODO: move to proto
+        let res = if msg.msg.data.changes.len() == 1 {
+            let (ctx, cc) = to_cc(msg.msg.data, msg.msg.context); // TODO: move to proto
             assert_ne!(ctx.len(), 0);
             self.raft_group.propose_conf_change(ctx, cc)
         } else {
-            let (ctx, cc) = to_ccv2(request.data, request.context); // TODO: move to proto and use into
+            let (ctx, cc) = to_ccv2(msg.msg.data, msg.msg.context); // TODO: move to proto and use into
             self.raft_group.propose_conf_change(ctx, cc)
         };
 
@@ -338,7 +350,7 @@ where
                 self.node_id, err
             );
             return Some(ResponseCallbackQueue::new_error_callback(
-                request.tx,
+                msg.tx,
                 Error::Raft(err),
             ));
         }
@@ -353,7 +365,7 @@ where
             );
 
             return Some(ResponseCallbackQueue::new_error_callback(
-                request.tx,
+                msg.tx,
                 Error::Propose(ProposeError::UnexpectedIndex {
                     node_id: self.node_id,
                     group_id: self.group_id,
@@ -368,7 +380,7 @@ where
             index: next_index,
             term,
             is_conf_change: true,
-            tx: Some(request.tx),
+            tx: Some(msg.tx),
         };
 
         self.proposals.push(proposal);
@@ -411,7 +423,7 @@ where
             });
     }
 
-    pub(crate) fn advance_apply(&mut self, result: &ApplyResultRequest) {
+    pub(crate) fn advance_apply(&mut self, result: &ApplyResult) {
         // keep  invariant
         assert!(result.applied_index <= self.commit_index);
 
@@ -433,7 +445,7 @@ fn to_cc(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, Con
     cc.set_change_type(data.changes[0].change_type());
     cc.node_id = data.changes[0].replica_id;
 
-    let ctx = MembershipRequestContext { data, user_ctx };
+    let ctx = ConfChangeContext { data, user_ctx };
 
     let mut ser = flexbuffer_serialize(&ctx).unwrap();
     (ser.take_buffer(), cc)
@@ -458,7 +470,7 @@ fn to_ccv2(data: MembershipChangeData, user_ctx: Option<Vec<u8>>) -> (Vec<u8>, C
 
     cc.set_changes(sc);
 
-    let ctx = MembershipRequestContext { data, user_ctx };
+    let ctx = ConfChangeContext { data, user_ctx };
 
     let mut ser = flexbuffer_serialize(&ctx).unwrap();
     (ser.take_buffer(), cc)

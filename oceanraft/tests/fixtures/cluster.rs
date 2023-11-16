@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use oceanraft::prelude::CreateGroupRequest;
+use oceanraft::WriteMessage;
 
 use oceanraft::MultiRaftTypeSpecialization;
 
@@ -63,7 +64,7 @@ where
     pub election_ticks: usize,
     pub nodes: Vec<Arc<MultiRaft<T, LocalTransport<MultiRaftMessageSenderImpl>>>>,
     // pub apply_events: Vec<Option<Receiver<Vec<Apply<T::D, T::R>>>>>,
-    pub events: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
+    pub events: Vec<Option<Receiver<StateMachineEvent<T::Request, T::Response>>>>,
     pub transport: LocalTransport<MultiRaftMessageSenderImpl>,
     pub tickers: Vec<ManualTick>,
     pub groups: HashMap<u64, Vec<u64>>, // track group which nodes, group_id -> nodes
@@ -266,7 +267,7 @@ where
         node_id: u64,
         wait_size: usize,
         timeout: Option<Duration>,
-    ) -> Result<Vec<ApplyNormal<T::D, T::R>>, String> {
+    ) -> Result<Vec<ApplyNormal<T::Request, T::Response>>, String> {
         // let rx = self.apply_events[to_index(node_id)].as_mut().unwrap();
         let rx = self.events[to_index(node_id)].as_mut().unwrap();
         let mut results_len = 0;
@@ -315,7 +316,7 @@ where
         cluster: &mut Cluster<T>,
         node_id: u64,
         timeout: Option<Duration>,
-    ) -> Result<ApplyMembership<T::R>, String> {
+    ) -> Result<ApplyMembership<T::Response>, String> {
         let rx = cluster.events[to_index(node_id)].as_mut().unwrap();
         let wait_loop_fut = async {
             loop {
@@ -375,9 +376,14 @@ where
         &self,
         node_id: u64,
         group_id: u64,
-        write_data: T::D,
-    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
-        self.nodes[to_index(node_id)].write_non_block(group_id, 0, None, write_data)
+        write_data: T::Request,
+    ) -> Result<oneshot::Receiver<Result<(T::Response, Option<Vec<u8>>), Error>>, Error> {
+        self.nodes[to_index(node_id)].write_non_block(WriteMessage {
+            group_id,
+            term: 0,
+            propose: write_data,
+            context: None,
+        })
     }
 
     // Wait normal apply.

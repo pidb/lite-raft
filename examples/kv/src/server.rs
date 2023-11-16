@@ -40,8 +40,8 @@ use oceanraft::define_multiraft;
 
 define_multiraft! {
     pub KVAppType:
-        D =  KVData,
-        R = KVResponse,
+        Request =  KVData,
+        Response = KVResponse,
         M = KVStateMachine,
         S = RockStoreCore<MemKvStorage, MemKvStorage>,
         MS = RockStore<MemKvStorage, MemKvStorage>
@@ -331,7 +331,7 @@ impl KVServer {
         let term = None;
         let context = None;
         self.multiraft
-            .membership(group_id, term, context, data)
+            .conf_change(group_id, term, context, data)
             .await
             .map_err(|err| anyhow!("{}", err))
     }

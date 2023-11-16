@@ -345,7 +345,7 @@ where
         let group = self.groups.get_mut(&group_id).unwrap();
         group.read_index_queue.advance_reads(rss);
         while let Some(p) = group.read_index_queue.pop_front() {
-            p.tx.map(|tx| tx.send(Ok(p.context.map_or(None, |mut ctx| ctx.context.take()))));
+            p.tx.map(|tx| tx.send(Ok(p.context.map_or(None, |mut ctx| ctx.data.take()))));
         }
     }
 

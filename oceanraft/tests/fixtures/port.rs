@@ -27,8 +27,8 @@ use super::MakeGroupPlan;
 
 define_multiraft! {
     pub RockType:
-        D = StoreData,
-        R= (),
+        Request = StoreData,
+        Response= (),
         M= RockStoreStateMachine,
         S= RockStoreCore<StateMachineStore<()>, StateMachineStore<()>>,
         MS = RockStore<StateMachineStore<()>, StateMachineStore<()>>
@@ -36,8 +36,8 @@ define_multiraft! {
 
 define_multiraft! {
     pub MemType:
-        D = StoreData,
-        R= (),
+        Request = StoreData,
+        Response= (),
         M= MemStoreStateMachine<StoreData>,
         S= MemStorage,
         MS = MultiRaftMemoryStorage

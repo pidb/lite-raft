@@ -3,19 +3,25 @@ use std::sync::Arc;
 
 use raft::StateRole;
 use tokio::sync::oneshot;
+use tracing::Level;
+use tracing::debug;
+use tracing::warn;
+use tracing::error;
 
 use super::actor::Inner;
 use super::actor::ResponseCallback;
 use super::actor::ResponseCallbackQueue;
+use super::conf_change::ApplyConfDelegate;
 use super::group::RaftGroup;
 use super::group::Status;
 
 use crate::error::Error;
 use crate::error::RaftGroupError;
+use crate::msg::ApplyResultMessage;
+use crate::msg::ConfChangeMessageWithSender;
 use crate::msg::InnerMessage;
-use crate::msg::MembershipRequest;
-use crate::msg::ReadIndexRequest;
-use crate::msg::WriteRequest;
+use crate::msg::ReadIndexMessageWithSender;
+use crate::msg::WriteMessageWithSender;
 use crate::multiraft::ProposeResponse;
 use crate::multiraft::NO_LEADER;
 use crate::multiraft::NO_NODE;
@@ -44,12 +50,21 @@ where
     REQ: ProposeRequest,
     RES: ProposeResponse,
 {
-    pub(super) fn handle_write_msg(&mut self, msg: WriteRequest<REQ, RES>) {
-        let group_id = msg.group_id;
+
+    #[tracing::instrument(
+        name = "NodeActor::handle_write_msg",
+        level = tracing::Level::TRACE,
+        skip(
+            self, 
+            msg
+        ),
+    )]
+    pub(super) fn handle_write_msg(&mut self, msg: WriteMessageWithSender<REQ, RES>) {
+        let group_id = msg.msg.group_id;
         if let Some(group) = self.groups.get_mut(&group_id) {
             self.active_groups.insert(group_id);
-            if let Some(cb) = group.propose_write(msg) {
-                self.pending_responses.push_back(cb)
+            if let Some(response_cb) = group.propose_write(msg) {
+                self.pending_responses.push_back(response_cb)
             }
             return;
         }
@@ -60,18 +75,26 @@ where
             group_id
         );
 
-        let cb = ResponseCallbackQueue::new_error_callback(
+        let response_cb = ResponseCallbackQueue::new_error_callback(
             msg.tx,
             Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
         );
-        self.pending_responses.push_back(cb)
+        self.pending_responses.push_back(response_cb)
     }
 
+    #[tracing::instrument(
+        name = "NodeActor::handle_read_index_msg",
+        level = tracing::Level::TRACE,
+        skip(
+            self, 
+            msg
+        ),
+    )]
     pub(super) fn handle_readindex_msg(
         &mut self,
-        msg: ReadIndexRequest,
-    ) -> Option<ResponseCallback> {
-        let group_id = msg.group_id;
+        msg: ReadIndexMessageWithSender,
+    ) {
+        let group_id = msg.msg.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
                 tracing::warn!(
@@ -79,14 +102,18 @@ where
                     self.node_id,
                     group_id,
                 );
-                return Some(ResponseCallbackQueue::new_error_callback(
+                let response_cb = ResponseCallbackQueue::new_error_callback(
                     msg.tx,
                     Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                ));
+                );
+                self.pending_responses.push_back(response_cb);
             }
             Some(group) => {
                 self.active_groups.insert(group_id);
-                group.read_index_propose(msg)
+                if let Some(response_cb) = group.read_index_propose(msg) {
+                    self.pending_responses.push_back(response_cb);
+                }
+               
             }
         }
     }
@@ -94,13 +121,16 @@ where
     #[tracing::instrument(
         name = "NodeActor::handle_conf_change_msg",
         level = tracing::Level::TRACE,
-        skip_all,
+        skip(
+            self,
+            msg
+        ),
     )]
-    pub(super) fn handle_membership_msg(
+    pub(super) fn handle_conf_change_msg(
         &mut self,
-        msg: MembershipRequest<RES>,
-    ) -> Option<ResponseCallback> {
-        let group_id = msg.group_id;
+        msg: ConfChangeMessageWithSender<RES>,
+    ) {
+        let group_id = msg.msg.group_id;
         match self.groups.get_mut(&group_id) {
             None => {
                 tracing::warn!(
@@ -108,14 +138,18 @@ where
                     self.node_id,
                     group_id,
                 );
-                return Some(ResponseCallbackQueue::new_error_callback(
+                let response_cb = ResponseCallbackQueue::new_error_callback(
                     msg.tx,
                     Error::RaftGroup(RaftGroupError::Deleted(self.node_id, group_id)),
-                ));
+                );
+
+                self.pending_responses.push_back(response_cb);
             }
             Some(group) => {
                 self.active_groups.insert(group_id);
-                group.propose_conf_change(msg)
+                if let Some(response_cb) = group.propose_conf_change(msg) {
+                    self.pending_responses.push_back(response_cb);
+                }
             }
         }
     }
@@ -491,6 +525,71 @@ where
         );
 
         Ok(())
+    }
+
+    #[tracing::instrument(
+        level = Level::TRACE,
+        name = "NodeActor::handle_apply_result",
+        skip(self))
+    ]
+    pub(super) async fn handle_apply_result_msg(&mut self, msg: ApplyResultMessage) {
+        match msg {
+            ApplyResultMessage::None => return,
+            ApplyResultMessage::ApplyResult(result) => {
+                let group = match self.groups.get_mut(&result.group_id) {
+                    Some(group) => group,
+                    None => {
+                        warn!("group {} removed, skip apply", result.group_id);
+                        return;
+                    }
+                };
+
+                group.advance_apply(&result);
+                debug!(
+                    "node {}: group = {} apply state change = {:?}",
+                    self.node_id, result.group_id, result
+                );
+            }
+            ApplyResultMessage::ApplyConfChange((cc, tx)) => {
+                let group_id = cc.group_id;
+                let group = match self.groups.get_mut(&group_id) {
+                    Some(group) => group,
+                    None => {
+                        error!(
+                            "node {}: commit membership change failed: group {} deleted",
+                            self.node_id, group_id,
+                        );
+                        return;
+                    }
+                };
+
+                let group_storage =
+                    match self.storage.group_storage(group_id, group.replica_id).await {
+                        Ok(gs) => gs,
+                        Err(err) => return,
+                    };
+
+               
+                // We need to promptly respond to the "apply actor" to allow 
+                // it to proceed with subsequent steps.
+                let mut delegate = ApplyConfDelegate::new(
+                    self.node_id,
+                    group,
+                    &group_storage,
+                    &mut self.node_manager,
+                    &mut self.replica_cache,
+                );
+                let res = delegate.handle(cc).await;
+                if let Err(_) = tx.send(res) {
+                    error!(
+                        "node {}: group-{} replica-{} response ApplyConfChange result to apply actor failed, receiver already dropped.",
+                        self.node_id,
+                        group_id,
+                        group.replica_id,
+                    );
+                }
+            }
+        }
     }
 
     pub(super) async fn handle_inner_msg(&mut self, msg: InnerMessage) {

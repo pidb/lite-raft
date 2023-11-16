@@ -20,7 +20,7 @@ where
     node_size: usize,
     election_ticks: usize,
     storages: Vec<T::MS>,
-    event_rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>,
+    event_rxs: Vec<Option<Receiver<StateMachineEvent<T::Request, T::Response>>>>,
     state_machines: Vec<Option<T::M>>,
 }
 
@@ -64,7 +64,10 @@ where
     //     self
     // }
 
-    pub fn event_rxs(mut self, rxs: Vec<Option<Receiver<StateMachineEvent<T::D, T::R>>>>) -> Self {
+    pub fn event_rxs(
+        mut self,
+        rxs: Vec<Option<Receiver<StateMachineEvent<T::Request, T::Response>>>>,
+    ) -> Self {
         assert_eq!(
             rxs.len(),
             self.node_size,

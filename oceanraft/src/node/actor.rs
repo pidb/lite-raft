@@ -16,7 +16,6 @@ use tracing::warn;
 use tracing::Level;
 use tracing::Span;
 
-use super::confchange::ApplyConfDelegate;
 use super::handle_ready::GroupWriteRequest;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
@@ -35,12 +34,9 @@ use crate::config::Config;
 use crate::error::ChannelError;
 use crate::error::Error;
 use crate::error::RaftGroupError;
-// use crate::event::EventChannel;
 use crate::msg::ApplyConfChange;
 use crate::msg::ApplyData;
 use crate::msg::ApplyMessage;
-use crate::msg::ApplyResultMessage;
-use crate::msg::ApplyResultRequest;
 use crate::multiraft::NO_GORUP;
 use crate::node::NodeManager;
 use crate::replica_cache::ReplicaCache;
@@ -124,12 +120,12 @@ impl ResponseCallbackQueue {
 
 /// Node represents a physical node and contains a group of rafts.
 
-pub struct NodeActor<W, R>
+pub struct NodeActor<Request, Response>
 where
-    W: ProposeRequest,
-    R: ProposeResponse,
+    Request: ProposeRequest,
+    Response: ProposeResponse,
 {
-    node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+    node_msg_tx: mpsc::WrapSender<NodeMessage<Request, Response>>,
     peer_msg_tx: mpsc::WrapSender<
         MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
     >,
@@ -137,10 +133,10 @@ where
     apply: ApplyActor,
 }
 
-impl<W, R> NodeActor<W, R>
+impl<Request, Response> NodeActor<Request, Response>
 where
-    W: ProposeRequest,
-    R: ProposeResponse,
+    Request: ProposeRequest,
+    Response: ProposeResponse,
 {
     /// Spawn a new node actor.
     pub fn spawn<TR, RS, MRS, RSM>(
@@ -157,20 +153,11 @@ where
         TR: Transport + Clone,
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
-        RSM: StateMachine<W, R>,
+        RSM: StateMachine<Request, Response>,
     {
-        let (tx, rx) = mpsc::channel_wrap::<NodeMessage<W, R>>(-1);
-
-        // let (propose_tx, propose_rx) = channel(cfg.proposal_queue_size);
-        // let (manage_tx, manage_rx) = channel(1);
-        // let (campaign_tx, campaign_rx) = channel(1);
+        let (tx, rx) = mpsc::channel_wrap::<NodeMessage<Request, Response>>(-1);
         let (peer_msg_tx, peer_msg_rx) = mpsc::channel_wrap(-1);
-
-        // let (commit_tx, commit_rx) = unbounded_channel();
-
         let (apply_request_tx, apply_request_rx) = unbounded_channel();
-        // let (apply_response_tx, apply_response_rx) = unbounded_channel();
-        // let (group_query_tx, group_query_rx) = unbounded_channel();
         let rsm = Arc::new(rsm);
         let apply = ApplyActor::spawn(
             cfg,
@@ -179,26 +166,17 @@ where
             states.clone(),
             tx.clone(),
             apply_request_rx,
-            // apply_response_tx,
-            // commit_tx,
             stopped.clone(),
         );
 
-        let mut worker = Inner::<TR, RS, MRS, RSM, W, R>::new(
+        let mut worker = Inner::<TR, RS, MRS, RSM, Request, Response>::new(
             cfg,
             transport,
             storage,
             rsm,
             rx,
-            // propose_rx,
-            // campaign_rx,
             peer_msg_rx,
             apply_request_tx,
-            // apply_response_rx,
-            // manage_rx,
-            // event_bcast,
-            // commit_rx,
-            // group_query_rx,
             states,
         );
 
@@ -210,16 +188,11 @@ where
         Self {
             node_msg_tx: tx,
             peer_msg_tx,
-            // query_group_tx: group_query_tx,
-            // raft_message_tx,
-            // propose_tx,
-            // campaign_tx,
-            // manage_tx,
             apply,
         }
     }
 
-    pub fn try_send_node_msg(&self, msg: NodeMessage<W, R>) -> Result<(), Error> {
+    pub fn try_send_node_msg(&self, msg: NodeMessage<Request, Response>) -> Result<(), Error> {
         match self.node_msg_tx.try_send(msg) {
             Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
                 "channel no avaiable capacity for write".to_owned(),
@@ -240,7 +213,7 @@ where
     }
 }
 
-pub struct Inner<TR, RS, MRS, M, W, R>
+pub(super) struct Inner<TR, RS, MRS, M, W, R>
 where
     TR: Transport,
     RS: RaftStorage,
@@ -249,23 +222,22 @@ where
     W: ProposeRequest,
     R: ProposeResponse,
 {
-    pub(crate) cfg: Config,
-    pub(crate) node_id: u64,
-    pub(crate) storage: MRS,
-    pub(crate) transport: TR,
-    pub(crate) node_manager: NodeManager,
-    pub(crate) replica_cache: ReplicaCache<RS, MRS>,
-    pub(crate) groups: HashMap<u64, RaftGroup<RS, R>>,
-    pub(crate) active_groups: HashSet<u64>,
-    pub(crate) pending_responses: ResponseCallbackQueue,
-    // pub(crate) event_chan: EventChannel,
-    pub(crate) node_msg_rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
-    pub(crate) peer_msg_rx: mpsc::WrapReceiver<
+    pub(super) cfg: Config,
+    pub(super) node_id: u64,
+    pub(super) storage: MRS,
+    pub(super) transport: TR,
+    pub(super) node_manager: NodeManager,
+    pub(super) replica_cache: ReplicaCache<RS, MRS>,
+    pub(super) groups: HashMap<u64, RaftGroup<RS, R>>,
+    pub(super) active_groups: HashSet<u64>,
+    pub(super) pending_responses: ResponseCallbackQueue,
+    pub(super) node_msg_rx: mpsc::WrapReceiver<NodeMessage<W, R>>,
+    pub(super) peer_msg_rx: mpsc::WrapReceiver<
         MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
     >,
-    pub(crate) apply_msg_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
-    pub(crate) shared_states: GroupStates,
-    pub(crate) rsm: Arc<M>,
+    pub(super) apply_msg_tx: UnboundedSender<(Span, ApplyMessage<R>)>,
+    pub(super) shared_states: GroupStates,
+    pub(super) rsm: Arc<M>,
 }
 
 impl<TR, RS, MRS, M, WD, RES> Inner<TR, RS, MRS, M, WD, RES>
@@ -287,7 +259,6 @@ where
             MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>,
         >,
         apply_request_tx: UnboundedSender<(Span, ApplyMessage<RES>)>,
-        // event_chan: &EventChannel,
         shared_states: GroupStates,
     ) -> Self {
         Inner::<TR, RS, MRS, M, WD, RES> {
@@ -425,16 +396,8 @@ where
     async fn handle_node_msg(&mut self, msg: NodeMessage<WD, RES>) {
         match msg {
             NodeMessage::Write(msg) => self.handle_write_msg(msg),
-            NodeMessage::ReadIndexData(msg) => {
-                if let Some(cb) = self.handle_readindex_msg(msg) {
-                    self.pending_responses.push_back(cb);
-                }
-            }
-            NodeMessage::Membership(msg) => {
-                if let Some(cb) = self.handle_membership_msg(msg) {
-                    self.pending_responses.push_back(cb);
-                }
-            }
+            NodeMessage::ReadIndex(msg) => self.handle_readindex_msg(msg),
+            NodeMessage::ConfChange(msg) => self.handle_conf_change_msg(msg),
             NodeMessage::CreateGroup(msg) => {
                 if let Some(cb) = self.handle_create_group_msg(msg.msg, msg.tx).await {
                     self.pending_responses.push_back(cb);
@@ -448,8 +411,8 @@ where
             NodeMessage::Campaign(msg) => {
                 self.campaign_raft(msg.msg, msg.tx);
             }
-            NodeMessage::ApplyResult(msg) => self.handle_apply_result(msg).await,
-            NodeMessage::ApplyCommit(msg) => self.handle_apply_commit(msg).await,
+            // NodeMessage::ApplyResult(msg) => self.handle_apply_result(msg).await,
+            NodeMessage::ApplyResult(msg) => self.handle_apply_result_msg(msg).await,
             NodeMessage::Inner(msg) => self.handle_inner_msg(msg).await,
         }
     }
@@ -475,7 +438,10 @@ where
     #[tracing::instrument(
         level = Level::TRACE,
         name = "NodeActor::campagin_raft", 
-        skip(self, tx)
+        skip(
+            self, 
+            tx
+        )
     )]
     fn campaign_raft(&mut self, group_id: u64, tx: oneshot::Sender<Result<(), Error>>) {
         let res = if let Some(group) = self.groups.get_mut(&group_id) {
@@ -518,66 +484,6 @@ where
         }
 
         Ok(())
-    }
-
-    #[tracing::instrument(
-        level = Level::TRACE,
-        name = "NodeActor::handle_apply_result",
-        skip(self))
-    ]
-    async fn handle_apply_result(&mut self, result: ApplyResultRequest) {
-        let group = match self.groups.get_mut(&result.group_id) {
-            Some(group) => group,
-            None => {
-                warn!("group {} removed, skip apply", result.group_id);
-                return;
-            }
-        };
-
-        group.advance_apply(&result);
-        debug!(
-            "node {}: group = {} apply state change = {:?}",
-            self.node_id, result.group_id, result
-        );
-    }
-
-    async fn handle_apply_commit(&mut self, msg: ApplyResultMessage) {
-        match msg {
-            ApplyResultMessage::None => return,
-            ApplyResultMessage::ApplyConfChange((cc, tx)) => {
-                let group_id = cc.group_id;
-                let group = match self.groups.get_mut(&group_id) {
-                    Some(group) => group,
-                    None => {
-                        error!(
-                            "node {}: commit membership change failed: group {} deleted",
-                            self.node_id, group_id,
-                        );
-                        return;
-                    }
-                };
-
-                let group_storage =
-                    match self.storage.group_storage(group_id, group.replica_id).await {
-                        Ok(gs) => gs,
-                        Err(err) => return,
-                    };
-
-                let mut delegate = ApplyConfDelegate::new(
-                    self.node_id,
-                    group,
-                    &group_storage,
-                    &mut self.node_manager,
-                    &mut self.replica_cache,
-                );
-
-                let res = delegate.handle(cc).await;
-
-                // let res = self.commit_membership_change(commit).await;
-                self.pending_responses
-                    .push_back(ResponseCallbackQueue::new_callback(tx, res))
-            }
-        }
     }
 
     async fn commit_membership_change(

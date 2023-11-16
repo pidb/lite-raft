@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use oceanraft::prelude::StoreData;
+use oceanraft::ReadIndexContext;
+use oceanraft::ReadIndexMessage;
 
 use crate::fixtures::init_default_ut_tracing;
 use crate::fixtures::quickstart_rockstore_group;
@@ -57,7 +59,16 @@ async fn test_group_read_index() {
         assert_eq!(rx.unwrap().await.unwrap().is_ok(), true);
     }
 
-    let _ = cluster.nodes[0].read_index(group_id, None).await.unwrap();
+    let _ = cluster.nodes[0]
+        .read_index(ReadIndexMessage {
+            group_id,
+            context: ReadIndexContext {
+                uuid: None,
+                data: None,
+            },
+        })
+        .await
+        .unwrap();
 
     for i in 0..command_nums {
         let command_id = (i + 1) as u64;

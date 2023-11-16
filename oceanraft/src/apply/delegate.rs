@@ -19,7 +19,7 @@ use crate::msg::ApplyConfChange;
 use crate::msg::ApplyData;
 use crate::msg::ApplyDataMeta;
 use crate::msg::ApplyResultMessage;
-use crate::msg::MembershipRequestContext;
+use crate::msg::ConfChangeContext;
 use crate::msg::NodeMessage;
 use crate::prelude::ConfChange;
 use crate::prelude::ConfChangeV2;
@@ -470,7 +470,7 @@ where
 
         if let Err(_) = self
             .node_msg_tx
-            .send(NodeMessage::ApplyCommit(
+            .send(NodeMessage::ApplyResult(
                 ApplyResultMessage::ApplyConfChange((commit, tx)),
             ))
             .await
@@ -491,9 +491,7 @@ where
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.
 /// Return Error if serialization error.
-fn parse_conf_change(
-    ent: &Entry,
-) -> Result<(ConfChangeV2, Option<MembershipRequestContext>), Error> {
+fn parse_conf_change(ent: &Entry) -> Result<(ConfChangeV2, Option<ConfChangeContext>), Error> {
     match ent.entry_type() {
         EntryType::EntryNormal => unreachable!(),
         EntryType::EntryConfChange => {

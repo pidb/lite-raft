@@ -732,3 +732,5 @@ pub use multiraft::{
 // pub use rsm::{Apply, ApplyMembership, ApplyNoOp, ApplyNormal, StateMachine};
 pub use rsm::StateMachine;
 pub use state::{GroupState, GroupStates};
+
+pub use msg::{ConfChangeMessage, ReadIndexContext, ReadIndexMessage, WriteMessage};

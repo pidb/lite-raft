@@ -12,9 +12,7 @@ use crate::prelude::ConfState;
 use crate::prelude::CreateGroupRequest;
 use crate::prelude::Entry;
 use crate::prelude::MembershipChangeData;
-// use crate::prelude::MultiRaftMessageResponse;
 use crate::prelude::RemoveGroupRequest;
-// use crate::protos::MultiRaftMessage;
 
 use super::error::Error;
 use super::proposal::Proposal;
@@ -26,60 +24,79 @@ pub struct MessageWithNotify<T, R> {
     pub tx: oneshot::Sender<R>,
 }
 
-/// WriteRequest propose a write request to raft.
-pub struct WriteRequest<REQ, RES>
+/// WriteMessage propose a write request message to raft.
+pub struct WriteMessage<REQ>
+where
+    REQ: ProposeRequest,
+{
+    /// Specific the group to write to.
+    pub group_id: u64,
+    /// The term attached to the write (usually the current group leader term),
+    /// and an error is returned if the group's term is greater than this value,
+    /// commonly used to detect if a leader switch has occurred.
+    /// The default is 0 which means the check is disabled.
+    pub term: u64,
+    pub propose: REQ,
+    pub context: Option<Vec<u8>>,
+}
+
+/// Inner WriteMessage with sender to  propose a write request message to raft.
+pub(crate) struct WriteMessageWithSender<REQ, RES>
 where
     REQ: ProposeRequest,
     RES: ProposeResponse,
 {
-    pub group_id: u64,
-    pub term: u64,
-    pub propose: REQ,
-    pub context: Option<Vec<u8>>,
-    pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
+    pub(crate) msg: WriteMessage<REQ>,
+    pub(crate) tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
+/// ReadIndexContext is the context for read index request.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ReadIndexContext {
-    pub uuid: [u8; 16],
+    /// Uuid for read index request.If the uuid is None, it will
+    /// be automatically generated during the execution process.
+    pub uuid: Option<[u8; 16]>,
 
-    /// context for user
-    pub context: Option<Vec<u8>>,
+    /// data for user context
+    pub data: Option<Vec<u8>>,
 }
 
-pub struct ReadIndexRequest {
+/// ReadIndexMessage propose a read index request message to raft.
+pub struct ReadIndexMessage {
     pub group_id: u64,
     pub context: ReadIndexContext,
-    pub tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
+}
+
+pub(crate) struct ReadIndexMessageWithSender {
+    pub(crate) msg: ReadIndexMessage,
+    pub(crate) tx: oneshot::Sender<Result<Option<Vec<u8>>, Error>>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct MembershipRequestContext {
+pub struct ConfChangeContext {
     pub data: MembershipChangeData,
     pub user_ctx: Option<Vec<u8>>,
 }
 
-pub struct MembershipRequest<RES>
+pub struct ConfChangeMessage {
+    pub group_id: u64,
+    pub term: u64,
+    pub context: Option<Vec<u8>>,
+    pub data: MembershipChangeData,
+}
+
+pub(crate) struct ConfChangeMessageWithSender<RES>
 where
     RES: ProposeResponse,
 {
-    pub group_id: u64,
-    pub term: Option<u64>,
-    pub context: Option<Vec<u8>>,
-    pub data: MembershipChangeData,
-    pub tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
-}
-
-#[derive(Debug)]
-pub struct ApplyResultRequest {
-    pub group_id: u64,
-    pub applied_index: u64,
-    pub applied_term: u64,
+    pub(crate) msg: ConfChangeMessage,
+    pub(crate) tx: oneshot::Sender<Result<(RES, Option<Vec<u8>>), Error>>,
 }
 
 #[derive(Debug)]
 pub enum ApplyResultMessage {
     None,
+    ApplyResult(ApplyResult),
     ApplyConfChange((ApplyConfChange, oneshot::Sender<Result<ConfState, Error>>)),
 }
 
@@ -112,21 +129,26 @@ pub struct ApplyConfChange {
     pub change_request: Option<MembershipChangeData>,
 }
 
-pub enum NodeMessage<REQ, RES>
+#[derive(Debug)]
+pub struct ApplyResult {
+    pub group_id: u64,
+    pub applied_index: u64,
+    pub applied_term: u64,
+}
+
+pub(crate) enum NodeMessage<REQ, RES>
 where
     REQ: ProposeRequest,
     RES: ProposeResponse,
 {
-    // Peer(MessageWithNotify<MultiRaftMessage, Result<MultiRaftMessageResponse, Error>>),
-    Write(WriteRequest<REQ, RES>),
-    Membership(MembershipRequest<RES>),
-    ReadIndexData(ReadIndexRequest),
+    Write(WriteMessageWithSender<REQ, RES>),
+    ReadIndex(ReadIndexMessageWithSender),
+    ConfChange(ConfChangeMessageWithSender<RES>),
     Campaign(MessageWithNotify<u64, Result<(), Error>>),
     CreateGroup(MessageWithNotify<CreateGroupRequest, Result<(), Error>>),
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
     Inner(InnerMessage),
-    ApplyResult(ApplyResultRequest),
-    ApplyCommit(ApplyResultMessage),
+    ApplyResult(ApplyResultMessage),
 }
 
 #[allow(unused)]

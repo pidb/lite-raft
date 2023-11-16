@@ -10,6 +10,8 @@ use oceanraft::prelude::StoreData;
 use oceanraft::rsm_event::Apply;
 use oceanraft::storage::MultiRaftStorage;
 use oceanraft::storage::Storage;
+use oceanraft::ConfChangeMessage;
+use oceanraft::WriteMessage;
 use tokio::time::sleep;
 
 use crate::fixtures::init_default_ut_tracing;
@@ -61,16 +63,16 @@ async fn test_single_step() {
     change.node_id = 2;
     change.replica_id = 2;
     leader
-        .membership(
+        .conf_change(ConfChangeMessage {
             group_id,
-            None,
-            None,
-            MembershipChangeData {
+            term: 0,
+            context: None,
+            data: MembershipChangeData {
                 changes: vec![change],
                 replicas: vec![],
                 transition: 0,
             },
-        )
+        })
         .await
         .unwrap();
 
@@ -83,16 +85,16 @@ async fn test_single_step() {
                 change.node_id = i;
                 change.replica_id = i;
                 leader
-                    .membership(
+                    .conf_change(ConfChangeMessage {
                         group_id,
-                        None,
-                        None,
-                        MembershipChangeData {
+                        term: 0,
+                        context: None,
+                        data: MembershipChangeData {
                             changes: vec![change],
                             replicas: vec![],
                             transition: 0,
                         },
-                    )
+                    })
                     .await
                     .unwrap();
                 break;
@@ -181,7 +183,12 @@ async fn test_initial_joint_consensus() {
     change.set_replicas(vec![]);
 
     let _ = leader
-        .membership(group_id, None, None, change)
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: change,
+        })
         .await
         .unwrap();
 
@@ -233,7 +240,12 @@ async fn test_initial_joint_consensus() {
     // change.set_changes(vec![]);
     // change.set_replicas(vec![]);
     let _ = leader
-        .membership(group_id, None, None, change)
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: change,
+        })
         .await
         .unwrap();
     for _ in 0..10 {
@@ -322,15 +334,15 @@ async fn test_joint_consensus() {
     // write some commands
     for _ in 0..5 {
         let _ = leader
-            .write(
+            .write(WriteMessage {
                 group_id,
-                0,
-                None,
-                StoreData {
+                term: 0,
+                context: None,
+                propose: StoreData {
                     key: rand_string(4),
                     value: rand_string(8).into(),
                 },
-            )
+            })
             .await
             .unwrap();
     }
@@ -354,7 +366,12 @@ async fn test_joint_consensus() {
     change.set_replicas(vec![]);
 
     let _ = leader
-        .membership(group_id, None, None, change)
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: change,
+        })
         .await
         .unwrap();
 
@@ -415,7 +432,15 @@ async fn test_joint_consensus() {
     };
 
     tracing::info!("write guard");
-    let _ = leader.write(group_id, 0, None, data.clone()).await.unwrap();
+    let _ = leader
+        .write(WriteMessage {
+            group_id,
+            term: 0,
+            context: None,
+            propose: data.clone(),
+        })
+        .await
+        .unwrap();
 
     // for _ in 0..10 {
     //     cluster.tickers[0].non_blocking_tick();
@@ -493,7 +518,12 @@ async fn test_joint_consensus() {
     change.set_replicas(vec![]);
     change.set_transition(ConfChangeTransition::Auto);
     let _ = leader
-        .membership(group_id, None, None, change)
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: change,
+        })
         .await
         .unwrap();
     // for _ in 0..10 {
@@ -594,7 +624,12 @@ async fn test_remove() {
     };
     req.set_transition(ConfChangeTransition::Explicit);
     let _ = leader
-        .membership(group_id, None, None, req.clone())
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: req.clone(),
+        })
         .await
         .unwrap();
 
@@ -647,7 +682,12 @@ async fn test_remove() {
     change.set_changes(vec![]);
     change.set_replicas(vec![]);
     let _ = leader
-        .membership(group_id, None, None, change)
+        .conf_change(ConfChangeMessage {
+            group_id,
+            term: 0,
+            context: None,
+            data: change,
+        })
         .await
         .unwrap();
     for _ in 0..10 {

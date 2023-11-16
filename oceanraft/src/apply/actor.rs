@@ -9,24 +9,20 @@ use tracing::error;
 use tracing::info;
 use tracing::Span;
 
+use crate::apply::delegate::Delegate;
+use crate::msg::ApplyData;
+use crate::msg::ApplyMessage;
+use crate::msg::ApplyResult;
+use crate::msg::ApplyResultMessage;
 use crate::msg::NodeMessage;
-use crate::utils::mpsc;
-// use crate::Apply;
-// use crate::ApplyMembership;
-// use crate::ApplyNoOp;
-// use crate::ApplyNormal;
 use crate::rsm::StateMachine;
+use crate::storage::MultiRaftStorage;
+use crate::storage::RaftStorage;
+use crate::utils::mpsc;
 use crate::Config;
 use crate::GroupStates;
 use crate::ProposeRequest;
 use crate::ProposeResponse;
-
-use crate::apply::delegate::Delegate;
-use crate::msg::ApplyData;
-use crate::msg::ApplyMessage;
-use crate::msg::ApplyResultRequest;
-use crate::storage::MultiRaftStorage;
-use crate::storage::RaftStorage;
 
 #[derive(Debug, Default)]
 pub(super) struct LocalApplyState {
@@ -44,8 +40,6 @@ impl ApplyActor {
         shared_states: GroupStates,
         node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
         request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
-        // response_tx: UnboundedSender<ApplyResultRequest>,
-        // commit_tx: UnboundedSender<ApplyCommitRequest>,
         stopped: Arc<AtomicBool>,
     ) -> Self
     where
@@ -55,16 +49,7 @@ impl ApplyActor {
         S: RaftStorage,
         MS: MultiRaftStorage<S>,
     {
-        let worker = ApplyWorker::new(
-            cfg,
-            rsm,
-            storage,
-            shared_states,
-            request_rx,
-            node_msg_tx,
-            // response_tx,
-            // commit_tx,
-        );
+        let worker = ApplyWorker::new(cfg, rsm, storage, shared_states, request_rx, node_msg_tx);
         tokio::spawn(async move {
             worker.main_loop(stopped).await;
         });
@@ -84,7 +69,6 @@ where
     node_id: u64,
     cfg: Config,
     rx: UnboundedReceiver<(tracing::span::Span, ApplyMessage<R>)>,
-    // tx: UnboundedSender<ApplyResultRequest>,
     node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
 
     delegate: Delegate<W, R, RSM>,
@@ -102,19 +86,26 @@ where
     S: RaftStorage,
     MS: MultiRaftStorage<S>,
 {
-    #[inline]
-    fn insert_pending_apply(
-        applys: &mut HashMap<(u64, u64), Vec<ApplyData<R>>>,
-        group_id: u64,
-        replica_id: u64,
-        apply: ApplyData<R>,
-    ) {
-        match applys.get_mut(&(group_id, replica_id)) {
-            Some(applys) => applys.push(apply),
-            None => {
-                applys.insert((group_id, replica_id), vec![apply]);
-            }
-        };
+    fn new(
+        cfg: &Config,
+        rsm: &Arc<RSM>,
+        storage: MS,
+        shared_states: GroupStates,
+        request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
+        node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
+    ) -> Self {
+        Self {
+            local_apply_states: HashMap::default(),
+            node_id: cfg.node_id,
+            cfg: cfg.clone(),
+            rx: request_rx,
+            node_msg_tx: node_msg_tx.clone(),
+            // tx: response_tx,
+            shared_states: shared_states.clone(),
+            storage,
+            delegate: Delegate::new(cfg.node_id, rsm, node_msg_tx),
+            _m: PhantomData,
+        }
     }
 
     async fn main_loop(mut self, stopped: Arc<AtomicBool>) {
@@ -151,13 +142,17 @@ where
 
             let _ = self.delegate.handle_applys(applys, apply_state).await;
 
-            let res = ApplyResultRequest {
+            let apply_result = ApplyResultMessage::ApplyResult(ApplyResult {
                 group_id,
                 applied_index: apply_state.applied_index,
                 applied_term: apply_state.applied_term,
-            };
+            });
 
-            if let Err(_) = self.node_msg_tx.send(NodeMessage::ApplyResult(res)).await {
+            if let Err(_) = self
+                .node_msg_tx
+                .send(NodeMessage::ApplyResult(apply_result))
+                .await
+            {
                 error!(
                     "node {}: send response failed, the node actor dropped",
                     self.node_id
@@ -229,29 +224,19 @@ where
 
         pending_applys
     }
-
-    fn new(
-        cfg: &Config,
-        rsm: &Arc<RSM>,
-        storage: MS,
-        shared_states: GroupStates,
-        request_rx: UnboundedReceiver<(Span, ApplyMessage<R>)>,
-        node_msg_tx: mpsc::WrapSender<NodeMessage<W, R>>,
-        // response_tx: UnboundedSender<ApplyResultRequest>,
-        // commit_tx: UnboundedSender<ApplyCommitRequest>,
-    ) -> Self {
-        Self {
-            local_apply_states: HashMap::default(),
-            node_id: cfg.node_id,
-            cfg: cfg.clone(),
-            rx: request_rx,
-            node_msg_tx: node_msg_tx.clone(),
-            // tx: response_tx,
-            shared_states: shared_states.clone(),
-            storage,
-            delegate: Delegate::new(cfg.node_id, rsm, node_msg_tx),
-            _m: PhantomData,
-        }
+    #[inline]
+    fn insert_pending_apply(
+        applys: &mut HashMap<(u64, u64), Vec<ApplyData<R>>>,
+        group_id: u64,
+        replica_id: u64,
+        apply: ApplyData<R>,
+    ) {
+        match applys.get_mut(&(group_id, replica_id)) {
+            Some(applys) => applys.push(apply),
+            None => {
+                applys.insert((group_id, replica_id), vec![apply]);
+            }
+        };
     }
 }
 
@@ -267,7 +252,6 @@ mod test {
     use crate::rsm_event;
     use crate::rsm_event::GroupCreateEvent;
     use crate::rsm_event::LeaderElectionEvent;
-    use crate::state::GroupState;
     use crate::state::GroupStates;
     use crate::storage::MemStorage;
     use crate::storage::MultiRaftMemoryStorage;

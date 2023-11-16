@@ -84,7 +84,9 @@ impl ReadIndexQueue {
                 .expect("invalid read_context data");
 
             match self.queue.get_mut(self.ready_cnt) {
-                Some(read) if read.uuid == Uuid::from_bytes(read_ctx.uuid) => {
+                Some(read)
+                    if read.uuid == Uuid::from_bytes(read_ctx.uuid.expect("unreachable")) =>
+                {
                     read.read_index = Some(rs.index);
                     read.context = Some(read_ctx.clone());
                     self.ready_cnt += 1;

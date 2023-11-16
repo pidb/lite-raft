@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
@@ -9,14 +8,15 @@ use futures::Future;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::oneshot;
-use uuid::Uuid;
 
+use crate::msg::ConfChangeMessageWithSender;
 use crate::msg::InnerMessage;
 use crate::msg::MessageWithNotify;
 use crate::msg::NodeMessage;
+use crate::msg::ReadIndexMessageWithSender;
+use crate::msg::WriteMessageWithSender;
 use crate::node::NodeActor;
 use crate::prelude::CreateGroupRequest;
-use crate::prelude::MembershipChangeData;
 use crate::prelude::MultiRaftMessage;
 use crate::prelude::MultiRaftMessageResponse;
 use crate::protos::RemoveGroupRequest;
@@ -25,13 +25,9 @@ use crate::utils::mpsc;
 use super::config::Config;
 use super::error::ChannelError;
 use super::error::Error;
-// use super::msg::ManageMessage;
-use super::msg::MembershipRequest;
-// use super::msg::ProposeMessage;
-// use super::msg::QueryGroup;
-use super::msg::ReadIndexContext;
-use super::msg::ReadIndexRequest;
-use super::msg::WriteRequest;
+use super::msg::ConfChangeMessage;
+use super::msg::ReadIndexMessage;
+use super::msg::WriteMessage;
 use super::state::GroupStates;
 use super::storage::MultiRaftStorage;
 use super::storage::RaftStorage;
@@ -63,9 +59,9 @@ pub trait ProposeResponse: Debug + Clone + Send + Sync + 'static {}
 impl<T> ProposeResponse for T where T: Debug + Clone + Send + Sync + 'static {}
 
 pub trait MultiRaftTypeSpecialization {
-    type D: ProposeRequest;
-    type R: ProposeResponse;
-    type M: StateMachine<Self::D, Self::R>;
+    type Request: ProposeRequest;
+    type Response: ProposeResponse;
+    type M: StateMachine<Self::Request, Self::Response>;
     type S: RaftStorage;
     type MS: MultiRaftStorage<Self::S>;
 }
@@ -128,9 +124,8 @@ where
     cfg: Config,
     node_id: u64,
     stopped: Arc<AtomicBool>,
-    actor: Mutex<Option<NodeActor<T::D, T::R>>>,
+    actor: Mutex<Option<NodeActor<T::Request, T::Response>>>,
     shared_states: GroupStates,
-    // event_bcast: EventChannel,
     storage: T::MS,
     transport: TR,
     state_machine: Mutex<Option<T::M>>,
@@ -153,7 +148,6 @@ where
         cfg.validate()?;
         let node_id = cfg.node_id;
         let states = GroupStates::new();
-        // let event_bcast = EventChannel::new(cfg.event_capacity);
         let stopped = Arc::new(AtomicBool::new(false));
 
         Ok(Self {
@@ -239,32 +233,11 @@ where
     /// the proposal is successfully applied to the state machine  and the `RES and
     /// `context` are returned through the state machine created. If the proposal
     /// fails, an error is returned.
-    ///
-    /// ## Parameters
-    /// - `group_id`: The specific consensus group to write to.
-    /// - `term`: The expected term when writing. If the term of the raft log
-    /// during application is less than this term, a "Stale" error is returned.
-    /// - `context`: The context of the proposal. This information is not
-    /// recorded in the raft log, but the context data will go through a
-    /// complete write process.
-    /// - `propose`: The proposed data, which implements the `ProposeData` type.
-    /// This data will be recorded in the raft log.
-    ///
-    /// ## Errors
-    /// Most errors require retries. The following error requires a different
-    /// handling approach:
-    /// - `ProposeError::NotLeader`: The application can refresh the leader and
-    /// retry based on the error information using the route table.
-    ///
-    /// ## Panics
     pub async fn write(
         &self,
-        group_id: u64,
-        term: u64,
-        context: Option<Vec<u8>>,
-        propose: T::D,
-    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
-        let rx = self.write_non_block(group_id, term, context, propose)?;
+        msg: WriteMessage<T::Request>,
+    ) -> Result<(T::Response, Option<Vec<u8>>), Error> {
+        let rx = self.write_non_block(msg)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -274,12 +247,9 @@ where
 
     pub fn write_block(
         &self,
-        group_id: u64,
-        term: u64,
-        context: Option<Vec<u8>>,
-        data: T::D,
-    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
-        let rx = self.write_non_block(group_id, term, context, data)?;
+        msg: WriteMessage<T::Request>,
+    ) -> Result<(T::Response, Option<Vec<u8>>), Error> {
+        let rx = self.write_non_block(msg)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the write was dropped".to_owned(),
@@ -306,61 +276,28 @@ where
 
     pub fn write_non_block(
         &self,
-        group_id: u64,
-        term: u64,
-        context: Option<Vec<u8>>,
-        data: T::D,
-    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
-        let _ = self.pre_propose_check(group_id)?;
+        msg: WriteMessage<T::Request>,
+    ) -> Result<oneshot::Receiver<Result<(T::Response, Option<Vec<u8>>), Error>>, Error> {
+        let _ = self.pre_propose_check(msg.group_id)?;
 
         let (tx, rx) = oneshot::channel();
 
-        let msg = NodeMessage::Write(WriteRequest {
-            group_id,
-            term,
-            propose: data,
-            context,
-            tx,
-        });
+        let msg = NodeMessage::Write(WriteMessageWithSender { msg, tx });
 
-        let mut actor = self.actor.lock().expect("lock actor");
+        let actor = self.actor.lock().expect("lock actor");
         actor
             .as_ref()
             .expect("actor is none")
             .try_send_node_msg(msg)?;
 
         Ok(rx)
-        // match self
-        //     .actor
-        //     .borrow()
-        //     .as_ref()
-        //     .unwrap()
-        //     .node_msg_tx
-        //     .try_send(NodeMessage::Write(WriteRequest {
-        //         group_id,
-        //         term,
-        //         data,
-        //         context,
-        //         tx,
-        //     })) {
-        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-        //         "channel no avaiable capacity for write".to_owned(),
-        //     ))),
-        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
-        //         ChannelError::ReceiverClosed("channel receiver closed for write".to_owned()),
-        //     )),
-        //     Ok(_) => Ok(rx),
-        // }
     }
 
-    pub async fn membership(
+    pub async fn conf_change(
         &self,
-        group_id: u64,
-        term: Option<u64>,
-        context: Option<Vec<u8>>,
-        data: MembershipChangeData,
-    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
-        let rx = self.membership_non_block(group_id, term, context, data)?;
+        msg: ConfChangeMessage,
+    ) -> Result<(T::Response, Option<Vec<u8>>), Error> {
+        let rx = self.conf_change_non_block(msg)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -368,14 +305,11 @@ where
         })?
     }
 
-    pub fn membership_block(
+    pub fn conf_change_block(
         &self,
-        group_id: u64,
-        term: Option<u64>,
-        context: Option<Vec<u8>>,
-        data: MembershipChangeData,
-    ) -> Result<(T::R, Option<Vec<u8>>), Error> {
-        let rx = self.membership_non_block(group_id, term, context, data)?;
+        msg: ConfChangeMessage,
+    ) -> Result<(T::Response, Option<Vec<u8>>), Error> {
+        let rx = self.conf_change_non_block(msg)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the membership change was dropped".to_owned(),
@@ -383,26 +317,17 @@ where
         })?
     }
 
-    pub fn membership_non_block(
+    pub fn conf_change_non_block(
         &self,
-        group_id: u64,
-        term: Option<u64>,
-        context: Option<Vec<u8>>,
-        data: MembershipChangeData,
-    ) -> Result<oneshot::Receiver<Result<(T::R, Option<Vec<u8>>), Error>>, Error> {
-        let _ = self.pre_propose_check(group_id)?;
+        msg: ConfChangeMessage,
+    ) -> Result<oneshot::Receiver<Result<(T::Response, Option<Vec<u8>>), Error>>, Error> {
+        let _ = self.pre_propose_check(msg.group_id)?;
 
         let (tx, rx) = oneshot::channel();
 
-        let request = MembershipRequest {
-            group_id,
-            term,
-            context,
-            data,
-            tx,
-        };
+        let request = ConfChangeMessageWithSender { msg, tx };
 
-        let msg = NodeMessage::Membership(request);
+        let msg = NodeMessage::ConfChange(request);
         let actor = self.actor.lock().expect("lock actor");
         actor
             .as_ref()
@@ -419,30 +344,8 @@ where
     /// successfully, it returns the associated `context`, and at this point, the
     /// caller can **safely** read data from the state machine. If it fails, an
     /// error is returned.
-
-    /// ## Parameters
-    /// - `group_id`: The specific group to read from.
-    /// - `context`: The context associated with the read. The context goes through
-    /// the context pipeline during the read.
-    ///
-    /// ## Notes
-    /// read_index implements the approach described in the Raft paper where read
-    /// requests do not need to be written to the Raft log, avoiding the cost of
-    /// writing to disk.
-    ///
-    /// ## Errors
-    /// Most errors require retries. The following error requires a different
-    /// handling approach:
-    /// - `ProposeError::NotLeader`: The application can refresh the leader and
-    /// retry based on the error information using the route table.
-    ///
-    /// ## Panics
-    pub async fn read_index(
-        &self,
-        group_id: u64,
-        context: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let rx = self.read_index_non_block(group_id, context)?;
+    pub async fn read_index(&self, msg: ReadIndexMessage) -> Result<Option<Vec<u8>>, Error> {
+        let rx = self.read_index_non_block(msg)?;
         rx.await.map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the read_index change was dropped".to_owned(),
@@ -450,12 +353,8 @@ where
         })?
     }
 
-    pub fn read_index_block(
-        &self,
-        group_id: u64,
-        context: Option<Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let rx = self.read_index_non_block(group_id, context)?;
+    pub fn read_index_block(&self, msg: ReadIndexMessage) -> Result<Option<Vec<u8>>, Error> {
+        let rx = self.read_index_non_block(msg)?;
         rx.blocking_recv().map_err(|_| {
             Error::Channel(ChannelError::SenderClosed(
                 "the sender that result the read_index was dropped".to_owned(),
@@ -465,18 +364,10 @@ where
 
     pub fn read_index_non_block(
         &self,
-        group_id: u64,
-        context: Option<Vec<u8>>,
+        msg: ReadIndexMessage,
     ) -> Result<oneshot::Receiver<Result<Option<Vec<u8>>, Error>>, Error> {
         let (tx, rx) = oneshot::channel();
-        let msg = NodeMessage::ReadIndexData(ReadIndexRequest {
-            group_id,
-            context: ReadIndexContext {
-                uuid: Uuid::new_v4().into_bytes(),
-                context,
-            },
-            tx,
-        });
+        let msg = NodeMessage::ReadIndex(ReadIndexMessageWithSender { msg, tx });
 
         let actor = self.actor.lock().expect("lock actor");
         actor
@@ -485,24 +376,6 @@ where
             .try_send_node_msg(msg)?;
 
         Ok(rx)
-        // match self.actor.borrow().as_ref().unwrap().node_msg_tx.try_send(
-        //     NodeMessage::ReadIndexData(ReadIndexRequest {
-        //         group_id,
-        //         context: ReadIndexContext {
-        //             uuid: Uuid::new_v4().into_bytes(),
-        //             context,
-        //         },
-        //         tx,
-        //     }),
-        // ) {
-        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-        //         "channel no available capacity for read_index".to_owned(),
-        //     ))),
-        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
-        //         ChannelError::ReceiverClosed("channel receiver closed for read_index".to_owned()),
-        //     )),
-        //     Ok(_) => Ok(rx),
-        // }
     }
 
     /// Campaign and wait raft group by given `group_id`.
@@ -565,7 +438,7 @@ where
         })?
     }
 
-    fn management_request(&self, msg: NodeMessage<T::D, T::R>) -> Result<(), Error> {
+    fn management_request(&self, msg: NodeMessage<T::Request, T::Response>) -> Result<(), Error> {
         let actor = self.actor.lock().expect("lock actor");
         actor
             .as_ref()
