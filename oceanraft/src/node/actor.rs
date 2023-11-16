@@ -36,11 +36,11 @@ use crate::error::ChannelError;
 use crate::error::Error;
 use crate::error::RaftGroupError;
 // use crate::event::EventChannel;
-use crate::msg::ApplyCommitRequest;
+use crate::msg::ApplyConfChange;
 use crate::msg::ApplyData;
 use crate::msg::ApplyMessage;
+use crate::msg::ApplyResultMessage;
 use crate::msg::ApplyResultRequest;
-use crate::msg::CommitMembership;
 use crate::multiraft::NO_GORUP;
 use crate::node::NodeManager;
 use crate::replica_cache::ReplicaCache;
@@ -541,11 +541,11 @@ where
         );
     }
 
-    async fn handle_apply_commit(&mut self, commit: ApplyCommitRequest) {
-        match commit {
-            ApplyCommitRequest::None => return,
-            ApplyCommitRequest::Membership((commit, tx)) => {
-                let group_id = commit.group_id;
+    async fn handle_apply_commit(&mut self, msg: ApplyResultMessage) {
+        match msg {
+            ApplyResultMessage::None => return,
+            ApplyResultMessage::ApplyConfChange((cc, tx)) => {
+                let group_id = cc.group_id;
                 let group = match self.groups.get_mut(&group_id) {
                     Some(group) => group,
                     None => {
@@ -571,7 +571,7 @@ where
                     &mut self.replica_cache,
                 );
 
-                let res = delegate.handle(commit).await;
+                let res = delegate.handle(cc).await;
 
                 // let res = self.commit_membership_change(commit).await;
                 self.pending_responses
@@ -582,7 +582,7 @@ where
 
     async fn commit_membership_change(
         &mut self,
-        mut view: CommitMembership,
+        mut view: ApplyConfChange,
     ) -> Result<ConfState, Error> {
         if view.change_request.is_none() && view.conf_change.leave_joint() {
             tracing::info!("now leave ccv2");
@@ -671,7 +671,7 @@ where
         &mut self,
         // group_id: u64,
         // group: &mut RaftGroup<RS, RES>,
-        view: CommitMembership,
+        view: ApplyConfChange,
     ) -> Result<ConfState, Error> {
         let group_id = view.group_id;
         let group = match self.groups.get_mut(&group_id) {

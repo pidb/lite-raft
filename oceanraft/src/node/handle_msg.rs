@@ -91,6 +91,11 @@ where
         }
     }
 
+    #[tracing::instrument(
+        name = "NodeActor::handle_conf_change_msg",
+        level = tracing::Level::TRACE,
+        skip_all,
+    )]
     pub(super) fn handle_membership_msg(
         &mut self,
         msg: MembershipRequest<RES>,
@@ -110,7 +115,7 @@ where
             }
             Some(group) => {
                 self.active_groups.insert(group_id);
-                group.propose_membership_change(msg)
+                group.propose_conf_change(msg)
             }
         }
     }

@@ -15,10 +15,10 @@ use tracing::trace;
 use crate::apply::actor::LocalApplyState;
 use crate::error::ChannelError;
 use crate::error::DeserializationError;
-use crate::msg::ApplyCommitRequest;
+use crate::msg::ApplyConfChange;
 use crate::msg::ApplyData;
 use crate::msg::ApplyDataMeta;
-use crate::msg::CommitMembership;
+use crate::msg::ApplyResultMessage;
 use crate::msg::MembershipRequestContext;
 use crate::msg::NodeMessage;
 use crate::prelude::ConfChange;
@@ -230,30 +230,6 @@ where
         return None;
     }
 
-    /// Commit memberhsip change to specific raft group.
-    async fn commit_membership_change(&self, commit: CommitMembership) -> Result<ConfState, Error> {
-        let (tx, rx) = oneshot::channel();
-
-        if let Err(_) = self
-            .node_msg_tx
-            .send(NodeMessage::ApplyCommit(ApplyCommitRequest::Membership((
-                commit, tx,
-            ))))
-            .await
-        {
-            return Err(Error::Channel(ChannelError::ReceiverClosed(
-                "node actor dropped".to_owned(),
-            )));
-        }
-
-        // TODO: got conf state from commit to raft and save to self.
-        let conf_state = rx.await.map_err(|_| {
-            Error::Channel(ChannelError::SenderClosed("node actor dropped".to_owned()))
-        })??;
-
-        Ok(conf_state)
-    }
-
     pub(super) async fn handle_applys(
         &mut self,
         applys: Vec<ApplyData<R>>,
@@ -400,6 +376,16 @@ where
         }))
     }
 
+    #[tracing::instrument(
+        name = "ApplyActor::handle_conf_change",
+        skip_all,
+        fields(
+            group_id = meta.group_id,
+            index = ent.index,
+            term = ent.term,
+            entry_type = ?ent.entry_type(),
+        )
+    )]
     async fn handle_conf_change(
         &mut self,
         meta: &ApplyDataMeta,
@@ -407,20 +393,6 @@ where
     ) -> Option<rsm_event::Apply<W, R>> {
         let index = ent.index;
         let term = ent.term;
-
-        // When ConfChangeV2's transition type is Explicit/Auto, an empty v2 change is sent to
-        // get the union consensus to leave the union point, so this case needs to be handled.
-
-        // if ent.data.is_empty() && ent.entry_type() == EntryType::EntryConfChangeV2 {
-        //     let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
-        //     assert_eq!(tx.is_none(), true);
-        //     return Some(rsm_event::Apply::NoOp(rsm_event::ApplyNoOp {
-        //         group_id: meta.group_id,
-        //         index,
-        //         term,
-        //     }));
-        // }
-
         let tx = self.find_pending(term, index, true).map_or(None, |p| p.tx);
         let (conf_change, mut request_ctx) = match parse_conf_change(&ent) {
             Err(err) => {
@@ -442,14 +414,14 @@ where
             .as_ref()
             .map_or(None, |request_ctx| Some(request_ctx.data.clone()));
 
-        // apply the membership changes of apply to oceanraft and raft group first.
+        // apply the conf changes of apply to oceanraft and raft group first.
         // It doesn't matter if the user state machine then fails to apply,
         // because we set the applied index based on the index successfully
         // applied by the user and then promote the raft based on that applied index,
         // so the user can apply the log later. For oceanraft and raft,
         // we make the commit an idempotent operation (TODO).
         let conf_state = match self
-            .commit_membership_change(CommitMembership {
+            .apply_conf_change_to_group(ApplyConfChange {
                 group_id: meta.group_id,
                 index,
                 term,
@@ -488,7 +460,33 @@ where
         }))
     }
 
-    async fn leave_joint(&mut self, meta: &ApplyDataMeta, ent: Entry) {}
+    /// apply conf change to specific raft group.
+    #[tracing::instrument(name = "ApplyActor::apply_conf_change_to_group", skip_all)]
+    async fn apply_conf_change_to_group(
+        &self,
+        commit: ApplyConfChange,
+    ) -> Result<ConfState, Error> {
+        let (tx, rx) = oneshot::channel();
+
+        if let Err(_) = self
+            .node_msg_tx
+            .send(NodeMessage::ApplyCommit(
+                ApplyResultMessage::ApplyConfChange((commit, tx)),
+            ))
+            .await
+        {
+            return Err(Error::Channel(ChannelError::ReceiverClosed(
+                "node actor dropped".to_owned(),
+            )));
+        }
+
+        // TODO: got conf state from commit to raft and save to self.
+        let conf_state = rx.await.map_err(|_| {
+            Error::Channel(ChannelError::SenderClosed("node actor dropped".to_owned()))
+        })??;
+
+        Ok(conf_state)
+    }
 }
 
 /// Parse out ConfChangeV2 and MembershipChangeData from entry.

@@ -409,22 +409,6 @@ where
             .expect("actor is none")
             .try_send_node_msg(msg)?;
         Ok(rx)
-        // match self
-        //     .actor
-        //     .borrow()
-        //     .as_ref()
-        //     .unwrap()
-        //     .node_msg_tx
-        //     .try_send(NodeMessage::Membership(request))
-        // {
-        //     Err(mpsc::TrySendError::Full(_)) => Err(Error::Channel(ChannelError::Full(
-        //         "channel no available capacity for memberhsip".to_owned(),
-        //     ))),
-        //     Err(mpsc::TrySendError::Closed(_)) => Err(Error::Channel(
-        //         ChannelError::ReceiverClosed("channel receiver closed for membership".to_owned()),
-        //     )),
-        //     Ok(_) => Ok(rx),
-        // }
     }
 
     /// `read_index` is use **read_index algorithm** to read data

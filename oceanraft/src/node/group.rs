@@ -5,6 +5,7 @@ use raft::RaftLog;
 use raft::RawNode;
 use raft::Ready;
 use raft::StateRole;
+use tracing::debug;
 use tracing::error;
 use uuid::Uuid;
 
@@ -273,7 +274,7 @@ where
         None
     }
 
-    fn pre_propose_membership(&mut self, request: &MembershipRequest<RES>) -> Result<(), Error> {
+    fn pre_propose_conf_change(&mut self, request: &MembershipRequest<RES>) -> Result<(), Error> {
         if self.raft_group.raft.has_pending_conf() {
             return Err(Error::Propose(ProposeError::MembershipPending(
                 self.node_id,
@@ -305,17 +306,21 @@ where
         Ok(())
     }
 
-    pub fn propose_membership_change(
+    #[tracing::instrument(
+        name = "RaftGroup::propose_conf_change",
+        level = tracing::Level::TRACE,
+        skip_all,
+        fields(node_id=self.node_id, group_id=request.group_id),
+   )]
+    pub(crate) fn propose_conf_change(
         &mut self,
         request: MembershipRequest<RES>,
     ) -> Option<ResponseCallback> {
-        // TODO: add pre propose check
-        if let Err(err) = self.pre_propose_membership(&request) {
+        if let Err(err) = self.pre_propose_conf_change(&request) {
             return Some(ResponseCallbackQueue::new_error_callback(request.tx, err));
         }
 
         let term = self.term();
-
         let next_index = self.last_index() + 1;
 
         let res = if request.data.changes.len() == 1 {
@@ -330,7 +335,7 @@ where
         if let Err(err) = res {
             error!(
                 "node {}: propose membership change error: error = {}",
-                0, /* TODO: add it*/ err
+                self.node_id, err
             );
             return Some(ResponseCallbackQueue::new_error_callback(
                 request.tx,
@@ -342,7 +347,7 @@ where
         if next_index == index {
             error!(
                 "node {}: propose membership failed, expect log index = {}, got = {}",
-                0, /* TODO: add it*/
+                self.node_id,
                 next_index,
                 index - 1,
             );
@@ -367,6 +372,11 @@ where
         };
 
         self.proposals.push(proposal);
+
+        debug!(
+            "node {}: group-{} replica-{} propose conf change {}",
+            self.node_id, self.group_id, self.replica_id, next_index
+        );
         None
     }
 

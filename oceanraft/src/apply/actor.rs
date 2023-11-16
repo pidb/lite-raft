@@ -1,21 +1,12 @@
 use std::collections::HashMap;
-use std::collections::VecDeque;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use prost::Message;
-use raft::prelude::ConfChangeTransition;
-use raft::prelude::ConfState;
-use raft::prelude::Entry;
-use raft_proto::ConfChangeI;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::oneshot;
 use tracing::error;
 use tracing::info;
-use tracing::trace;
 use tracing::Span;
 
 use crate::msg::NodeMessage;
@@ -25,32 +16,17 @@ use crate::utils::mpsc;
 // use crate::ApplyNoOp;
 // use crate::ApplyNormal;
 use crate::rsm::StateMachine;
-use crate::rsm_event;
 use crate::Config;
-use crate::Error;
-use crate::GroupState;
 use crate::GroupStates;
-use crate::ProposeError;
 use crate::ProposeRequest;
 use crate::ProposeResponse;
 
-use crate::error::ChannelError;
-use crate::error::DeserializationError;
-use crate::msg::ApplyCommitRequest;
+use crate::apply::delegate::Delegate;
 use crate::msg::ApplyData;
 use crate::msg::ApplyMessage;
 use crate::msg::ApplyResultRequest;
-use crate::msg::CommitMembership;
-use crate::msg::MembershipRequestContext;
-use crate::prelude::ConfChange;
-use crate::prelude::ConfChangeV2;
-use crate::prelude::EntryType;
-use crate::proposal::Proposal;
 use crate::storage::MultiRaftStorage;
 use crate::storage::RaftStorage;
-use crate::utils::flexbuffer_deserialize;
-
-use crate::apply::delegate::Delegate;
 
 #[derive(Debug, Default)]
 pub(super) struct LocalApplyState {

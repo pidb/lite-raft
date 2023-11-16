@@ -4,7 +4,7 @@ use tracing::info;
 use tracing::warn;
 
 use crate::error::Error;
-use crate::msg::CommitMembership;
+use crate::msg::ApplyConfChange;
 use crate::prelude::ConfChangeType;
 use crate::prelude::ConfState;
 use crate::prelude::ReplicaDesc;
@@ -51,14 +51,13 @@ where
         }
     }
 
-    pub(super) async fn handle(&mut self, mut view: CommitMembership) -> Result<ConfState, Error>
+    pub(super) async fn handle(&mut self, mut view: ApplyConfChange) -> Result<ConfState, Error>
     where
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,
         RES: ProposeResponse,
     {
         if view.change_request.is_none() && view.conf_change.leave_joint() {
-            info!("now leave ccv2");
             return self.apply(&view).await;
         }
 
@@ -73,7 +72,7 @@ where
         // so we catch the error and skip.
         let conf = self.group.raft_group.raft.prs().conf().to_conf_state();
         if view.conf_change.enter_joint().is_some() && !conf.voters_outgoing.is_empty() {
-            debug!(
+            info!(
                 "node {}: for group {} replica {} skip alreay entered joint conf_change {:?}",
                 self.node_id, group_id, self.group.replica_id, view.conf_change
             );
@@ -86,7 +85,7 @@ where
         return Ok(conf);
     }
 
-    async fn apply(&mut self, view: &CommitMembership) -> Result<ConfState, Error>
+    async fn apply(&mut self, view: &ApplyConfChange) -> Result<ConfState, Error>
     where
         RS: RaftStorage,
         RES: ProposeResponse,
@@ -112,7 +111,7 @@ where
         return Ok(conf_state);
     }
 
-    async fn post_apply(&mut self, view: &mut CommitMembership)
+    async fn post_apply(&mut self, view: &mut ApplyConfChange)
     where
         RS: RaftStorage,
         MRS: MultiRaftStorage<RS>,

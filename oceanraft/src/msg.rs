@@ -78,31 +78,39 @@ pub struct ApplyResultRequest {
 }
 
 #[derive(Debug)]
-pub enum ApplyCommitRequest {
+pub enum ApplyResultMessage {
     None,
-    Membership((CommitMembership, oneshot::Sender<Result<ConfState, Error>>)),
+    ApplyConfChange((ApplyConfChange, oneshot::Sender<Result<ConfState, Error>>)),
 }
 
-impl Default for ApplyCommitRequest {
+impl Default for ApplyResultMessage {
     fn default() -> Self {
-        ApplyCommitRequest::None
+        ApplyResultMessage::None
     }
 }
 
-// pub enum ProposeMessage<REQ, RES>
-// where
-//     REQ: ProposeRequest,
-//     RES: ProposeResponse,
-// {
-//     Write(WriteRequest<REQ, RES>),
-//     Membership(MembershipRequest<RES>),
-//     ReadIndexData(ReadIndexData),
-// }
+/// Apply conf change results.
+///
+/// If proposed change is ConfChange, the ConfChangeV2 is converted
+/// from ConfChange. If ConfChangeV2 is used, changes contains multiple
+/// requests, otherwise changes contains only one request.
+#[derive(Debug, Clone)]
+pub struct ApplyConfChange {
+    /// Specific group.
+    pub group_id: u64,
 
-// pub enum ManageMessage {
-//     CreateGroup(CreateGroupRequest, oneshot::Sender<Result<(), Error>>),
-//     RemoveGroup(RemoveGroupRequest, oneshot::Sender<Result<(), Error>>),
-// }
+    /// Entry index.
+    pub index: u64,
+
+    /// Entry term.
+    pub term: u64,
+
+    /// Conf change.
+    pub conf_change: ConfChangeV2,
+
+    /// Specific change request data from the client.
+    pub change_request: Option<MembershipChangeData>,
+}
 
 pub enum NodeMessage<REQ, RES>
 where
@@ -118,7 +126,7 @@ where
     RemoveGroup(MessageWithNotify<RemoveGroupRequest, Result<(), Error>>),
     Inner(InnerMessage),
     ApplyResult(ApplyResultRequest),
-    ApplyCommit(ApplyCommitRequest),
+    ApplyCommit(ApplyResultMessage),
 }
 
 #[allow(unused)]
@@ -175,29 +183,6 @@ where
     Apply {
         applys: HashMap<u64, ApplyData<RES>>,
     },
-}
-
-/// Commit membership change results.
-///
-/// If proposed change is ConfChange, the ConfChangeV2 is converted
-/// from ConfChange. If ConfChangeV2 is used, changes contains multiple
-/// requests, otherwise changes contains only one request.
-#[derive(Debug, Clone)]
-pub struct CommitMembership {
-    /// Specific group.
-    pub group_id: u64,
-
-    /// Entry index.
-    pub index: u64,
-
-    /// Entry term.
-    pub term: u64,
-
-    /// Conf change.
-    pub conf_change: ConfChangeV2,
-
-    /// Specific change request data from the client.
-    pub change_request: Option<MembershipChangeData>,
 }
 
 /// An internal structure to query raft internal status in
