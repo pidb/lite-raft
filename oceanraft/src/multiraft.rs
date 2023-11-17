@@ -180,7 +180,6 @@ where
             &self.transport,
             &self.storage,
             state_machine,
-            // &self.event_bcast,
             ticker,
             self.shared_states.clone(),
             self.stopped.clone(),

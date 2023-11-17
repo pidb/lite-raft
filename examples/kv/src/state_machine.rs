@@ -1,47 +1,30 @@
 use std::future::Future;
 
+use oceanraft::rsm_event;
+use oceanraft::rsm_event::ApplyEvent;
 use oceanraft::storage::MultiRaftStorage;
-use oceanraft::storage::RockStore;
 use oceanraft::storage::StorageExt;
-use oceanraft::Apply;
 use oceanraft::StateMachine;
 
+use crate::server::KVServer;
 use crate::server::{KVData, KVResponse};
-use crate::storage::MemKvStorage;
 
-pub struct KVStateMachine {
-    storage: RockStore<MemKvStorage, MemKvStorage>,
-    kv_storage: MemKvStorage,
-}
-
-impl KVStateMachine {
-    pub fn new(storage: RockStore<MemKvStorage, MemKvStorage>, kv_storage: MemKvStorage) -> Self {
-        Self {
-            storage,
-            kv_storage,
-        }
-    }
-}
-
-impl StateMachine<KVData, KVResponse> for KVStateMachine {
+impl StateMachine<KVData, KVResponse> for KVServer {
     type ApplyFuture<'life0> = impl Future<Output = ()> + 'life0;
     fn apply<'life0>(
         &'life0 self,
-        group_id: u64,
-        replica_id: u64,
-        state: &oceanraft::GroupState,
-        applys: Vec<Apply<KVData, KVResponse>>,
+        event: ApplyEvent<KVData, KVResponse>,
     ) -> Self::ApplyFuture<'life0> {
         async move {
-            for apply in applys {
+            for apply in event.applys {
                 let apply_index = apply.get_index();
                 println!(
                     "group({}), replica({}) apply index = {}",
-                    group_id, replica_id, apply_index
+                    event.group_id, event.replica_id, apply_index
                 );
                 match apply {
-                    Apply::NoOp(_) => {}
-                    Apply::Normal(mut apply) => {
+                    rsm_event::Apply::NoOp(_) => {}
+                    rsm_event::Apply::Normal(mut apply) => {
                         let res = KVResponse {
                             index: apply_index,
                             term: apply.term,
@@ -52,7 +35,7 @@ impl StateMachine<KVData, KVResponse> for KVStateMachine {
                             .tx
                             .map(|tx| tx.send(Ok((res, apply.context.take()))).unwrap());
                     }
-                    Apply::Membership(apply) => {
+                    rsm_event::Apply::Membership(apply) => {
                         apply.tx.map(|tx| {
                             tx.send(Ok((
                                 KVResponse {
@@ -66,12 +49,28 @@ impl StateMachine<KVData, KVResponse> for KVStateMachine {
                 }
                 // TODO: consider more easy api
                 let gs = self
-                    .storage
-                    .group_storage(group_id, replica_id)
+                    .log_storage
+                    .group_storage(event.group_id, event.replica_id)
                     .await
                     .unwrap();
                 gs.set_applied(apply_index).unwrap();
             }
         }
+    }
+
+    type OnLeaderElectionFuture<'life0> = impl Future<Output = ()> + 'life0;
+    fn on_leader_election<'life0>(
+        &'life0 self,
+        event: oceanraft::rsm_event::LeaderElectionEvent,
+    ) -> Self::OnLeaderElectionFuture<'life0> {
+        async move { todo!() }
+    }
+
+    type OnGroupCreateFuture<'life0> = impl Future<Output = ()> + 'life0;
+    fn on_group_create<'life0>(
+        &'life0 self,
+        event: oceanraft::rsm_event::GroupCreateEvent,
+    ) -> Self::OnGroupCreateFuture<'life0> {
+        async move { todo!() }
     }
 }

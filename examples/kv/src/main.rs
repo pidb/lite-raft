@@ -23,7 +23,6 @@ async fn main() {
     }
 
     let mut server = server::KVServer::new(arg).await.unwrap();
-    server.event_consumer();
     server.start().await;
 
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;

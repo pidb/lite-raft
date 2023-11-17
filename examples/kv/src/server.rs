@@ -18,8 +18,10 @@ use oceanraft::storage::Storage;
 use oceanraft::storage::StorageExt;
 use oceanraft::transport::MultiRaftServiceImpl;
 use oceanraft::transport::MultiRaftServiceServer;
+use oceanraft::ConfChangeMessage;
 use oceanraft::Config;
 use oceanraft::MultiRaft;
+use oceanraft::WriteMessage;
 use tokio::task::JoinHandle;
 use tonic::transport::Server;
 use tonic::Request;
@@ -32,7 +34,6 @@ use crate::grpc::kv_service_server::KvService;
 use crate::grpc::kv_service_server::KvServiceServer;
 use crate::grpc::PutRequest;
 use crate::grpc::PutResponse;
-use crate::state_machine::KVStateMachine;
 use crate::storage::MemKvStorage;
 use crate::transport::GRPCTransport;
 
@@ -42,7 +43,7 @@ define_multiraft! {
     pub KVAppType:
         Request =  KVData,
         Response = KVResponse,
-        M = KVStateMachine,
+        M = KVServer,
         S = RockStoreCore<MemKvStorage, MemKvStorage>,
         MS = RockStore<MemKvStorage, MemKvStorage>
 }
@@ -72,15 +73,15 @@ impl KvService for KvServiceImpl {
         let group_id = partition(&put_req.key, 3);
         let res = self
             .multiraft
-            .write(
+            .write(WriteMessage {
                 group_id,
-                0,
-                None,
-                KVData {
+                term: 0,
+                context: None,
+                propose: KVData {
                     key: put_req.key.clone(),
                     value: put_req.value.clone(),
                 },
-            )
+            })
             .await;
         println!("group_id = {}, req = {:?}", group_id, put_req);
         let mut resp = PutResponse::default();
@@ -104,12 +105,13 @@ pub struct KVServer {
     // Mapping nodes to network addr.
     peers: Arc<Vec<(u64, String)>>,
 
-    kv_storage: MemKvStorage,
+    pub(super) kv_storage: MemKvStorage,
 
-    log_storage: RockStore<MemKvStorage, MemKvStorage>,
+    pub(crate) log_storage: RockStore<MemKvStorage, MemKvStorage>,
 
     multiraft: Arc<MultiRaft<KVAppType, GRPCTransport>>,
 
+    leader_election_rx: Option<tokio::sync::watch::Receiver<Option<u64>>>,
     jh: Option<JoinHandle<Result<(), tonic::transport::Error>>>,
 }
 
@@ -131,8 +133,8 @@ impl KVServer {
         );
 
         // create multiraft bussiness statemachine
-        let kv_state_machine = KVStateMachine::new(rock_storage.clone(), kv_storage.clone());
 
+        let kv_state_machine = KVStateMachine::new(rock_storage.clone(), kv_storage.clone());
         // create multiraft transport
         let grpc_transport = GRPCTransport::new(peers.clone());
 
@@ -148,6 +150,7 @@ impl KVServer {
 
         let node_id = arg.node_id;
         let server = Self {
+            leader_election_rx: None,
             arg: arg.clone(),
             peers: peers.clone(),
             node_id,
@@ -328,10 +331,13 @@ impl KVServer {
             change
         });
 
-        let term = None;
-        let context = None;
         self.multiraft
-            .conf_change(group_id, term, context, data)
+            .conf_change(ConfChangeMessage {
+                group_id,
+                term: 0,
+                context: None,
+                data,
+            })
             .await
             .map_err(|err| anyhow!("{}", err))
     }
@@ -373,25 +379,6 @@ impl KVServer {
             }
         }
         Ok(())
-    }
-
-    pub fn event_consumer(&self) {
-        let rx = self.multiraft.subscribe();
-        tokio::spawn(async move {
-            loop {
-                let event = match rx.recv().await {
-                    Err(_error) => break,
-                    Ok(e) => e,
-                };
-
-                match event {
-                    oceanraft::Event::LederElection(_event) => {
-                        // TODO: check and add members if need
-                    }
-                    _ => {}
-                }
-            }
-        });
     }
 
     /// Start server in spearted tokio task.
